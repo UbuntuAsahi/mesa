@@ -97,6 +97,10 @@ struct agx_bo {
 
    /* For debugging */
    const char *label;
+
+   /* virtio blob_id */
+   uint32_t blob_id;
+   uint32_t vbo_res_id;
 };
 
 struct agx_bo *agx_bo_create_aligned(struct agx_device *dev, unsigned size,
@@ -115,8 +119,6 @@ struct agx_bo *agx_bo_import(struct agx_device *dev, int fd);
 int agx_bo_export(struct agx_bo *bo);
 
 void agx_bo_free(struct agx_device *dev, struct agx_bo *bo);
-struct agx_bo *agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
-                            enum agx_bo_flags flags);
 struct agx_bo *agx_bo_cache_fetch(struct agx_device *dev, size_t size,
                                   size_t align, uint32_t flags,
                                   const bool dontwait);

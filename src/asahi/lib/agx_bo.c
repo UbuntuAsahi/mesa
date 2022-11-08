@@ -225,12 +225,12 @@ agx_bo_create_aligned(struct agx_device *dev, unsigned size, unsigned align,
     * flush the cache to make space for the new allocation.
     */
    if (!bo)
-      bo = agx_bo_alloc(dev, size, align, flags);
+      bo = dev->ops.bo_alloc(dev, size, align, flags);
    if (!bo)
       bo = agx_bo_cache_fetch(dev, size, align, flags, false);
    if (!bo) {
       agx_bo_cache_evict_all(dev);
-      bo = agx_bo_alloc(dev, size, align, flags);
+      bo = dev->ops.bo_alloc(dev, size, align, flags);
    }
 
    if (!bo) {
