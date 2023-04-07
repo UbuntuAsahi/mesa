@@ -1156,12 +1156,6 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                 desc->format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT ||
                 desc->format == PIPE_FORMAT_S8_UINT);
 
-         /* Multisampling with depth/stencil is currently faulting, see e.g.
-          * dEQP-GLES3.functional.fbo.msaa.4_samples.depth32f_stencil8
-          */
-         if (tib->nr_samples > 1)
-            unreachable("todo: multisampling with depth/stencil");
-
          c->depth_dimensions =
             (framebuffer->width - 1) | ((framebuffer->height - 1) << 15);
 
