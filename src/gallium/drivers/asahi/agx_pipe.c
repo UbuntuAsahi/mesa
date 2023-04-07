@@ -1139,6 +1139,10 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    uint64_t depth_buffer = 0;
    uint64_t stencil_buffer = 0;
 
+   c->iogpu_unk_214 = 0xc000;
+
+   c->isp_bgobjvals = 0x300;
+
    agx_pack(&c->zls_ctrl, ZLS_CONTROL, zls_control) {
 
       if (framebuffer->zsbuf) {
@@ -1153,6 +1157,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             agx_resource(zsbuf->texture)->layout.format);
 
          assert(desc->format == PIPE_FORMAT_Z32_FLOAT ||
+                desc->format == PIPE_FORMAT_Z16_UNORM ||
                 desc->format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT ||
                 desc->format == PIPE_FORMAT_S8_UINT);
 
@@ -1196,6 +1201,17 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                zls_control.z_compress_1 = true;
                zls_control.z_compress_2 = true;
             }
+
+            if (zres->base.format == PIPE_FORMAT_Z16_UNORM) {
+               const float scale = 0xffff;
+               c->isp_bgobjdepth =
+                  (uint16_t)(SATURATE(clear_depth) * scale + 0.5f);
+               zls_control.z_format = AGX_ZLS_FORMAT_16;
+               c->iogpu_unk_214 |= 0x40000;
+            } else {
+               c->isp_bgobjdepth = fui(clear_depth);
+               zls_control.z_format = AGX_ZLS_FORMAT_32F;
+            }
          }
 
          if (sres) {
@@ -1222,6 +1238,8 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                zls_control.s_compress_1 = true;
                zls_control.s_compress_2 = true;
             }
+
+            c->isp_bgobjvals |= clear_stencil;
          }
       }
    }
@@ -1253,9 +1271,6 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->store_pipeline_bind = 0x12;
    c->store_pipeline = pipeline_store | 4;
 
-   c->isp_bgobjdepth = fui(clear_depth);
-   c->isp_bgobjvals = clear_stencil | 0x300;
-
    c->utile_width = tib->tile_size.width;
    c->utile_height = tib->tile_size.height;
 
@@ -1278,7 +1293,6 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
    /* XXX OR 0x80 with eMRT? */
    c->tib_blocks = ALIGN_POT(agx_tilebuffer_total_size(tib), 2048) / 2048;
-   c->iogpu_unk_214 = 0xc000;
 
    float tan_60 = 1.732051f;
    c->merge_upper_x = fui(tan_60 / framebuffer->width);
@@ -2130,9 +2144,9 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
 
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
       switch (format) {
-      /* natively supported
-       * TODO: we could also support Z16_UNORM */
+      /* natively supported */
       case PIPE_FORMAT_Z32_FLOAT:
+      case PIPE_FORMAT_Z16_UNORM:
       case PIPE_FORMAT_S8_UINT:
 
       /* lowered by u_transfer_helper to one of the above */
