@@ -1190,6 +1190,8 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             c->depth_buffer_2 = depth_buffer + offset;
             c->depth_buffer_3 = depth_buffer + offset;
 
+            assert(zres->layout.tiling != AIL_TILING_LINEAR && "must tile");
+
             if (ail_is_compressed(&zres->layout)) {
                uint64_t accel_buffer =
                   depth_buffer + zres->layout.metadata_offset_B;
