@@ -1246,6 +1246,10 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    if (dev->debug & AGX_DBG_NOCLUSTER)
       c->flags |= ASAHI_RENDER_NO_VERTEX_CLUSTERING;
 
+   /* XXX is this for just MSAA+Z+S or MSAA+(Z|S)? */
+   if (tib->nr_samples > 1 && framebuffer->zsbuf)
+      c->flags |= ASAHI_RENDER_MSAA_ZS;
+
    /* XXX sometimes ends in 8004, cbufs >= 5? */
    c->load_pipeline_bind = 0xffff8002 | (clear_pipeline_textures ? 0x210 : 0);
    /* XXX is this correct? */
@@ -1276,10 +1280,10 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
       break;
    }
 
-   c->iogpu_unk_49 = tib->sample_size_B;
+   c->sample_size = tib->sample_size_B;
 
    /* XXX OR 0x80 with eMRT? */
-   c->iogpu_unk_212 = ALIGN_POT(agx_tilebuffer_total_size(tib), 2048) / 2048;
+   c->tib_blocks = ALIGN_POT(agx_tilebuffer_total_size(tib), 2048) / 2048;
    c->iogpu_unk_214 = 0xc000;
 
    float tan_60 = 1.732051f;
@@ -1313,7 +1317,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
       asahi_add_attachment(att, rsrc, framebuffer->zsbuf, ASAHI_ATTACHMENT_Z);
 
-      if (rsrc->separate_stencil && 0) {
+      if (rsrc->separate_stencil) {
          asahi_add_attachment(att, rsrc->separate_stencil, framebuffer->zsbuf,
                               ASAHI_ATTACHMENT_S);
       }
