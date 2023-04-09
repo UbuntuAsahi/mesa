@@ -723,7 +723,7 @@ agxdecode_drm_cmd_render(struct drm_asahi_cmd_render *c, bool verbose)
    DUMP_FIELD(c, "0x%x", cmd_ta_id);
    DUMP_FIELD(c, "0x%x", cmd_3d_id);
    DUMP_FIELD(c, "0x%x", ppp_ctrl);
-   DUMP_FIELD(c, "0x%llx", zls_ctrl);
+   DUMP_CL(ZLS_CONTROL, &c->zls_ctrl, "ZLS Control");
    DUMP_FIELD(c, "0x%llx", depth_buffer_1);
    DUMP_FIELD(c, "0x%llx", depth_buffer_2);
    DUMP_FIELD(c, "0x%llx", depth_buffer_3);
