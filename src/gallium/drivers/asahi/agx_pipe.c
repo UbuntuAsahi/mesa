@@ -1146,7 +1146,7 @@ struct attachments {
 
 static void
 asahi_add_attachment(struct attachments *att, struct agx_resource *rsrc,
-                     struct pipe_surface *surf, uint32_t type)
+                     struct pipe_surface *surf)
 {
    assert(att->count < MAX_ATTACHMENTS);
    int idx = att->count++;
@@ -1154,9 +1154,10 @@ asahi_add_attachment(struct attachments *att, struct agx_resource *rsrc,
    /* We don't support layered rendering yet */
    assert(surf->u.tex.first_layer == surf->u.tex.last_layer);
 
-   att->list[idx].type = type;
    att->list[idx].size = rsrc->bo->size;
    att->list[idx].pointer = rsrc->bo->ptr.gpu;
+   att->list[idx].order = 1; // TODO: What does this do?
+   att->list[idx].flags = 0;
 }
 
 static void
@@ -1223,23 +1224,23 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             zls_control.z_store_enable = (batch->resolve & PIPE_CLEAR_DEPTH);
             zls_control.z_load_enable = valid && !clear;
 
-            c->depth_buffer_1 = agx_map_texture_gpu(zres, first_layer) +
-                                ail_get_level_offset_B(&zres->layout, level);
+            c->depth_buffer_load = agx_map_texture_gpu(zres, first_layer) +
+                                   ail_get_level_offset_B(&zres->layout, level);
 
-            c->depth_buffer_2 = c->depth_buffer_1;
-            c->depth_buffer_3 = c->depth_buffer_1;
+            c->depth_buffer_store = c->depth_buffer_load;
+            c->depth_buffer_partial = c->depth_buffer_load;
 
             assert(zres->layout.tiling != AIL_TILING_LINEAR && "must tile");
 
             if (ail_is_compressed(&zres->layout)) {
-               c->depth_meta_buffer_1 =
+               c->depth_meta_buffer_load =
                   agx_map_texture_gpu(zres, 0) +
                   zres->layout.metadata_offset_B +
                   (first_layer * zres->layout.compression_layer_stride_B) +
                   zres->layout.level_offsets_compressed_B[level];
 
-               c->depth_meta_buffer_2 = c->depth_meta_buffer_1;
-               c->depth_meta_buffer_3 = c->depth_meta_buffer_1;
+               c->depth_meta_buffer_store = c->depth_meta_buffer_load;
+               c->depth_meta_buffer_partial = c->depth_meta_buffer_load;
 
                zls_control.z_compress_1 = true;
                zls_control.z_compress_2 = true;
@@ -1264,21 +1265,22 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             zls_control.s_store_enable = (batch->resolve & PIPE_CLEAR_STENCIL);
             zls_control.s_load_enable = valid && !clear;
 
-            c->stencil_buffer_1 = agx_map_texture_gpu(sres, first_layer) +
-                                  ail_get_level_offset_B(&sres->layout, level);
+            c->stencil_buffer_load =
+               agx_map_texture_gpu(sres, first_layer) +
+               ail_get_level_offset_B(&sres->layout, level);
 
-            c->stencil_buffer_2 = c->stencil_buffer_1;
-            c->stencil_buffer_3 = c->stencil_buffer_1;
+            c->stencil_buffer_store = c->stencil_buffer_load;
+            c->stencil_buffer_partial = c->stencil_buffer_load;
 
             if (ail_is_compressed(&sres->layout)) {
-               c->stencil_meta_buffer_1 =
+               c->stencil_meta_buffer_load =
                   agx_map_texture_gpu(sres, 0) +
                   sres->layout.metadata_offset_B +
                   (first_layer * sres->layout.compression_layer_stride_B) +
                   sres->layout.level_offsets_compressed_B[level];
 
-               c->stencil_meta_buffer_2 = c->stencil_buffer_1;
-               c->stencil_meta_buffer_3 = c->stencil_buffer_1;
+               c->stencil_meta_buffer_store = c->stencil_meta_buffer_load;
+               c->stencil_meta_buffer_partial = c->stencil_meta_buffer_load;
 
                zls_control.s_compress_1 = true;
                zls_control.s_compress_2 = true;
@@ -1362,22 +1364,21 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          continue;
 
       asahi_add_attachment(att, agx_resource(framebuffer->cbufs[i]->texture),
-                           framebuffer->cbufs[i], ASAHI_ATTACHMENT_C);
+                           framebuffer->cbufs[i]);
    }
 
    if (framebuffer->zsbuf) {
       struct agx_resource *rsrc = agx_resource(framebuffer->zsbuf->texture);
 
-      asahi_add_attachment(att, rsrc, framebuffer->zsbuf, ASAHI_ATTACHMENT_Z);
+      asahi_add_attachment(att, rsrc, framebuffer->zsbuf);
 
       if (rsrc->separate_stencil) {
-         asahi_add_attachment(att, rsrc->separate_stencil, framebuffer->zsbuf,
-                              ASAHI_ATTACHMENT_S);
+         asahi_add_attachment(att, rsrc->separate_stencil, framebuffer->zsbuf);
       }
    }
 
-   c->attachments = (uint64_t)(uintptr_t)&att->list[0];
-   c->attachment_count = att->count;
+   c->fragment_attachments = (uint64_t)(uintptr_t)&att->list[0];
+   c->fragment_attachment_count = att->count;
 }
 
 /*
