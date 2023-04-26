@@ -1144,18 +1144,6 @@ agx_flush_resource(struct pipe_context *pctx, struct pipe_resource *pres)
    }
 }
 
-static uint64_t
-agx_map_surface_resource(struct pipe_surface *surf, struct agx_resource *rsrc)
-{
-   return agx_map_texture_gpu(rsrc, surf->u.tex.first_layer);
-}
-
-static uint64_t
-agx_map_surface(struct pipe_surface *surf)
-{
-   return agx_map_surface_resource(surf, agx_resource(surf->texture));
-}
-
 #define MAX_ATTACHMENTS 16
 
 struct attachments {
@@ -1201,22 +1189,20 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->fb_width = framebuffer->width;
    c->fb_height = framebuffer->height;
 
-   uint64_t depth_buffer = 0;
-   uint64_t stencil_buffer = 0;
-
    c->iogpu_unk_214 = 0xc000;
 
    c->isp_bgobjvals = 0x300;
+
+   struct agx_resource *zres = NULL, *sres = NULL;
 
    agx_pack(&c->zls_ctrl, ZLS_CONTROL, zls_control) {
 
       if (framebuffer->zsbuf) {
          struct pipe_surface *zsbuf = framebuffer->zsbuf;
          struct agx_resource *zsres = agx_resource(zsbuf->texture);
-         struct agx_resource *zres = NULL;
-         struct agx_resource *sres = NULL;
 
          unsigned level = zsbuf->u.tex.level;
+         unsigned first_layer = zsbuf->u.tex.first_layer;
 
          const struct util_format_description *desc = util_format_description(
             agx_resource(zsbuf->texture)->layout.format);
@@ -1229,18 +1215,13 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          c->depth_dimensions =
             (framebuffer->width - 1) | ((framebuffer->height - 1) << 15);
 
-         if (util_format_has_depth(desc)) {
+         if (util_format_has_depth(desc))
             zres = zsres;
-            depth_buffer = agx_map_surface(zsbuf);
-         } else {
+         else
             sres = zsres;
-            stencil_buffer = agx_map_surface(zsbuf);
-         }
 
-         if (zsres->separate_stencil) {
+         if (zsres->separate_stencil)
             sres = zsres->separate_stencil;
-            stencil_buffer = agx_map_surface_resource(zsbuf, sres);
-         }
 
          if (zres) {
             bool valid = agx_resource_valid(zres, level);
@@ -1249,21 +1230,23 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             zls_control.z_store_enable = (batch->resolve & PIPE_CLEAR_DEPTH);
             zls_control.z_load_enable = valid && !clear;
 
-            unsigned offset = ail_get_level_offset_B(&zres->layout, level);
-            c->depth_buffer_1 = depth_buffer + offset;
-            c->depth_buffer_2 = depth_buffer + offset;
-            c->depth_buffer_3 = depth_buffer + offset;
+            c->depth_buffer_1 = agx_map_texture_gpu(zres, first_layer) +
+                                ail_get_level_offset_B(&zres->layout, level);
+
+            c->depth_buffer_2 = c->depth_buffer_1;
+            c->depth_buffer_3 = c->depth_buffer_1;
 
             assert(zres->layout.tiling != AIL_TILING_LINEAR && "must tile");
 
             if (ail_is_compressed(&zres->layout)) {
-               uint64_t accel_buffer =
-                  depth_buffer + zres->layout.metadata_offset_B;
-               accel_buffer += zres->layout.level_offsets_compressed_B[level];
+               c->depth_meta_buffer_1 =
+                  agx_map_texture_gpu(zres, 0) +
+                  zres->layout.metadata_offset_B +
+                  (first_layer * zres->layout.compression_layer_stride_B) +
+                  zres->layout.level_offsets_compressed_B[level];
 
-               c->depth_meta_buffer_1 = accel_buffer;
-               c->depth_meta_buffer_2 = accel_buffer;
-               c->depth_meta_buffer_3 = accel_buffer;
+               c->depth_meta_buffer_2 = c->depth_meta_buffer_1;
+               c->depth_meta_buffer_3 = c->depth_meta_buffer_1;
 
                zls_control.z_compress_1 = true;
                zls_control.z_compress_2 = true;
@@ -1288,19 +1271,21 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             zls_control.s_store_enable = (batch->resolve & PIPE_CLEAR_STENCIL);
             zls_control.s_load_enable = valid && !clear;
 
-            unsigned offset = ail_get_level_offset_B(&sres->layout, level);
-            c->stencil_buffer_1 = stencil_buffer + offset;
-            c->stencil_buffer_2 = stencil_buffer + offset;
-            c->stencil_buffer_3 = stencil_buffer + offset;
+            c->stencil_buffer_1 = agx_map_texture_gpu(sres, first_layer) +
+                                  ail_get_level_offset_B(&sres->layout, level);
+
+            c->stencil_buffer_2 = c->stencil_buffer_1;
+            c->stencil_buffer_3 = c->stencil_buffer_1;
 
             if (ail_is_compressed(&sres->layout)) {
-               uint64_t accel_buffer =
-                  stencil_buffer + sres->layout.metadata_offset_B;
-               accel_buffer += sres->layout.level_offsets_compressed_B[level];
+               c->stencil_meta_buffer_1 =
+                  agx_map_texture_gpu(sres, 0) +
+                  sres->layout.metadata_offset_B +
+                  (first_layer * sres->layout.compression_layer_stride_B) +
+                  sres->layout.level_offsets_compressed_B[level];
 
-               c->stencil_meta_buffer_1 = accel_buffer;
-               c->stencil_meta_buffer_2 = accel_buffer;
-               c->stencil_meta_buffer_3 = accel_buffer;
+               c->stencil_meta_buffer_2 = c->stencil_buffer_1;
+               c->stencil_meta_buffer_3 = c->stencil_buffer_1;
 
                zls_control.s_compress_1 = true;
                zls_control.s_compress_2 = true;
@@ -1316,10 +1301,10 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    else
       c->flags |= ASAHI_RENDER_NO_CLEAR_PIPELINE_TEXTURES;
 
-   if (depth_buffer && !(batch->clear & PIPE_CLEAR_DEPTH))
+   if (zres && !(batch->clear & PIPE_CLEAR_DEPTH))
       c->flags |= ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S;
 
-   if (stencil_buffer && !(batch->clear & PIPE_CLEAR_STENCIL))
+   if (sres && !(batch->clear & PIPE_CLEAR_STENCIL))
       c->flags |= ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S;
 
    if (dev->debug & AGX_DBG_NOCLUSTER)
