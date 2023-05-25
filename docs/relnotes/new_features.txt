@@ -1,2 +1,4 @@
 VK_EXT_attachment_feedback_loop_dynamic_state on RADV
 extendedDynamicState3SampleLocationsEnable on RADV
+OpenGL 3.1 on Asahi
+OpenGL ES 3.0 on Asahi
