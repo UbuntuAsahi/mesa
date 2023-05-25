@@ -1304,19 +1304,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
    c->samples = tib->nr_samples;
    c->layers = 1;
-
-   switch (tib->nr_samples) {
-   case 1:
-      c->ppp_multisamplectl = 0x88;
-      break;
-   case 2:
-      c->ppp_multisamplectl = 0x44cc;
-      break;
-   case 4:
-      c->ppp_multisamplectl = 0xeaa26e26;
-      break;
-   }
-
+   c->ppp_multisamplectl = batch->ppp_multisamplectl;
    c->sample_size = tib->sample_size_B;
 
    /* XXX OR 0x80 with eMRT? */
