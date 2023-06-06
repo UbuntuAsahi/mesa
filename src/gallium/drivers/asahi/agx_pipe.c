@@ -415,6 +415,15 @@ agx_compression_allowed(const struct agx_resource *pres)
       return false;
    }
 
+   /* Workaround for https://github.com/supertuxkart/stk-code/issues/4863
+    *
+    * XXX: Fix upstream or at least driconf, this is terrible.
+    */
+   if (strcmp(util_get_process_name(), "supertuxkart") == 0) {
+      if (pres->base.bind & PIPE_BIND_DEPTH_STENCIL)
+         return false;
+   }
+
    /* Limited to renderable */
    if (pres->base.bind &
        ~(PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET |
