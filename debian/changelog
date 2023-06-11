@@ -1,3 +1,9 @@
+mesa (23.2.0-1asahi1.22.10~pre20230606) kinetic; urgency=medium
+
+  * Update to asahi-20230606
+
+ -- Tobias Heider <me@tobhe.de>  Sun, 11 Jun 2023 17:34:19 +0200
+
 mesa (23.1.0-1asahi1~pre20230311) kinetic; urgency=medium
 
   * Update to asahi-20230311
