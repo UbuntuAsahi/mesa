@@ -1,4 +1,4 @@
-mesa (23.2.0~pre20230606-1asahi1.22.10) kinetic; urgency=medium
+mesa (23.2.0~pre20230606-1asahi1.22.04) jammy; urgency=medium
 
   * Update to asahi-20230606
 
