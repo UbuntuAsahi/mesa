@@ -1,3 +1,9 @@
+mesa (23.3.0~pre20230801-1asahi1.23.04) lunar; urgency=medium
+
+  * Update to asahi-20230801
+
+ -- Tobias Heider <me@tobhe.de>  Thu, 10 Aug 2023 08:47:57 +0200
+
 mesa (23.2.0~pre20230615-1asahi1.23.04) lunar; urgency=medium
 
   * Update to asahi-20230615
