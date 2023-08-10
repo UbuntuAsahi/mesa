@@ -39,7 +39,6 @@
 #include "util/u_prim.h"
 #include "util/u_resource.h"
 #include "util/u_transfer.h"
-#include "util/u_upload_mgr.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
 #include "agx_tilebuffer.h"
@@ -1267,18 +1266,8 @@ agx_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader,
 {
    struct agx_context *ctx = agx_context(pctx);
    struct agx_stage *s = &ctx->stage[shader];
-   struct pipe_constant_buffer *constants = &s->cb[index];
 
    util_copy_constant_buffer(&s->cb[index], cb, take_ownership);
-
-   /* Upload buufer immediately user_buffer has limited lifetime.
-    * See llvmpipe_set_constant_buffer()
-    */
-   if (constants->user_buffer && !constants->buffer) {
-      u_upload_data(ctx->base.const_uploader, 0, constants->buffer_size, 64,
-                    constants->user_buffer, &constants->buffer_offset,
-                    &constants->buffer);
-   }
 
    unsigned mask = (1 << index);
 
@@ -1624,9 +1613,8 @@ agx_compile_variant(struct agx_device *dev, struct agx_uncompiled_shader *so,
    }
 
    struct agx_shader_key base_key = {
-      .needs_g13x_coherency = (dev->params.gpu_generation == 13 &&
-                               dev->params.num_clusters_total > 1) ||
-                              dev->params.num_dies > 1,
+      .needs_g13x_coherency =
+         dev->params.gpu_generation == 13 && dev->params.num_clusters_total > 1,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)

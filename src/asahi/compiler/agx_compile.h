@@ -9,9 +9,6 @@
 #include "compiler/nir/nir.h"
 #include "util/u_dynarray.h"
 
-/* 32 user varyings + some system values */
-#define AGX_MAX_VARYING_SLOTS (48)
-
 struct agx_varyings_vs {
    /* The number of user varyings of each type. The varyings must be allocated
     * in this order ({smooth, flat, linear} × {32, 16}), which may require
@@ -42,13 +39,13 @@ struct agx_varyings_vs {
     *
     * If the slot is not written, this must be ~0.
     */
-   unsigned slots[AGX_MAX_VARYING_SLOTS];
+   unsigned slots[VARYING_SLOT_MAX];
 };
 
 /* Conservative bound, * 4 due to offsets (TODO: maybe worth eliminating
  * coefficient register aliasing?)
  */
-#define AGX_MAX_CF_BINDINGS (AGX_MAX_VARYING_SLOTS * 4)
+#define AGX_MAX_CF_BINDINGS (VARYING_SLOT_MAX * 4)
 
 struct agx_varyings_fs {
    /* Number of coefficient registers used */
@@ -232,7 +229,6 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_find_lsb = true,
    .lower_uadd_carry = true,
    .lower_usub_borrow = true,
-   .lower_fisnormal = true,
    .lower_scmp = true,
    .lower_isign = true,
    .lower_fsign = true,
@@ -246,6 +242,7 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_extract_byte = true,
    .lower_insert_byte = true,
    .lower_insert_word = true,
+   .lower_cs_local_index_to_id = true,
    .has_cs_global_id = true,
    .vectorize_io = true,
    .use_interpolated_input_intrinsics = true,

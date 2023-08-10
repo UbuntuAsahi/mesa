@@ -248,6 +248,8 @@ agx_pack_atomic_source(agx_index index)
 static unsigned
 agx_pack_atomic_dest(agx_index index, bool *flag)
 {
+   assert(index.size == AGX_SIZE_32 && "no 64-bit atomics yet");
+
    /* Atomic destinstions are optional (e.g. for update with no return) */
    if (index.type == AGX_INDEX_NULL) {
       *flag = 0;
@@ -255,7 +257,6 @@ agx_pack_atomic_dest(agx_index index, bool *flag)
    }
 
    /* But are otherwise registers */
-   assert(index.size == AGX_SIZE_32 && "no 64-bit atomics yet");
    assert_register_is_aligned(index);
    *flag = 1;
    return index.value;

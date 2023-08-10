@@ -15,7 +15,9 @@ agx_const_buffer_ptr(struct agx_batch *batch, struct pipe_constant_buffer *cb)
 
       return rsrc->bo->ptr.gpu + cb->buffer_offset;
    } else {
-      return 0;
+      return agx_pool_upload_aligned(
+         &batch->pool, ((uint8_t *)cb->user_buffer) + cb->buffer_offset,
+         cb->buffer_size - cb->buffer_offset, 64);
    }
 }
 

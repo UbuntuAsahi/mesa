@@ -91,18 +91,6 @@ agx_get_cf(agx_context *ctx, bool smooth, bool perspective,
       varyings->reads_z |= (offset == 2);
    }
 
-   /* Forcibly vectorize pointcoord reads, since there's no (known) way to index
-    * Y alone.
-    */
-   bool is_pntc = (slot == VARYING_SLOT_PNTC);
-   unsigned cf_offset = 0;
-
-   if (is_pntc) {
-      cf_offset = offset;
-      offset = 0;
-      count = MAX2(2, count + offset);
-   }
-
    /* First, search for an appropriate binding. This is O(n) to the number of
     * bindings, which isn't great, but n should be small in practice.
     */
@@ -113,7 +101,7 @@ agx_get_cf(agx_context *ctx, bool smooth, bool perspective,
           (varyings->bindings[b].smooth == smooth) &&
           (varyings->bindings[b].perspective == perspective)) {
 
-         return agx_immediate(varyings->bindings[b].cf_base + cf_offset);
+         return agx_immediate(varyings->bindings[b].cf_base);
       }
    }
 
@@ -127,7 +115,7 @@ agx_get_cf(agx_context *ctx, bool smooth, bool perspective,
    varyings->bindings[b].perspective = perspective;
    varyings->nr_cf += count;
 
-   return agx_immediate(cf_base + cf_offset);
+   return agx_immediate(cf_base);
 }
 
 /* Builds a 64-bit hash table key for an index */
@@ -357,19 +345,38 @@ agx_format_for_pipe(enum pipe_format format)
 }
 
 static void
-agx_emit_load_coefficients(agx_builder *b, agx_index dest,
-                           nir_intrinsic_instr *instr)
+agx_emit_load_vary_flat(agx_builder *b, agx_index dest,
+                        nir_intrinsic_instr *instr)
 {
-   enum glsl_interp_mode mode = nir_intrinsic_interp_mode(instr);
-   bool smooth = (mode != INTERP_MODE_FLAT);
-   bool perspective = smooth && (mode != INTERP_MODE_NOPERSPECTIVE);
+   unsigned components = instr->num_components;
+   assert(components >= 1 && components <= 4);
 
-   agx_index cf = agx_get_cf(b->shader, smooth, perspective,
-                             nir_intrinsic_io_semantics(instr).location,
-                             nir_intrinsic_component(instr), 1);
+   nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
+   nir_src *offset = nir_get_io_offset_src(instr);
+   assert(nir_src_is_const(*offset) && "no indirects");
+   assert(nir_dest_bit_size(instr->dest) == 32 && "no 16-bit flat shading");
 
-   agx_ldcf_to(b, dest, cf, 1);
-   agx_emit_cached_split(b, dest, 3);
+   /* Get all coefficient registers up front. This ensures the driver emits a
+    * single vectorized binding.
+    */
+   agx_index cf = agx_get_cf(b->shader, false, false,
+                             sem.location + nir_src_as_uint(*offset),
+                             nir_intrinsic_component(instr), components);
+   agx_index dests[4] = {agx_null()};
+
+   for (unsigned i = 0; i < components; ++i) {
+      /* vec3 for each vertex, unknown what first 2 channels are for */
+      agx_index d[3] = {agx_null()};
+      agx_index tmp = agx_temp(b->shader, AGX_SIZE_32);
+      agx_ldcf_to(b, tmp, cf, 1);
+      agx_emit_split(b, d, tmp, 3);
+      dests[i] = d[2];
+
+      /* Each component accesses a sequential coefficient register */
+      cf.value++;
+   }
+
+   agx_emit_collect_to(b, dest, components, dests);
 }
 
 static enum agx_interpolation
@@ -941,9 +948,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       agx_emit_load_vary(b, dst, instr);
       return NULL;
 
-   case nir_intrinsic_load_coefficients_agx:
-      assert(stage == MESA_SHADER_FRAGMENT);
-      agx_emit_load_coefficients(b, dst, instr);
+   case nir_intrinsic_load_input:
+      assert(stage == MESA_SHADER_FRAGMENT && "vertex loads lowered");
+      agx_emit_load_vary_flat(b, dst, instr);
       return NULL;
 
    case nir_intrinsic_load_agx:
@@ -1065,9 +1072,6 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_local_invocation_id:
       return agx_load_compute_dimension(
          b, dst, instr, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X);
-
-   case nir_intrinsic_load_local_invocation_index:
-      return agx_get_sr_to(b, dst, AGX_SR_THREAD_INDEX_IN_THREADGROUP);
 
    case nir_intrinsic_scoped_barrier: {
       assert(!b->shader->is_preamble && "invalid");
@@ -2697,9 +2701,6 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    /* Late blend lowering creates vectors */
    NIR_PASS_V(nir, nir_lower_alu_to_scalar, NULL, NULL);
    NIR_PASS_V(nir, nir_lower_load_const_to_scalar);
-
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS_V(nir, agx_nir_lower_interpolation);
 
    /* Late VBO lowering creates constant udiv instructions */
    NIR_PASS_V(nir, nir_opt_idiv_const, 16);
