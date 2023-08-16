@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define DRM_ASAHI_UNSTABLE_UABI_VERSION		10008
+#define DRM_ASAHI_UNSTABLE_UABI_VERSION		10009
 
 #define DRM_ASAHI_GET_PARAMS			0x00
 #define DRM_ASAHI_VM_CREATE			0x01
@@ -70,6 +70,8 @@ struct drm_asahi_params_global {
 
 	__u32 result_render_size;
 	__u32 result_compute_size;
+
+	__u32 firmware_version[4];
 };
 
 /*
@@ -332,6 +334,8 @@ struct drm_asahi_attachment {
 #define ASAHI_RENDER_PROCESS_EMPTY_TILES (1UL << 3)
 #define ASAHI_RENDER_NO_VERTEX_CLUSTERING (1UL << 4)
 #define ASAHI_RENDER_MSAA_ZS (1UL << 5)
+/* XXX check */
+#define ASAHI_RENDER_NO_PREEMPTION (1UL << 6)
 
 struct drm_asahi_cmd_render {
 	/** @extensions: Pointer to the first extension struct, if any */
@@ -346,23 +350,48 @@ struct drm_asahi_cmd_render {
 	__u32 vertex_attachment_count;
 	__u32 fragment_attachment_count;
 
+	__u32 vertex_helper_program;
+	__u32 fragment_helper_program;
+	__u64 vertex_helper_arg;
+	__u64 fragment_helper_arg;
+
 	__u64 depth_buffer_load;
+	__u64 depth_buffer_load_stride;
 	__u64 depth_buffer_store;
+	__u64 depth_buffer_store_stride;
 	__u64 depth_buffer_partial;
+	__u64 depth_buffer_partial_stride;
 	__u64 depth_meta_buffer_load;
+	__u64 depth_meta_buffer_load_stride;
 	__u64 depth_meta_buffer_store;
+	__u64 depth_meta_buffer_store_stride;
 	__u64 depth_meta_buffer_partial;
+	__u64 depth_meta_buffer_partial_stride;
 
 	__u64 stencil_buffer_load;
+	__u64 stencil_buffer_load_stride;
 	__u64 stencil_buffer_store;
+	__u64 stencil_buffer_store_stride;
 	__u64 stencil_buffer_partial;
+	__u64 stencil_buffer_partial_stride;
 	__u64 stencil_meta_buffer_load;
+	__u64 stencil_meta_buffer_load_stride;
 	__u64 stencil_meta_buffer_store;
+	__u64 stencil_meta_buffer_store_stride;
 	__u64 stencil_meta_buffer_partial;
+	__u64 stencil_meta_buffer_partial_stride;
 
 	__u64 scissor_array;
 	__u64 depth_bias_array;
 	__u64 visibility_result_buffer;
+
+	__u64 vertex_sampler_array;
+	__u32 vertex_sampler_count;
+	__u32 vertex_sampler_max;
+
+	__u64 fragment_sampler_array;
+	__u32 fragment_sampler_count;
+	__u32 fragment_sampler_max;
 
 	__u64 zls_ctrl;
 	__u64 ppp_multisamplectl;
@@ -408,31 +437,28 @@ struct drm_asahi_cmd_render {
 #define ASAHI_RENDER_UNK_UNK1			(1UL << 0)
 #define ASAHI_RENDER_UNK_SET_TILE_CONFIG	(1UL << 1)
 #define ASAHI_RENDER_UNK_SET_UTILE_CONFIG	(1UL << 2)
-/* #define ASAHI_RENDER_UNK_3			(1UL << 3) */
-/* #define ASAHI_RENDER_UNK_4			(1UL << 4) */
-#define ASAHI_RENDER_UNK_SET_AUX_FB_UNK		(1UL << 5)
-#define ASAHI_RENDER_UNK_SET_G14_UNK		(1UL << 6)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_140	(1UL << 7)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_158	(1UL << 8)
-#define ASAHI_RENDER_UNK_SET_FRG_TILECFG	(1UL << 9)
-#define ASAHI_RENDER_UNK_SET_LOAD_BGOBJVALS	(1UL << 10)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_38		(1UL << 11)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_3C		(1UL << 12)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_40		(1UL << 13)
-#define ASAHI_RENDER_UNK_SET_RELOAD_ZLSCTRL	(1UL << 14)
-#define ASAHI_RENDER_UNK_SET_UNK_BUF_10		(1UL << 15)
+#define ASAHI_RENDER_UNK_SET_AUX_FB_UNK		(1UL << 3)
+#define ASAHI_RENDER_UNK_SET_G14_UNK		(1UL << 4)
 
-#define ASAHI_RENDER_UNK_SET_FRG_IGCMPUNK44	(1UL << 20)
-#define ASAHI_RENDER_UNK_SET_FRG_SEQ_BUFFER	(1UL << 21)
-#define ASAHI_RENDER_UNK_SET_IOGPU_UNK54	(1UL << 22)
-#define ASAHI_RENDER_UNK_SET_IOGPU_UNK56	(1UL << 23)
-#define ASAHI_RENDER_UNK_SET_TILING_CONTROL	(1UL << 24)
-#define ASAHI_RENDER_UNK_SET_TILING_CONTROL_2	(1UL << 25)
-#define ASAHI_RENDER_UNK_SET_VTX_UNK_F0		(1UL << 26)
-#define ASAHI_RENDER_UNK_SET_VTX_UNK_F8		(1UL << 27)
-#define ASAHI_RENDER_UNK_SET_VTX_UNK_118	(1UL << 28)
-#define ASAHI_RENDER_UNK_SET_VTX_IGCMPUNK44	(1UL << 29)
-#define ASAHI_RENDER_UNK_SET_VTX_SEQ_BUFFER	(1UL << 30)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_140	(1UL << 20)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_158	(1UL << 21)
+#define ASAHI_RENDER_UNK_SET_FRG_TILECFG	(1UL << 22)
+#define ASAHI_RENDER_UNK_SET_LOAD_BGOBJVALS	(1UL << 23)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_38		(1UL << 24)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_3C		(1UL << 25)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_40		(1UL << 26)
+#define ASAHI_RENDER_UNK_SET_RELOAD_ZLSCTRL	(1UL << 27)
+#define ASAHI_RENDER_UNK_SET_UNK_BUF_10		(1UL << 28)
+#define ASAHI_RENDER_UNK_SET_FRG_UNK_MASK	(1UL << 29)
+
+#define ASAHI_RENDER_UNK_SET_IOGPU_UNK54	(1UL << 40)
+#define ASAHI_RENDER_UNK_SET_IOGPU_UNK56	(1UL << 41)
+#define ASAHI_RENDER_UNK_SET_TILING_CONTROL	(1UL << 42)
+#define ASAHI_RENDER_UNK_SET_TILING_CONTROL_2	(1UL << 43)
+#define ASAHI_RENDER_UNK_SET_VTX_UNK_F0		(1UL << 44)
+#define ASAHI_RENDER_UNK_SET_VTX_UNK_F8		(1UL << 45)
+#define ASAHI_RENDER_UNK_SET_VTX_UNK_118	(1UL << 46)
+#define ASAHI_RENDER_UNK_SET_VTX_UNK_MASK	(1UL << 47)
 
 #define ASAHI_RENDER_EXT_UNKNOWNS	0xff00
 
@@ -460,8 +486,7 @@ struct drm_asahi_cmd_render_unknowns {
 	__u64 frg_unk_40;
 	__u64 reload_zlsctrl;
 	__u64 unk_buf_10;
-	__u64 frg_iogpucmp_unk44;
-	__u64 frg_seq_buffer;
+	__u64 frg_unk_mask;
 
 	__u64 iogpu_unk54;
 	__u64 iogpu_unk56;
@@ -470,9 +495,11 @@ struct drm_asahi_cmd_render_unknowns {
 	__u64 vtx_unk_f0;
 	__u64 vtx_unk_f8;
 	__u64 vtx_unk_118;
-	__u64 vtx_iogpucmp_unk44;
-	__u64 vtx_seq_buffer;
+	__u64 vtx_unk_mask;
 };
+
+/* XXX check */
+#define ASAHI_COMPUTE_NO_PREEMPTION (1UL << 0)
 
 struct drm_asahi_cmd_compute {
 	__u64 flags;
@@ -484,16 +511,19 @@ struct drm_asahi_cmd_compute {
 	__u32 attachment_count;
 	__u32 pad;
 
-	__u64 buffer_descriptor;
-
-	__u32 buffer_descriptor_size; /* ? */
-	__u32 ctx_switch_prog;
+	__u32 helper_program;
+	__u32 helper_unk; /* ? */
+	__u64 helper_arg;
 
 	__u32 encoder_id;
 	__u32 cmd_id;
 
+	__u64 sampler_array;
+	__u32 sampler_count;
+	__u32 sampler_max;
+
 	__u32 iogpu_unk_40;
-	__u32 iogpu_unk_44;
+	__u32 unk_mask;
 };
 
 enum drm_asahi_status {
