@@ -1,3 +1,9 @@
+mesa (23.3.0~pre20230821-1asahi1.23.04) lunar; urgency=medium
+
+  * Update to asahi-20230821
+
+ -- Tobias Heider <tobias.heider@canonical.com>  Thu, 31 Aug 2023 18:47:18 +0200
+
 mesa (23.3.0~pre20230801-1asahi1.23.04) lunar; urgency=medium
 
   * Update to asahi-20230801
