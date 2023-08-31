@@ -48,18 +48,17 @@ radv_aco_convert_shader_info(struct aco_shader_info *aco_info, const struct radv
    ASSIGN_FIELD(has_ngg_culling);
    ASSIGN_FIELD(has_ngg_early_prim_export);
    ASSIGN_FIELD(workgroup_size);
+   ASSIGN_FIELD(has_epilog);
    ASSIGN_FIELD(vs.tcs_in_out_eq);
    ASSIGN_FIELD(vs.tcs_temp_only_input_mask);
    ASSIGN_FIELD(vs.has_prolog);
    ASSIGN_FIELD(tcs.num_lds_blocks);
-   ASSIGN_FIELD(ps.has_epilog);
    ASSIGN_FIELD(ps.num_interp);
    ASSIGN_FIELD(ps.spi_ps_input);
    ASSIGN_FIELD(cs.subgroup_size);
    ASSIGN_FIELD(cs.uses_full_subgroups);
    aco_info->gfx9_gs_ring_lds_size = radv->gs_ring_info.lds_size;
    aco_info->is_trap_handler_shader = radv->type == RADV_SHADER_TYPE_TRAP_HANDLER;
-   aco_info->tcs.tess_input_vertices = radv_key->tcs.tess_input_vertices;
    aco_info->image_2d_view_of_3d = radv_key->image_2d_view_of_3d;
    aco_info->ps.epilog_pc = radv_args->ps_epilog_pc;
    aco_info->hw_stage = radv_select_hw_stage(radv, gfx_level);
@@ -84,6 +83,14 @@ radv_aco_convert_vs_prolog_key(struct aco_vs_prolog_info *aco_info, const struct
    ASSIGN_FIELD(next_stage);
 
    aco_info->inputs = radv_args->prolog_inputs;
+}
+
+static inline void
+radv_aco_convert_tcs_epilog_key(struct aco_tcs_epilog_info *aco_info, const struct radv_tcs_epilog_key *radv,
+                                const struct radv_shader_args *radv_args)
+{
+   ASSIGN_FIELD(primitive_mode);
+   ASSIGN_FIELD(tes_reads_tessfactors);
 }
 
 static inline void

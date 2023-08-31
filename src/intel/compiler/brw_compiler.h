@@ -128,7 +128,21 @@ struct brw_compiler {
     */
    bool use_bindless_sampler_offset;
 
+   /**
+    * Calling the ra_allocate function after each register spill can take
+    * several minutes. This option speeds up shader compilation by spilling
+    * more registers after the ra_allocate failure. Required for
+    * Cyberpunk 2077, which uses a watchdog thread to terminate the process
+    * in case the render thread hasn't responded within 2 minutes.
+    */
+   int spilling_rate;
+
    struct nir_shader *clc_shader;
+
+   struct {
+      unsigned mue_header_packing;
+      bool mue_compaction;
+   } mesh;
 };
 
 #define brw_shader_debug_log(compiler, data, fmt, ... ) do {    \
@@ -204,6 +218,9 @@ PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct brw_sampler_prog_key_data {
    /**
     * EXT_texture_swizzle and DEPTH_TEXTURE_MODE swizzles.
+    *
+    * This field is not consumed by the back-end compiler and is only relevant
+    * for the crocus OpenGL driver for Broadwell and earlier hardware.
     */
    uint16_t swizzles[BRW_MAX_SAMPLERS];
 
@@ -220,10 +237,17 @@ struct brw_sampler_prog_key_data {
    enum gfx6_gather_sampler_wa gfx6_gather_wa[BRW_MAX_SAMPLERS];
 };
 
+enum brw_robustness_flags {
+   BRW_ROBUSTNESS_UBO  = BITFIELD_BIT(0),
+   BRW_ROBUSTNESS_SSBO = BITFIELD_BIT(1),
+};
+
 struct brw_base_prog_key {
    unsigned program_string_id;
 
-   bool robust_buffer_access;
+   enum brw_robustness_flags robust_flags:2;
+
+   unsigned padding:22;
 
    /**
     * Apply workarounds for SIN and COS input range problems.
@@ -231,7 +255,6 @@ struct brw_base_prog_key {
     * avoid precision issues.
     */
    bool limit_trig_input_range;
-   unsigned padding:16;
 
    struct brw_sampler_prog_key_data tex;
 };
@@ -1022,6 +1045,7 @@ struct brw_wm_prog_data {
     * For varying slots that are not used by the FS, the value is -1.
     */
    int urb_setup[VARYING_SLOT_MAX];
+   int urb_setup_channel[VARYING_SLOT_MAX];
 
    /**
     * Cache structure into the urb_setup array above that contains the
@@ -1625,6 +1649,7 @@ struct brw_tue_map {
 
 struct brw_mue_map {
    int32_t start_dw[VARYING_SLOT_MAX];
+   uint32_t len_dw[VARYING_SLOT_MAX];
    uint32_t per_primitive_indices_dw;
 
    uint32_t size_dw;
@@ -1634,12 +1659,14 @@ struct brw_mue_map {
    uint32_t per_primitive_header_size_dw;
    uint32_t per_primitive_data_size_dw;
    uint32_t per_primitive_pitch_dw;
+   bool user_data_in_primitive_header;
 
    uint32_t max_vertices;
    uint32_t per_vertex_start_dw;
    uint32_t per_vertex_header_size_dw;
    uint32_t per_vertex_data_size_dw;
    uint32_t per_vertex_pitch_dw;
+   bool user_data_in_vertex_header;
 };
 
 struct brw_task_prog_data {

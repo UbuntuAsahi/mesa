@@ -17,36 +17,45 @@
     paths:
       - results/
 
-rustfmt:
+.formatting-check:
   # Cancel job if a newer commit is pushed to the same branch
   interruptible: true
   stage: lint
   extends:
     - .use-debian/x86_64_build
-    - .lint-rustfmt-rules
+  rules:
+    # in merge pipeline, don't touch the default settings
+    - if: $GITLAB_USER_LOGIN == "marge-bot" && $CI_COMMIT_BRANCH == null
+    # in other pipelines, formatting checks are allowed to fail
+    - allow_failure: true
   variables:
     GIT_STRATEGY: fetch
+  timeout: 10m
   script:
+    - git diff --color=always --exit-code  # Fails if there are diffs
+
+rustfmt:
+  extends:
+    - .formatting-check
+    - .lint-rustfmt-rules
+  before_script:
     - shopt -s globstar
-    - rustfmt --check --verbose src/**/lib.rs
+    - rustfmt --version
+    - rustfmt --verbose src/**/lib.rs
 
 clang-format:
-  # Cancel job if a newer commit is pushed to the same branch
-  interruptible: true
-  stage: lint
   extends:
-    - .use-debian/x86_64_build
+    - .formatting-check
     - .lint-clang-format-rules
   variables:
-    GIT_STRATEGY: fetch
     LLVM_VERSION: 15
-  script:
+  before_script:
     - shopt -s globstar
     # We need a meson build dir, but its config doesn't actually matter, so
     # let's just use the default.
     - meson setup build
+    - clang-format-${LLVM_VERSION} --version
     - ninja -C build clang-format
-    - git diff --color=always --exit-code  # Fails if there are diffs
 
 .test-gl:
   extends:

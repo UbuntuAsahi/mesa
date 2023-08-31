@@ -703,7 +703,7 @@ replace_separable_prog(struct zink_screen *screen, struct hash_entry *entry, str
    entry->data = real;
    entry->key = real->shaders;
    real->base.removed = false;
-   prog->full_prog = NULL;
+   zink_gfx_program_reference(screen, &prog->full_prog, NULL);
    prog->base.removed = true;
    return real;
 }
@@ -724,7 +724,7 @@ zink_gfx_program_update_optimal(struct zink_context *ctx)
          ctx->gfx_pipeline_state.final_hash ^= ctx->curr_program->last_variant_hash;
       if (entry) {
          prog = (struct zink_gfx_program*)entry->data;
-         if (prog->is_separable) {
+         if (prog->is_separable && !(zink_debug & ZINK_DEBUG_NOOPT)) {
             /* shader variants can't be handled by separable programs: sync and compile */
             if (!ZINK_SHADER_KEY_OPTIMAL_IS_DEFAULT(ctx->gfx_pipeline_state.optimal_key))
                util_queue_fence_wait(&prog->base.cache_fence);
@@ -754,7 +754,7 @@ zink_gfx_program_update_optimal(struct zink_context *ctx)
       /* remove old hash */
       ctx->gfx_pipeline_state.optimal_key = ctx->gfx_pipeline_state.shader_keys_optimal.key.val;
       ctx->gfx_pipeline_state.final_hash ^= ctx->curr_program->last_variant_hash;
-      if (ctx->curr_program->is_separable) {
+      if (ctx->curr_program->is_separable && !(zink_debug & ZINK_DEBUG_NOOPT)) {
          struct zink_gfx_program *prog = ctx->curr_program;
          if (!ZINK_SHADER_KEY_OPTIMAL_IS_DEFAULT(ctx->gfx_pipeline_state.optimal_key)) {
             util_queue_fence_wait(&prog->base.cache_fence);
@@ -961,6 +961,7 @@ create_program(struct zink_context *ctx, bool is_compute)
       return NULL;
 
    pipe_reference_init(&pg->reference, 1);
+   u_rwlock_init(&pg->pipeline_cache_lock);
    util_queue_fence_init(&pg->cache_fence);
    pg->is_compute = is_compute;
    pg->ctx = ctx;
@@ -1195,7 +1196,7 @@ create_gfx_program_separable(struct zink_context *ctx, struct zink_shader **stag
    prog->last_vertex_stage = ctx->last_vertex_stage;
 
    if (stages[MESA_SHADER_TESS_EVAL] && !stages[MESA_SHADER_TESS_CTRL]) {
-      prog->shaders[MESA_SHADER_TESS_CTRL] = stages[MESA_SHADER_VERTEX]->non_fs.generated_tcs;
+      prog->shaders[MESA_SHADER_TESS_CTRL] = stages[MESA_SHADER_TESS_EVAL]->non_fs.generated_tcs;
       prog->stages_present |= BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
    }
 
@@ -1268,7 +1269,8 @@ create_gfx_program_separable(struct zink_context *ctx, struct zink_shader **stag
       _mesa_set_add(&prog->libs->libs, gkey);
    }
 
-   util_queue_add_job(&screen->cache_get_thread, prog, &prog->base.cache_fence, create_linked_separable_job, NULL, 0);
+   if (!(zink_debug & ZINK_DEBUG_NOOPT))
+      util_queue_add_job(&screen->cache_get_thread, prog, &prog->base.cache_fence, create_linked_separable_job, NULL, 0);
 
    return prog;
 fail:
@@ -1494,6 +1496,7 @@ deinit_program(struct zink_screen *screen, struct zink_program *pg)
 
    if (pg->pipeline_cache)
       VKSCR(DestroyPipelineCache)(screen->dev, pg->pipeline_cache, NULL);
+   u_rwlock_destroy(&pg->pipeline_cache_lock);
    zink_descriptor_program_deinit(screen, pg);
 }
 

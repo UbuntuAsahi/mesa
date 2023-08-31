@@ -136,7 +136,7 @@ static void gather_intrinsic_load_deref_info(const nir_shader *nir,
    assert(var && var->data.mode == nir_var_shader_in);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      gather_usage(deref, nir_ssa_def_components_read(&instr->dest.ssa),
+      gather_usage(deref, nir_def_components_read(&instr->def),
                    info->input_usage_mask);
 
    switch (nir->info.stage) {
@@ -335,8 +335,7 @@ void nir_tgsi_scan_shader(const struct nir_shader *nir,
          type = glsl_get_array_element(type);
       }
 
-      unsigned attrib_count = variable->data.compact ? DIV_ROUND_UP(glsl_get_length(type), 4) :
-         glsl_count_attribute_slots(type, nir->info.stage == MESA_SHADER_VERTEX);
+      unsigned attrib_count = nir_variable_count_slots(variable, type);
 
       i = variable->data.driver_location;
 
@@ -435,8 +434,7 @@ void nir_tgsi_scan_shader(const struct nir_shader *nir,
          type = glsl_get_array_element(type);
       }
 
-      unsigned attrib_count = variable->data.compact ? DIV_ROUND_UP(glsl_get_length(type), 4) :
-         glsl_count_attribute_slots(type, false);
+      unsigned attrib_count = nir_variable_count_slots(variable, type);
       for (unsigned k = 0; k < attrib_count; k++, i++) {
 
          if (nir->info.stage == MESA_SHADER_FRAGMENT) {

@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_dynarray.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
 #include "agx_debug.h"
+#include "agx_opcodes.h"
 
 /* SSA-based register allocator */
 
@@ -18,6 +20,9 @@ struct ra_ctx {
    enum agx_size *sizes;
    BITSET_WORD *visited;
    BITSET_WORD *used_regs;
+
+   /* Maintained while assigning registers */
+   unsigned *max_reg;
 
    /* For affinities */
    agx_instr **src_to_collect_phi;
@@ -53,7 +58,10 @@ agx_write_registers(const agx_instr *I, unsigned d)
    case AGX_OPCODE_DEVICE_LOAD:
    case AGX_OPCODE_LOCAL_LOAD:
    case AGX_OPCODE_LD_TILE:
-      return util_bitcount(I->mask) * size;
+      /* Can write 16-bit or 32-bit. Anything logically 64-bit is already
+       * expanded to 32-bit in the mask.
+       */
+      return util_bitcount(I->mask) * MIN2(size, 2);
 
    case AGX_OPCODE_LDCF:
       return 6;
@@ -152,6 +160,12 @@ agx_calc_register_demand(agx_context *ctx, uint8_t *widths)
       unsigned late_kill_count = 0;
 
       agx_foreach_instr_in_block(block, I) {
+         /* Phis happen in parallel and are already accounted for in the live-in
+          * set, just skip them so we don't double count.
+          */
+         if (I->op == AGX_OPCODE_PHI)
+            continue;
+
          /* Handle late-kill registers from last instruction */
          demand -= late_kill_count;
          late_kill_count = 0;
@@ -212,8 +226,9 @@ agx_read_registers(const agx_instr *I, unsigned s)
    case AGX_OPCODE_DEVICE_STORE:
    case AGX_OPCODE_LOCAL_STORE:
    case AGX_OPCODE_ST_TILE:
+      /* See agx_write_registers */
       if (s == 0)
-         return util_bitcount(I->mask) * size;
+         return util_bitcount(I->mask) * MIN2(size, 2);
       else
          return size;
 
@@ -380,6 +395,13 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
    return best_base;
 }
 
+static void
+set_ssa_to_reg(struct ra_ctx *rctx, unsigned ssa, unsigned reg)
+{
+   *(rctx->max_reg) = MAX2(*(rctx->max_reg), reg + rctx->ncomps[ssa] - 1);
+   rctx->ssa_to_reg[ssa] = reg;
+}
+
 static unsigned
 assign_regs_by_copying(struct ra_ctx *rctx, unsigned npot_count, unsigned align,
                        const agx_instr *I, struct util_dynarray *copies,
@@ -467,7 +489,7 @@ assign_regs_by_copying(struct ra_ctx *rctx, unsigned npot_count, unsigned align,
       BITSET_SET_RANGE(clobbered, new_reg, new_reg + nr - 1);
 
       /* Update bookkeeping for this variable */
-      rctx->ssa_to_reg[ssa] = new_reg;
+      set_ssa_to_reg(rctx, ssa, new_reg);
       rctx->reg_to_ssa[new_reg] = ssa;
 
       /* Skip to the next variable */
@@ -574,7 +596,7 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
          util_dynarray_append(copies, struct agx_copy, copy);
       }
 
-      rctx->ssa_to_reg[var] = base;
+      set_ssa_to_reg(rctx, var, base);
       rctx->reg_to_ssa[base] = var;
 
       base += var_count;
@@ -638,7 +660,11 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
 static void
 reserve_live_in(struct ra_ctx *rctx)
 {
+   /* If there are no predecessors, there is nothing live-in */
    unsigned nr_preds = agx_num_predecessors(rctx->block);
+   if (nr_preds == 0)
+      return;
+
    agx_builder b =
       agx_init_builder(rctx->shader, agx_before_block(rctx->block));
 
@@ -668,6 +694,7 @@ reserve_live_in(struct ra_ctx *rctx)
                 * it in until the end of the loop. Stash in the information
                 * we'll need to fill in the real register later.
                 */
+               assert(rctx->block->loop_header);
                phi->src[pred_idx] = agx_get_index(i, size);
             } else {
                /* Otherwise, we can build the phi now */
@@ -683,11 +710,15 @@ reserve_live_in(struct ra_ctx *rctx)
           */
          phi->dest[0] = phi->src[0];
          base = phi->dest[0].value;
-         rctx->ssa_to_reg[i] = base;
       } else {
          /* If we don't emit a phi, there is already a unique register */
-         base = rctx->ssa_to_reg[i];
+         assert(nr_preds == 1);
+
+         agx_block **pred = util_dynarray_begin(&rctx->block->predecessors);
+         base = (*pred)->ssa_to_reg_out[i];
       }
+
+      set_ssa_to_reg(rctx, i, base);
 
       for (unsigned j = 0; j < rctx->ncomps[i]; ++j) {
          BITSET_SET(rctx->used_regs, base + j);
@@ -701,7 +732,7 @@ assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
 {
    assert(reg < rctx->bound && "must not overflow register file");
    assert(v.type == AGX_INDEX_NORMAL && "only SSA gets registers allocated");
-   rctx->ssa_to_reg[v.value] = reg;
+   set_ssa_to_reg(rctx, v.value, reg);
 
    assert(!BITSET_TEST(rctx->visited, v.value) && "SSA violated");
    BITSET_SET(rctx->visited, v.value);
@@ -718,12 +749,13 @@ assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
 static void
 agx_set_sources(struct ra_ctx *rctx, agx_instr *I)
 {
+   assert(I->op != AGX_OPCODE_PHI);
+
    agx_foreach_ssa_src(I, s) {
-      if (BITSET_TEST(rctx->visited, I->src[s].value)) {
-         unsigned v = rctx->ssa_to_reg[I->src[s].value];
-         I->src[s] =
-            agx_replace_index(I->src[s], agx_register(v, I->src[s].size));
-      }
+      assert(BITSET_TEST(rctx->visited, I->src[s].value) && "no phis");
+
+      unsigned v = rctx->ssa_to_reg[I->src[s].value];
+      agx_replace_src(I, s, agx_register(v, I->src[s].size));
    }
 }
 
@@ -907,11 +939,12 @@ static void
 agx_ra_assign_local(struct ra_ctx *rctx)
 {
    BITSET_DECLARE(used_regs, AGX_NUM_REGS) = {0};
+   uint8_t *ssa_to_reg = calloc(rctx->shader->alloc, sizeof(uint8_t));
 
    agx_block *block = rctx->block;
-   uint8_t *ssa_to_reg = rctx->ssa_to_reg;
    uint8_t *ncomps = rctx->ncomps;
    rctx->used_regs = used_regs;
+   rctx->ssa_to_reg = ssa_to_reg;
 
    reserve_live_in(rctx);
 
@@ -979,32 +1012,32 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
       }
 
-      agx_set_sources(rctx, I);
+      /* Phi sources are special. Set in the corresponding predecessors */
+      if (I->op != AGX_OPCODE_PHI)
+         agx_set_sources(rctx, I);
+
       agx_set_dests(rctx, I);
    }
 
-   block->ssa_to_reg_out = calloc(rctx->shader->alloc, sizeof(uint8_t));
-   memcpy(block->ssa_to_reg_out, rctx->ssa_to_reg,
-          rctx->shader->alloc * sizeof(uint8_t));
+   block->ssa_to_reg_out = rctx->ssa_to_reg;
 
    STATIC_ASSERT(sizeof(block->regs_out) == sizeof(used_regs));
    memcpy(block->regs_out, used_regs, sizeof(used_regs));
 
-   /* In case we split live ranges, fix up the phis in the loop header
-    * successor for loop exit blocks.
+   /* Also set the sources for the phis in our successors, since that logically
+    * happens now (given the possibility of live range splits, etc)
     */
-   if (block->loop_header) {
-      agx_foreach_successor(block, succ) {
-         unsigned pred_idx = agx_predecessor_index(succ, block);
+   agx_foreach_successor(block, succ) {
+      unsigned pred_idx = agx_predecessor_index(succ, block);
 
-         agx_foreach_phi_in_block(succ, phi) {
-            if (phi->src[pred_idx].type == AGX_INDEX_NORMAL) {
-               /* This source needs a fixup */
-               unsigned value = phi->src[pred_idx].value;
+      agx_foreach_phi_in_block(succ, phi) {
+         if (phi->src[pred_idx].type == AGX_INDEX_NORMAL) {
+            /* This source needs a fixup */
+            unsigned value = phi->src[pred_idx].value;
 
-               phi->src[pred_idx] = agx_register(rctx->ssa_to_reg[value],
-                                                 phi->src[pred_idx].size);
-            }
+            agx_replace_src(
+               phi, pred_idx,
+               agx_register(rctx->ssa_to_reg[value], phi->src[pred_idx].size));
          }
       }
    }
@@ -1072,10 +1105,7 @@ agx_insert_parallel_copies(agx_context *ctx, agx_block *block)
 void
 agx_ra(agx_context *ctx)
 {
-   unsigned *alloc = calloc(ctx->alloc, sizeof(unsigned));
-
    agx_compute_liveness(ctx);
-   uint8_t *ssa_to_reg = calloc(ctx->alloc, sizeof(uint8_t));
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));
    agx_instr **src_to_collect_phi = calloc(ctx->alloc, sizeof(agx_instr *));
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
@@ -1108,7 +1138,7 @@ agx_ra(agx_context *ctx)
 
    /* Or, we can bound tightly for debugging */
    if (agx_compiler_debug & AGX_DBG_DEMAND)
-      max_regs = ALIGN_POT(MAX2(max_regs, 12), 8);
+      max_regs = ALIGN_POT(MAX2(demand, 12), 8);
 
    /* ...but not too tightly */
    assert((max_regs % 8) == 0 && "occupancy limits are 8 register aligned");
@@ -1121,18 +1151,13 @@ agx_ra(agx_context *ctx)
       agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
-         .ssa_to_reg = ssa_to_reg,
          .src_to_collect_phi = src_to_collect_phi,
          .ncomps = ncomps,
          .sizes = sizes,
          .visited = visited,
          .bound = max_regs,
+         .max_reg = &ctx->max_reg,
       });
-   }
-
-   for (unsigned i = 0; i < ctx->alloc; ++i) {
-      if (ncomps[i])
-         ctx->max_reg = MAX2(ctx->max_reg, ssa_to_reg[i] + ncomps[i] - 1);
    }
 
    /* Vertex shaders preload the vertex/instance IDs (r5, r6) even if the shader
@@ -1142,19 +1167,6 @@ agx_ra(agx_context *ctx)
       ctx->max_reg = MAX2(ctx->max_reg, 6 * 2);
 
    assert(ctx->max_reg <= max_regs);
-
-   agx_foreach_instr_global(ctx, ins) {
-      agx_foreach_ssa_src(ins, s) {
-         unsigned v = ssa_to_reg[ins->src[s].value];
-         agx_replace_src(ins, s, agx_register(v, ins->src[s].size));
-      }
-
-      agx_foreach_ssa_dest(ins, d) {
-         unsigned v = ssa_to_reg[ins->dest[d].value];
-         ins->dest[d] =
-            agx_replace_index(ins->dest[d], agx_register(v, ins->dest[d].size));
-      }
-   }
 
    agx_foreach_instr_global_safe(ctx, ins) {
       /* Lower away RA pseudo-instructions */
@@ -1243,7 +1255,7 @@ agx_ra(agx_context *ctx)
       /* Writes to the nesting counter lowered to the real register */
       case AGX_OPCODE_NEST: {
          agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-         agx_mov_to(&b, agx_register(0, AGX_SIZE_16), I->src[0]);
+         agx_mov_imm_to(&b, agx_register(0, AGX_SIZE_16), I->imm);
          agx_remove_instruction(I);
          break;
       }
@@ -1259,9 +1271,7 @@ agx_ra(agx_context *ctx)
    }
 
    free(src_to_collect_phi);
-   free(ssa_to_reg);
    free(ncomps);
    free(sizes);
    free(visited);
-   free(alloc);
 }

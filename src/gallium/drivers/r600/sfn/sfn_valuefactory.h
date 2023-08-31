@@ -54,6 +54,7 @@ struct LiveRangeEntry {
    int m_end{-1};
    int m_index{-1};
    int m_color{-1};
+   bool m_alu_clause_local{false};
    std::bitset<use_unspecified> m_use;
    Register *m_register;
 
@@ -231,21 +232,15 @@ public:
 
    /* Inject a predefined value for a given dest value
     * (usually the result of a sysvalue load) */
-   void inject_value(const nir_dest& dest, int chan, PVirtualValue value);
+   void inject_value(const nir_def& def, int chan, PVirtualValue value);
 
    /* Get or create a destination value of vector of values */
    PRegister
-   dest(const nir_alu_dest& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
+   dest(const nir_def& def, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
 
-   PRegister
-   dest(const nir_dest& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
+   RegisterVec4 dest_vec4(const nir_def& dest, Pin pin);
 
-   PRegister
-   dest(const nir_ssa_def& dest, int chan, Pin pin_channel, uint8_t chan_mask = 0xf);
-
-   RegisterVec4 dest_vec4(const nir_dest& dest, Pin pin);
-
-   std::vector<PRegister, Allocator<PRegister>> dest_vec(const nir_dest& dest,
+   std::vector<PRegister, Allocator<PRegister>> dest_vec(const nir_def& dest,
                                                          int num_components);
 
    PRegister dummy_dest(unsigned chan);
@@ -302,7 +297,7 @@ public:
    PRegister idx_reg(unsigned idx);
 
 private:
-   PVirtualValue ssa_src(const nir_ssa_def& dest, int chan);
+   PVirtualValue ssa_src(const nir_def& dest, int chan);
 
    int m_next_register_index;
    int m_next_temp_channel{0};

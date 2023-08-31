@@ -118,6 +118,7 @@ enum {
 #define IRIS_DIRTY_RENDER_MISC_BUFFER_FLUSHES     (1ull << 33)
 #define IRIS_DIRTY_COMPUTE_MISC_BUFFER_FLUSHES    (1ull << 34)
 #define IRIS_DIRTY_VFG                            (1ull << 35)
+#define IRIS_DIRTY_DS_WRITE_ENABLE                (1ull << 36)
 
 #define IRIS_ALL_DIRTY_FOR_COMPUTE (IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES | \
                                     IRIS_DIRTY_COMPUTE_MISC_BUFFER_FLUSHES)
@@ -637,6 +638,9 @@ struct iris_context {
    /** Whether the context protected (through EGL_EXT_protected_content) */
    bool protected;
 
+   /** Whether a banned context was already signalled */
+   bool context_reset_signaled;
+
    /** A device reset status callback for notifying that the GPU is hosed. */
    struct pipe_device_reset_callback reset;
 
@@ -752,6 +756,9 @@ struct iris_context {
    /** Frame number for debug prints */
    uint32_t frame;
 
+   /** Track draw call count for adding GPU breakpoint on 3DPRIMITIVE */
+   uint32_t draw_call_count;
+
    struct {
       uint64_t dirty;
       uint64_t stage_dirty;
@@ -814,6 +821,9 @@ struct iris_context {
 
       /** Are stencil writes enabled?  (Stencil buffer may or may not exist.) */
       bool stencil_writes_enabled;
+
+      /** Current/upcoming ds_write_state for Wa_18019816803. */
+      bool ds_write_state;
 
       /** Do we have integer RT in current framebuffer state? */
       bool has_integer_rt;
@@ -1133,8 +1143,6 @@ int iris_get_driver_query_group_info(struct pipe_screen *pscreen,
 void gfx9_toggle_preemption(struct iris_context *ice,
                             struct iris_batch *batch,
                             const struct pipe_draw_info *draw);
-
-
 
 #ifdef genX
 #  include "iris_genx_protos.h"

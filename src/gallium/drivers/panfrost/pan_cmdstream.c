@@ -109,6 +109,7 @@ struct panfrost_sampler_view {
 struct panfrost_vertex_state {
    unsigned num_elements;
    struct pipe_vertex_element pipe[PIPE_MAX_ATTRIBS];
+   uint16_t strides[PIPE_MAX_ATTRIBS];
 
 #if PAN_ARCH >= 9
    /* Packed attribute descriptor. All fields are set at CSO create time
@@ -361,6 +362,7 @@ pack_blend_constant(enum pipe_format format, float cons)
  * overdraw alpha=0 should be set when alpha=0 implies no overdraw,
  * equivalently, all enabled render targets have alpha_zero_nop set.
  */
+#if PAN_ARCH >= 6
 static bool
 panfrost_overdraw_alpha(const struct panfrost_context *ctx, bool zero)
 {
@@ -378,6 +380,7 @@ panfrost_overdraw_alpha(const struct panfrost_context *ctx, bool zero)
 
    return true;
 }
+#endif
 
 static void
 panfrost_emit_blend(struct panfrost_batch *batch, void *rts,
@@ -953,10 +956,9 @@ panfrost_emit_vertex_data(struct panfrost_batch *batch)
 
    for (unsigned i = 0; i < vtx->num_elements; ++i) {
       struct mali_attribute_packed packed;
-      unsigned vbi = vtx->pipe[i].vertex_buffer_index;
 
       pan_pack(&packed, ATTRIBUTE, cfg) {
-         cfg.stride = ctx->vertex_buffers[vbi].stride;
+         cfg.stride = vtx->pipe[i].src_stride;
       }
 
       pan_merge(packed, vtx->attributes[i], ATTRIBUTE);
@@ -1669,11 +1671,12 @@ panfrost_create_sampler_view_bo(struct panfrost_sampler_view *so,
             so->base.swizzle_b,
             so->base.swizzle_a,
          },
-      .image = &prsrc->image,
-
+      .planes = {NULL},
       .buf.offset = buf_offset,
       .buf.size = buf_size,
    };
+
+   panfrost_set_image_view_planes(&iview, texture);
 
    unsigned size = (PAN_ARCH <= 5 ? pan_size(TEXTURE) : 0) +
                    GENX(panfrost_estimate_texture_payload_size)(&iview);
@@ -2051,7 +2054,7 @@ panfrost_emit_vertex_data(struct panfrost_batch *batch, mali_ptr *buffers)
 
       /* When there is a divisor, the hardware-level divisor is
        * the product of the instance divisor and the padded count */
-      unsigned stride = buf->stride;
+      unsigned stride = so->strides[vbi];
       unsigned hw_divisor = ctx->padded_count * divisor;
 
       if (ctx->instance_count <= 1) {
@@ -2169,15 +2172,15 @@ panfrost_emit_vertex_data(struct panfrost_batch *batch, mali_ptr *buffers)
 
       /* Base instance offset */
       if (ctx->base_instance && so->pipe[i].instance_divisor) {
-         src_offset +=
-            (ctx->base_instance * buf->stride) / so->pipe[i].instance_divisor;
+         src_offset += (ctx->base_instance * so->pipe[i].src_stride) /
+                       so->pipe[i].instance_divisor;
       }
 
       /* Also, somewhat obscurely per-instance data needs to be
        * offset in response to a delayed start in an indexed draw */
 
       if (so->pipe[i].instance_divisor && ctx->instance_count > 1)
-         src_offset -= buf->stride * ctx->offset_start;
+         src_offset -= so->pipe[i].src_stride * ctx->offset_start;
 
       pan_pack(out + i, ATTRIBUTE, cfg) {
          cfg.buffer_index = attrib_to_buffer[so->element_buffer[i]];
@@ -3978,6 +3981,8 @@ panfrost_create_vertex_elements_state(struct pipe_context *pctx,
    so->num_elements = num_elements;
    memcpy(so->pipe, elements, sizeof(*elements) * num_elements);
 
+   for (unsigned i = 0; i < num_elements; ++i)
+      so->strides[elements[i].vertex_buffer_index] = elements[i].src_stride;
 #if PAN_ARCH >= 9
    for (unsigned i = 0; i < num_elements; ++i)
       panfrost_pack_attribute(dev, elements[i], &so->attributes[i]);
@@ -4217,7 +4222,9 @@ panfrost_create_blend_state(struct pipe_context *pipe,
       unsigned constant_mask = pan_blend_constant_mask(equation);
       const bool supports_2src = pan_blend_supports_2src(PAN_ARCH);
       so->info[c] = (struct pan_blend_info){
-         .enabled = (equation.color_mask != 0),
+         .enabled = (equation.color_mask != 0) &&
+                    !(blend->logicop_enable &&
+                      blend->logicop_func == PIPE_LOGICOP_NOOP),
          .opaque = !blend->logicop_enable && pan_blend_is_opaque(equation),
          .constant_mask = constant_mask,
 

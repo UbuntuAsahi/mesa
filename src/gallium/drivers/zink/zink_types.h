@@ -42,6 +42,7 @@
 #include "util/hash_table.h"
 #include "util/list.h"
 #include "util/log.h"
+#include "util/rwlock.h"
 #include "util/set.h"
 #include "util/simple_mtx.h"
 #include "util/slab.h"
@@ -300,6 +301,7 @@ struct zink_vertex_elements_hw_state {
       struct {
          VkVertexInputBindingDivisorDescriptionEXT divisors[PIPE_MAX_ATTRIBS];
          VkVertexInputBindingDescription bindings[PIPE_MAX_ATTRIBS]; // combination of element_state and stride
+         unsigned strides[PIPE_MAX_ATTRIBS];
          uint8_t divisors_present;
       } b;
       VkVertexInputBindingDescription2EXT dynbindings[PIPE_MAX_ATTRIBS];
@@ -762,6 +764,7 @@ struct zink_shader_info {
    bool have_xfb;
    bool have_sparse;
    bool have_vulkan_memory_model;
+   bool have_workgroup_memory_explicit_layout;
    unsigned bindless_set_idx;
 };
 
@@ -994,6 +997,7 @@ struct zink_program {
    struct zink_context *ctx;
    unsigned char sha1[20];
    struct util_queue_fence cache_fence;
+   struct u_rwlock pipeline_cache_lock;
    VkPipelineCache pipeline_cache;
    size_t pipeline_cache_size;
    struct zink_batch_usage *batch_uses;
@@ -1979,7 +1983,7 @@ struct zink_context {
    uint32_t ds3_states;
 
    uint32_t num_so_targets;
-   struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_OUTPUTS];
+   struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    bool dirty_so_targets;
 
    bool gfx_dirty;

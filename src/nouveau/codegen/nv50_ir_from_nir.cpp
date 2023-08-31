@@ -79,16 +79,14 @@ private:
 
    CacheMode convert(enum gl_access_qualifier);
    TexTarget convert(glsl_sampler_dim, bool isArray, bool isShadow);
-   LValues& convert(nir_alu_dest *);
    BasicBlock* convert(nir_block *);
-   LValues& convert(nir_dest *);
    SVSemantic convert(nir_intrinsic_op);
    Value* convert(nir_load_const_instr*, uint8_t);
-   LValues& convert(nir_ssa_def *);
+   LValues& convert(nir_def *);
 
    Value* getSrc(nir_alu_src *, uint8_t component = 0);
    Value* getSrc(nir_src *, uint8_t, bool indirect = false);
-   Value* getSrc(nir_ssa_def *, uint8_t);
+   Value* getSrc(nir_def *, uint8_t);
 
    // returned value is the constant part of the given source (either the
    // nir_src or the selected source component of an intrinsic). Even though
@@ -156,7 +154,7 @@ private:
    bool visit(nir_jump_instr *);
    bool visit(nir_load_const_instr*);
    bool visit(nir_loop *);
-   bool visit(nir_ssa_undef_instr *);
+   bool visit(nir_undef_instr *);
    bool visit(nir_tex_instr *);
 
    static unsigned lowerBitSizeCB(const nir_instr *, void *);
@@ -256,8 +254,7 @@ Converter::isResultSigned(nir_op op)
 DataType
 Converter::getDType(nir_alu_instr *insn)
 {
-   assert(insn->dest.dest.is_ssa);
-   return getDType(insn->op, insn->dest.dest.ssa.bit_size);
+   return getDType(insn->op, insn->def.bit_size);
 }
 
 DataType
@@ -281,8 +278,7 @@ Converter::getDType(nir_intrinsic_instr *insn)
       break;
    }
 
-   assert(insn->dest.is_ssa);
-   return typeOfSize(insn->dest.ssa.bit_size / 8, isFloat, isSigned);
+   return typeOfSize(insn->def.bit_size / 8, isFloat, isSigned);
 }
 
 DataType
@@ -319,7 +315,6 @@ Converter::getSTypes(nir_alu_instr *insn)
 DataType
 Converter::getSType(nir_src &src, bool isFloat, bool isSigned)
 {
-   assert(src.is_ssa);
    const uint8_t bitSize = src.ssa->bit_size;
 
    DataType ty = typeOfSize(bitSize / 8, isFloat, isSigned);
@@ -445,6 +440,7 @@ Converter::getOperation(nir_op op)
       return OP_MOD;
    case nir_op_fmul:
    case nir_op_fmulz:
+   case nir_op_amul:
    case nir_op_imul:
    case nir_op_imul_high:
    case nir_op_umul_high:
@@ -684,20 +680,7 @@ Converter::getCondCode(nir_op op)
 }
 
 Converter::LValues&
-Converter::convert(nir_alu_dest *dest)
-{
-   return convert(&dest->dest);
-}
-
-Converter::LValues&
-Converter::convert(nir_dest *dest)
-{
-   assert(dest->is_ssa);
-   return convert(&dest->ssa);
-}
-
-Converter::LValues&
-Converter::convert(nir_ssa_def *def)
+Converter::convert(nir_def *def)
 {
    NirDefMap::iterator it = ssaDefs.find(def->index);
    if (it != ssaDefs.end())
@@ -712,22 +695,17 @@ Converter::convert(nir_ssa_def *def)
 Value*
 Converter::getSrc(nir_alu_src *src, uint8_t component)
 {
-   if (src->abs || src->negate) {
-      ERROR("modifiers currently not supported on nir_alu_src\n");
-      assert(false);
-   }
    return getSrc(&src->src, src->swizzle[component]);
 }
 
 Value*
 Converter::getSrc(nir_src *src, uint8_t idx, bool indirect)
 {
-   assert(src->is_ssa);
    return getSrc(src->ssa, idx);
 }
 
 Value*
-Converter::getSrc(nir_ssa_def *src, uint8_t idx)
+Converter::getSrc(nir_def *src, uint8_t idx)
 {
    ImmediateMap::iterator iit = immediates.find(src->index);
    if (iit != immediates.end())
@@ -913,32 +891,17 @@ bool Converter::assignSlots() {
    uint8_t i;
    BITSET_FOREACH_SET(i, nir->info.system_values_read, SYSTEM_VALUE_MAX) {
       switch (i) {
-      case SYSTEM_VALUE_BASE_GLOBAL_INVOCATION_ID:
-         continue;
-      default:
-         info_out->sv[info_out->numSysVals].sn = tgsi_get_sysval_semantic(i);
-         info_out->sv[info_out->numSysVals].si = 0;
-         info_out->sv[info_out->numSysVals].input = 0;
-         break;
-      }
-
-      switch (i) {
       case SYSTEM_VALUE_VERTEX_ID:
-         info_out->sv[info_out->numSysVals].input = 1;
          info_out->io.vertexId = info_out->numSysVals;
          break;
       case SYSTEM_VALUE_INSTANCE_ID:
-         info_out->sv[info_out->numSysVals].input = 1;
          info_out->io.instanceId = info_out->numSysVals;
-         break;
-      case SYSTEM_VALUE_TESS_LEVEL_INNER:
-      case SYSTEM_VALUE_TESS_LEVEL_OUTER:
-         info_out->sv[info_out->numSysVals].patch = 1;
          break;
       default:
          break;
       }
 
+      info_out->sv[info_out->numSysVals].sn = (gl_system_value)i;
       info_out->numSysVals += 1;
    }
 
@@ -989,15 +952,51 @@ bool Converter::assignSlots() {
          return false;
       }
 
-      for (uint16_t i = 0u; i < slots; ++i, ++vary) {
-         nv50_ir_varying *v = &info_out->in[vary];
+      if (var->data.compact) {
+         assert(!(nir->info.outputs_read & 1ull << slot));
+         if (nir_is_arrayed_io(var, nir->info.stage)) {
+            assert(glsl_type_is_array(type->fields.array));
+            assert(glsl_type_is_scalar(type->fields.array->fields.array));
+            assert(slots == glsl_get_length(type->fields.array));
+         } else {
+            assert(glsl_type_is_array(type));
+            assert(glsl_type_is_scalar(type->fields.array));
+            assert(slots == glsl_get_length(type));
+         }
+         assert(!glsl_base_type_is_64bit(type->without_array()->base_type));
 
-         v->patch = var->data.patch;
-         v->sn = name;
-         v->si = index + i;
-         v->mask |= getMaskForType(type, i) << var->data.location_frac;
+         uint32_t comps = BITFIELD_RANGE(var->data.location_frac, slots);
+         assert(!(comps & ~0xff));
+
+         if (comps & 0x0f) {
+            nv50_ir_varying *v = &info_out->in[vary];
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index;
+            v->mask |= comps & 0x0f;
+            info_out->numInputs =
+               std::max<uint8_t>(info_out->numInputs, vary + 1);
+         }
+         if (comps & 0xf0) {
+            nv50_ir_varying *v = &info_out->in[vary + 1];
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index + 1;
+            v->mask |= (comps & 0xf0) >> 4;
+            info_out->numInputs =
+               std::max<uint8_t>(info_out->numInputs, vary + 2);
+         }
+      } else {
+         for (uint16_t i = 0u; i < slots; ++i, ++vary) {
+            nv50_ir_varying *v = &info_out->in[vary];
+
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index + i;
+            v->mask |= getMaskForType(type, i) << var->data.location_frac;
+         }
+         info_out->numInputs = std::max<uint8_t>(info_out->numInputs, vary);
       }
-      info_out->numInputs = std::max<uint8_t>(info_out->numInputs, vary);
    }
 
    nir_foreach_shader_out_variable(var, nir) {
@@ -1067,17 +1066,53 @@ bool Converter::assignSlots() {
          return false;
       }
 
-      for (uint16_t i = 0u; i < slots; ++i, ++vary) {
-         nv50_ir_varying *v = &info_out->out[vary];
-         v->patch = var->data.patch;
-         v->sn = name;
-         v->si = index + i;
-         v->mask |= getMaskForType(type, i) << var->data.location_frac;
+      if (var->data.compact) {
+         assert(!(nir->info.outputs_read & 1ull << slot));
+         if (nir_is_arrayed_io(var, nir->info.stage)) {
+            assert(glsl_type_is_array(type->fields.array));
+            assert(glsl_type_is_scalar(type->fields.array->fields.array));
+            assert(slots == glsl_get_length(type->fields.array));
+         } else {
+            assert(glsl_type_is_array(type));
+            assert(glsl_type_is_scalar(type->fields.array));
+            assert(slots == glsl_get_length(type));
+         }
+         assert(!glsl_base_type_is_64bit(type->without_array()->base_type));
 
-         if (nir->info.outputs_read & 1ull << slot)
-            v->oread = 1;
+         uint32_t comps = BITFIELD_RANGE(var->data.location_frac, slots);
+         assert(!(comps & ~0xff));
+
+         if (comps & 0x0f) {
+            nv50_ir_varying *v = &info_out->out[vary];
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index;
+            v->mask |= comps & 0x0f;
+            info_out->numOutputs =
+               std::max<uint8_t>(info_out->numOutputs, vary + 1);
+         }
+         if (comps & 0xf0) {
+            nv50_ir_varying *v = &info_out->out[vary + 1];
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index + 1;
+            v->mask |= (comps & 0xf0) >> 4;
+            info_out->numOutputs =
+               std::max<uint8_t>(info_out->numOutputs, vary + 2);
+         }
+      } else {
+         for (uint16_t i = 0u; i < slots; ++i, ++vary) {
+            nv50_ir_varying *v = &info_out->out[vary];
+            v->patch = var->data.patch;
+            v->sn = name;
+            v->si = index + i;
+            v->mask |= getMaskForType(type, i) << var->data.location_frac;
+
+            if (nir->info.outputs_read & 1ull << slot)
+               v->oread = 1;
+         }
+         info_out->numOutputs = std::max<uint8_t>(info_out->numOutputs, vary);
       }
-      info_out->numOutputs = std::max<uint8_t>(info_out->numOutputs, vary);
    }
 
    if (info_out->io.genUserClip > 0) {
@@ -1559,6 +1594,7 @@ Converter::convert(nir_intrinsic_op intr)
    case nir_intrinsic_load_vertex_id:
       return SV_VERTEX_ID;
    case nir_intrinsic_load_workgroup_id:
+   case nir_intrinsic_load_workgroup_id_zero_base:
       return SV_CTAID;
    case nir_intrinsic_load_work_dim:
       return SV_WORK_DIM;
@@ -1579,7 +1615,7 @@ Converter::visit(nir_intrinsic_instr *insn)
 
    switch (op) {
    case nir_intrinsic_decl_reg: {
-      const unsigned reg_index = insn->dest.ssa.index;
+      const unsigned reg_index = insn->def.index;
       const unsigned bit_size = nir_intrinsic_bit_size(insn);
       const unsigned num_components = nir_intrinsic_num_components(insn);
       assert(nir_intrinsic_num_array_elems(insn) == 0);
@@ -1600,7 +1636,7 @@ Converter::visit(nir_intrinsic_instr *insn)
       LValues &src = it->second;
 
       DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       for (uint8_t c = 0; c < insn->num_components; c++)
          mkMov(newDefs[c], src[c], dType);
       break;
@@ -1667,7 +1703,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_load_input:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_output: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
 
       // FBFetch
       if (prog->getType() == Program::TYPE_FRAGMENT &&
@@ -1778,7 +1814,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_load_barycentric_centroid:
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_sample: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       uint32_t mode;
 
       if (op == nir_intrinsic_load_barycentric_centroid ||
@@ -1855,10 +1891,11 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_load_tess_level_outer:
    case nir_intrinsic_load_vertex_id:
    case nir_intrinsic_load_workgroup_id:
+   case nir_intrinsic_load_workgroup_id_zero_base:
    case nir_intrinsic_load_work_dim: {
       const DataType dType = getDType(insn);
       SVSemantic sv = convert(op);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
 
       for (uint8_t i = 0u; i < nir_intrinsic_dest_components(insn); ++i) {
          Value *def;
@@ -1883,14 +1920,14 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    // constants
    case nir_intrinsic_load_subgroup_size: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       loadImm(newDefs[0], 32u);
       break;
    }
    case nir_intrinsic_vote_all:
    case nir_intrinsic_vote_any:
    case nir_intrinsic_vote_ieq: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *pred = getScratch(1, FILE_PREDICATE);
       mkCmp(OP_SET, CC_NE, TYPE_U32, pred, TYPE_U32, getSrc(&insn->src[0], 0), zero);
       mkOp1(OP_VOTE, TYPE_U32, pred, pred)->subOp = getSubOp(op);
@@ -1898,7 +1935,7 @@ Converter::visit(nir_intrinsic_instr *insn)
       break;
    }
    case nir_intrinsic_ballot: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *pred = getSSA(1, FILE_PREDICATE);
       mkCmp(OP_SET, CC_NE, TYPE_U32, pred, TYPE_U32, getSrc(&insn->src[0], 0), zero);
       mkOp1(OP_VOTE, TYPE_U32, newDefs[0], pred)->subOp = NV50_IR_SUBOP_VOTE_ANY;
@@ -1906,7 +1943,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_read_first_invocation:
    case nir_intrinsic_read_invocation: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       const DataType dType = getDType(insn);
       Value *tmp = getScratch();
 
@@ -1925,7 +1962,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_load_per_vertex_input: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectVertex;
       Value *indirectOffset;
       uint32_t baseVertex = getIndirect(&insn->src[0], 0, indirectVertex);
@@ -1942,7 +1979,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_load_per_vertex_output: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectVertex;
       Value *indirectOffset;
       uint32_t baseVertex = getIndirect(&insn->src[0], 0, indirectVertex);
@@ -1979,7 +2016,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_load_ubo: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectIndex;
       Value *indirectOffset;
       uint32_t index = getIndirect(&insn->src[0], 0, indirectIndex);
@@ -1994,7 +2031,7 @@ Converter::visit(nir_intrinsic_instr *insn)
       break;
    }
    case nir_intrinsic_get_ssbo_size: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       const DataType dType = getDType(insn);
       Value *indirectBuffer;
       uint32_t buffer = getIndirect(&insn->src[0], 0, indirectBuffer);
@@ -2026,7 +2063,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_load_ssbo: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectBuffer;
       Value *indirectOffset;
       uint32_t buffer = getIndirect(&insn->src[0], 0, indirectBuffer);
@@ -2044,7 +2081,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_shared_atomic:
    case nir_intrinsic_shared_atomic_swap: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectOffset;
       uint32_t offset = getIndirect(&insn->src[0], 0, indirectOffset);
       Symbol *sym = mkSymbol(FILE_MEMORY_SHARED, 0, dType, offset);
@@ -2058,7 +2095,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_ssbo_atomic:
    case nir_intrinsic_ssbo_atomic_swap: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectBuffer;
       Value *indirectOffset;
       uint32_t buffer = getIndirect(&insn->src[0], 0, indirectBuffer);
@@ -2079,7 +2116,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_global_atomic:
    case nir_intrinsic_global_atomic_swap: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *address;
       uint32_t offset = getIndirect(&insn->src[0], 0, address);
 
@@ -2118,7 +2155,7 @@ Converter::visit(nir_intrinsic_instr *insn)
       uint16_t location = 0;
 
       if (opInfo.has_dest) {
-         LValues &newDefs = convert(&insn->dest);
+         LValues &newDefs = convert(&insn->def);
          for (uint8_t i = 0u; i < newDefs.size(); ++i) {
             defs.push_back(newDefs[i]);
             mask |= 1 << i;
@@ -2244,7 +2281,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_load_scratch:
    case nir_intrinsic_load_shared: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectOffset;
       uint32_t offset = getIndirect(&insn->src[0], 0, indirectOffset);
       if (indirectOffset)
@@ -2255,7 +2292,7 @@ Converter::visit(nir_intrinsic_instr *insn)
 
       break;
    }
-   case nir_intrinsic_scoped_barrier: {
+   case nir_intrinsic_barrier: {
       mesa_scope exec_scope = nir_intrinsic_execution_scope(insn);
       mesa_scope mem_scope = nir_intrinsic_memory_scope(insn);
       nir_variable_mode modes = nir_intrinsic_memory_modes(insn);
@@ -2285,7 +2322,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    }
    case nir_intrinsic_shader_clock: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
 
       loadImm(newDefs[0], 0u);
       mkOp1(OP_RDSV, dType, newDefs[1], mkSysVal(SV_CLOCK, 0))->fixed = 1;
@@ -2294,7 +2331,7 @@ Converter::visit(nir_intrinsic_instr *insn)
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant: {
       const DataType dType = getDType(insn);
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *indirectOffset;
       uint32_t offset = getIndirect(&insn->src[0], 0, indirectOffset);
 
@@ -2396,12 +2433,8 @@ Converter::visit(nir_load_const_instr *insn)
 }
 
 #define DEFAULT_CHECKS \
-      if (nir_dest_num_components(insn->dest.dest) > 1) { \
+      if (insn->def.num_components > 1) { \
          ERROR("nir_alu_instr only supported with 1 component!\n"); \
-         return false; \
-      } \
-      if (insn->dest.write_mask != 1) { \
-         ERROR("nir_alu_instr only with write_mask of 1 supported!\n"); \
          return false; \
       }
 bool
@@ -2447,6 +2480,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_umod:
    case nir_op_fmul:
    case nir_op_fmulz:
+   case nir_op_amul:
    case nir_op_imul:
    case nir_op_imul_high:
    case nir_op_umul_high:
@@ -2469,7 +2503,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_ishl:
    case nir_op_ixor: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       operation preOp = preOperationNeeded(op);
       if (preOp != OP_NOP) {
          assert(info.num_inputs < 2);
@@ -2506,14 +2540,14 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_ifind_msb:
    case nir_op_ufind_msb: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       dType = sTypes[0];
       mkOp1(getOperation(op), dType, newDefs[0], getSrc(&insn->src[0]));
       break;
    }
    case nir_op_fround_even: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkCvt(OP_CVT, dType, newDefs[0], dType, getSrc(&insn->src[0]))->rnd = ROUND_NI;
       break;
    }
@@ -2541,7 +2575,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_u2f64:
    case nir_op_u2u64: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       DataType stype = sTypes[0];
       Instruction *i = mkOp1(getOperation(op), dType, newDefs[0], getSrc(&insn->src[0]));
       if (::isFloatType(stype) && isIntType(dType))
@@ -2573,7 +2607,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_fneu32:
    case nir_op_ine32: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Instruction *i = mkCmp(getOperation(op),
                              getCondCode(op),
                              dType,
@@ -2587,7 +2621,7 @@ Converter::visit(nir_alu_instr *insn)
       break;
    }
    case nir_op_mov: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       for (LValues::size_type c = 0u; c < newDefs.size(); ++c) {
          mkMov(newDefs[c], getSrc(&insn->src[0], c), dType);
       }
@@ -2598,7 +2632,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_vec4:
    case nir_op_vec8:
    case nir_op_vec16: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       for (LValues::size_type c = 0u; c < newDefs.size(); ++c) {
          mkMov(newDefs[c], getSrc(&insn->src[c]), dType);
       }
@@ -2606,14 +2640,14 @@ Converter::visit(nir_alu_instr *insn)
    }
    // (un)pack
    case nir_op_pack_64_2x32: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Instruction *merge = mkOp(OP_MERGE, dType, newDefs[0]);
       merge->setSrc(0, getSrc(&insn->src[0], 0));
       merge->setSrc(1, getSrc(&insn->src[0], 1));
       break;
    }
    case nir_op_pack_half_2x16_split: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *tmpH = getSSA();
       Value *tmpL = getSSA();
 
@@ -2624,24 +2658,24 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_unpack_half_2x16_split_x:
    case nir_op_unpack_half_2x16_split_y: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Instruction *cvt = mkCvt(OP_CVT, TYPE_F32, newDefs[0], TYPE_F16, getSrc(&insn->src[0]));
       if (op == nir_op_unpack_half_2x16_split_y)
          cvt->subOp = 1;
       break;
    }
    case nir_op_unpack_64_2x32: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp1(OP_SPLIT, dType, newDefs[0], getSrc(&insn->src[0]))->setDef(1, newDefs[1]);
       break;
    }
    case nir_op_unpack_64_2x32_split_x: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp1(OP_SPLIT, dType, newDefs[0], getSrc(&insn->src[0]))->setDef(1, getSSA());
       break;
    }
    case nir_op_unpack_64_2x32_split_y: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp1(OP_SPLIT, dType, getSSA(), getSrc(&insn->src[0]))->setDef(1, newDefs[0]);
       break;
    }
@@ -2655,7 +2689,7 @@ Converter::visit(nir_alu_instr *insn)
       else
          iType = TYPE_S32;
 
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       LValue *val0 = getScratch();
       LValue *val1 = getScratch();
       mkCmp(OP_SET, CC_GT, iType, val0, dType, getSrc(&insn->src[0]), zero);
@@ -2677,7 +2711,7 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_fcsel:
    case nir_op_b32csel: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkCmp(OP_SLCT, CC_NE, dType, newDefs[0], sTypes[0], getSrc(&insn->src[1]), getSrc(&insn->src[2]), getSrc(&insn->src[0]));
       break;
    }
@@ -2685,20 +2719,20 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_ubitfield_extract: {
       DEFAULT_CHECKS;
       Value *tmp = getSSA();
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp3(OP_INSBF, dType, tmp, getSrc(&insn->src[2]), loadImm(NULL, 0x808), getSrc(&insn->src[1]));
       mkOp2(OP_EXTBF, dType, newDefs[0], getSrc(&insn->src[0]), tmp);
       break;
    }
    case nir_op_bfm: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp2(OP_BMSK, dType, newDefs[0], getSrc(&insn->src[1]), getSrc(&insn->src[0]))->subOp = NV50_IR_SUBOP_BMSK_W;
       break;
    }
    case nir_op_bitfield_insert: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       LValue *temp = getSSA();
       mkOp3(OP_INSBF, TYPE_U32, temp, getSrc(&insn->src[3]), mkImm(0x808), getSrc(&insn->src[2]));
       mkOp3(OP_INSBF, dType, newDefs[0], getSrc(&insn->src[1]), temp, getSrc(&insn->src[0]));
@@ -2706,19 +2740,19 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_bit_count: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp2(OP_POPCNT, dType, newDefs[0], getSrc(&insn->src[0]), getSrc(&insn->src[0]));
       break;
    }
    case nir_op_bitfield_reverse: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp1(OP_BREV, TYPE_U32, newDefs[0], getSrc(&insn->src[0]));
       break;
    }
    case nir_op_find_lsb: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *tmp = getSSA();
       mkOp1(OP_BREV, TYPE_U32, tmp, getSrc(&insn->src[0]));
       mkOp1(OP_BFIND, TYPE_U32, newDefs[0], tmp)->subOp = NV50_IR_SUBOP_BFIND_SAMT;
@@ -2726,7 +2760,7 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_extract_u8: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *prmt = getSSA();
       mkOp2(OP_OR, TYPE_U32, prmt, getSrc(&insn->src[1]), loadImm(NULL, 0x4440));
       mkOp3(OP_PERMT, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), prmt, loadImm(NULL, 0));
@@ -2734,7 +2768,7 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_extract_i8: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *prmt = getSSA();
       mkOp3(OP_MAD, TYPE_U32, prmt, getSrc(&insn->src[1]), loadImm(NULL, 0x1111), loadImm(NULL, 0x8880));
       mkOp3(OP_PERMT, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), prmt, loadImm(NULL, 0));
@@ -2742,7 +2776,7 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_extract_u16: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *prmt = getSSA();
       mkOp3(OP_MAD, TYPE_U32, prmt, getSrc(&insn->src[1]), loadImm(NULL, 0x22), loadImm(NULL, 0x4410));
       mkOp3(OP_PERMT, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), prmt, loadImm(NULL, 0));
@@ -2750,15 +2784,23 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_extract_i16: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *prmt = getSSA();
       mkOp3(OP_MAD, TYPE_U32, prmt, getSrc(&insn->src[1]), loadImm(NULL, 0x2222), loadImm(NULL, 0x9910));
       mkOp3(OP_PERMT, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), prmt, loadImm(NULL, 0));
       break;
    }
+   case nir_op_fquantize2f16: {
+      DEFAULT_CHECKS;
+      LValues &newDefs = convert(&insn->def);
+      Value *tmp = getSSA();
+      mkCvt(OP_CVT, TYPE_F16, tmp, TYPE_F32, getSrc(&insn->src[0]))->ftz = 1;
+      mkCvt(OP_CVT, TYPE_F32, newDefs[0], TYPE_F16, tmp);
+      break;
+   }
    case nir_op_urol: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp3(OP_SHF, TYPE_U32, newDefs[0], getSrc(&insn->src[0]),
             getSrc(&insn->src[1]), getSrc(&insn->src[0]))
          ->subOp = NV50_IR_SUBOP_SHF_L |
@@ -2768,7 +2810,7 @@ Converter::visit(nir_alu_instr *insn)
    }
    case nir_op_uror: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp3(OP_SHF, TYPE_U32, newDefs[0], getSrc(&insn->src[0]),
             getSrc(&insn->src[1]), getSrc(&insn->src[0]))
          ->subOp = NV50_IR_SUBOP_SHF_R |
@@ -2779,13 +2821,13 @@ Converter::visit(nir_alu_instr *insn)
    // boolean conversions
    case nir_op_b2f32: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp2(OP_AND, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), loadImm(NULL, 1.0f));
       break;
    }
    case nir_op_b2f64: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       Value *tmp = getSSA(4);
       mkOp2(OP_AND, TYPE_U32, tmp, getSrc(&insn->src[0]), loadImm(NULL, 0x3ff00000));
       mkOp2(OP_MERGE, TYPE_U64, newDefs[0], loadImm(NULL, 0), tmp);
@@ -2795,13 +2837,13 @@ Converter::visit(nir_alu_instr *insn)
    case nir_op_b2i16:
    case nir_op_b2i32: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       mkOp2(OP_AND, TYPE_U32, newDefs[0], getSrc(&insn->src[0]), loadImm(NULL, 1));
       break;
    }
    case nir_op_b2i64: {
       DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       LValue *def = getScratch();
       mkOp2(OP_AND, TYPE_U32, def, getSrc(&insn->src[0]), loadImm(NULL, 1));
       mkOp2(OP_MERGE, TYPE_S64, newDefs[0], def, loadImm(NULL, 0));
@@ -2825,14 +2867,13 @@ Converter::visit(nir_alu_instr *insn)
       oldPos = oldPos->next;
       oldPos->precise = insn->exact;
    }
-   oldPos->saturate = insn->dest.saturate;
 
    return true;
 }
 #undef DEFAULT_CHECKS
 
 bool
-Converter::visit(nir_ssa_undef_instr *insn)
+Converter::visit(nir_undef_instr *insn)
 {
    LValues &newDefs = convert(&insn->def);
    for (uint8_t i = 0u; i < insn->def.num_components; ++i) {
@@ -2857,11 +2898,13 @@ Converter::convert(glsl_sampler_dim dim, bool isArray, bool isShadow)
 {
    switch (dim) {
    CASE_SAMPLER(1D);
+   case GLSL_SAMPLER_DIM_SUBPASS:
    CASE_SAMPLER(2D);
    CASE_SAMPLER(CUBE);
    case GLSL_SAMPLER_DIM_3D:
       return TEX_TARGET_3D;
    case GLSL_SAMPLER_DIM_MS:
+   case GLSL_SAMPLER_DIM_SUBPASS_MS:
       if (isArray)
          return TEX_TARGET_2D_MS_ARRAY;
       return TEX_TARGET_2D_MS;
@@ -2917,7 +2960,7 @@ Converter::visit(nir_tex_instr *insn)
    case nir_texop_txf_ms:
    case nir_texop_txl:
    case nir_texop_txs: {
-      LValues &newDefs = convert(&insn->dest);
+      LValues &newDefs = convert(&insn->def);
       std::vector<Value*> srcs;
       std::vector<Value*> defs;
       std::vector<nir_src*> offsets;
@@ -2958,14 +3001,14 @@ Converter::visit(nir_tex_instr *insn)
             srcs.push_back(getSSA());
       }
 
-      if (insn->op == nir_texop_texture_samples)
-         srcs.push_back(zero);
-      else if (!insn->num_srcs)
-         srcs.push_back(loadImm(NULL, 0));
       if (biasIdx != -1)
          srcs.push_back(getSrc(&insn->src[biasIdx].src, 0));
-      if (lodIdx != -1)
+      // TXQ requires a lod argument for all queries we care about here.
+      // For other ops on MS textures we skip it.
+      if (lodIdx != -1 && !target.isMS())
          srcs.push_back(getSrc(&insn->src[lodIdx].src, 0));
+      else if (op == OP_TXQ)
+         srcs.push_back(zero); // TXQ always needs an LOD
       else if (op == OP_TXF)
          lz = true;
       if (msIdx != -1)
@@ -3006,6 +3049,10 @@ Converter::visit(nir_tex_instr *insn)
       if (target.isMS() || (op == OP_TEX && prog->getType() != Program::TYPE_FRAGMENT))
          lz = true;
 
+      // TODO figure out which instructions still need this.
+      if (srcs.empty())
+         srcs.push_back(loadImm(NULL, 0));
+
       TexInstruction *texi = mkTex(op, target.getEnum(), r, s, defs, srcs);
       texi->tex.levelZero = lz;
       texi->tex.mask = mask;
@@ -3032,6 +3079,7 @@ Converter::visit(nir_tex_instr *insn)
          texi->tex.mask = 0x8;
          texi->tex.query = TXQ_DIMS;
          break;
+      // TODO: TXQ_SAMPLE_POSITION needs the sample id instead of the LOD emited further up.
       default:
          break;
       }
@@ -3196,11 +3244,6 @@ Converter::run()
    NIR_PASS_V(nir, nir_opt_deref);
    NIR_PASS_V(nir, nir_lower_vars_to_ssa);
 
-   /* codegen assumes vec4 alignment for memory */
-   NIR_PASS_V(nir, nir_lower_vars_to_explicit_types, nir_var_function_temp, function_temp_type_info);
-   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_function_temp, nir_address_format_32bit_offset);
-   NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
-
    NIR_PASS_V(nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
               type_size, (nir_lower_io_options)0);
 
@@ -3239,6 +3282,12 @@ Converter::run()
       NIR_PASS(progress, nir, nir_lower_64bit_phis);
    } while (progress);
 
+   /* codegen assumes vec4 alignment for memory */
+   NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+   NIR_PASS_V(nir, nir_lower_vars_to_explicit_types, nir_var_function_temp, function_temp_type_info);
+   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_function_temp, nir_address_format_32bit_offset);
+   NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+
    NIR_PASS_V(nir, nir_opt_combine_barriers, NULL, NULL);
 
    nir_move_options move_options =
@@ -3257,10 +3306,13 @@ Converter::run()
    NIR_PASS_V(nir, nir_lower_bool_to_int32);
    NIR_PASS_V(nir, nir_lower_bit_size, Converter::lowerBitSizeCB, this);
 
-   NIR_PASS_V(nir, nir_convert_from_ssa, true, true);
+   NIR_PASS_V(nir, nir_divergence_analysis);
+   NIR_PASS_V(nir, nir_convert_from_ssa, true);
 
    // Garbage collect dead instructions
    nir_sweep(nir);
+
+   nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    if (!parseNIR()) {
       ERROR("Couldn't prase NIR!\n");
@@ -3291,7 +3343,7 @@ bool
 Program::makeFromNIR(struct nv50_ir_prog_info *info,
                      struct nv50_ir_prog_info_out *info_out)
 {
-   nir_shader *nir = (nir_shader*)info->bin.source;
+   nir_shader *nir = info->bin.nir;
    Converter converter(this, nir, info, info_out);
    bool result = converter.run();
    if (!result)
@@ -3373,7 +3425,7 @@ nvir_nir_shader_compiler_options(int chipset, uint8_t shader_type)
    op.optimize_sample_mask_in = false;
    op.lower_cs_local_index_to_id = true;
    op.lower_cs_local_id_to_index = false;
-   op.lower_device_index_to_zero = false; // TODO
+   op.lower_device_index_to_zero = true;
    op.lower_wpos_pntc = false; // TODO
    op.lower_hadd = true; // TODO
    op.lower_uadd_sat = true; // TODO

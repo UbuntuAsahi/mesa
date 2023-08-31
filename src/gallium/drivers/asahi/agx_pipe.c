@@ -26,6 +26,7 @@
 #include "pipe/p_defines.h"
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
+#include "util/bitscan.h"
 #include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/u_drm.h"
@@ -1269,6 +1270,13 @@ asahi_add_attachment(struct attachments *att, struct agx_resource *rsrc,
    att->list[idx].flags = 0;
 }
 
+static bool
+is_aligned(unsigned x, unsigned pot_alignment)
+{
+   assert(util_is_power_of_two_nonzero(pot_alignment));
+   return (x & (pot_alignment - 1)) == 0;
+}
+
 static void
 agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
            struct attachments *att, struct agx_pool *pool,
@@ -1340,6 +1348,16 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             c->depth_buffer_store = c->depth_buffer_load;
             c->depth_buffer_partial = c->depth_buffer_load;
 
+            /* Main stride in pages */
+            assert((zres->layout.depth_px == 1 ||
+                    is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                   "Page aligned Z layers");
+
+            unsigned stride_pages = zres->layout.layer_stride_B / AIL_PAGESIZE;
+            c->depth_buffer_load_stride = ((stride_pages - 1) << 14) | 1;
+            c->depth_buffer_store_stride = c->depth_buffer_load_stride;
+            c->depth_buffer_partial_stride = c->depth_buffer_load_stride;
+
             assert(zres->layout.tiling != AIL_TILING_LINEAR && "must tile");
 
             if (ail_is_compressed(&zres->layout)) {
@@ -1349,8 +1367,20 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                   (first_layer * zres->layout.compression_layer_stride_B) +
                   zres->layout.level_offsets_compressed_B[level];
 
+               /* Meta stride in cache lines */
+               assert(is_aligned(zres->layout.compression_layer_stride_B,
+                                 AIL_CACHELINE) &&
+                      "Cacheline aligned Z meta layers");
+               unsigned stride_lines =
+                  zres->layout.compression_layer_stride_B / AIL_CACHELINE;
+               c->depth_meta_buffer_load_stride = (stride_lines - 1) << 14;
+
                c->depth_meta_buffer_store = c->depth_meta_buffer_load;
+               c->depth_meta_buffer_store_stride =
+                  c->depth_meta_buffer_load_stride;
                c->depth_meta_buffer_partial = c->depth_meta_buffer_load;
+               c->depth_meta_buffer_partial_stride =
+                  c->depth_meta_buffer_load_stride;
 
                zls_control.z_compress_1 = true;
                zls_control.z_compress_2 = true;
@@ -1383,6 +1413,15 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             c->stencil_buffer_store = c->stencil_buffer_load;
             c->stencil_buffer_partial = c->stencil_buffer_load;
 
+            /* Main stride in pages */
+            assert((sres->layout.depth_px == 1 ||
+                    is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                   "Page aligned S layers");
+            unsigned stride_pages = sres->layout.layer_stride_B / AIL_PAGESIZE;
+            c->stencil_buffer_load_stride = ((stride_pages - 1) << 14) | 1;
+            c->stencil_buffer_store_stride = c->stencil_buffer_load_stride;
+            c->stencil_buffer_partial_stride = c->stencil_buffer_load_stride;
+
             if (ail_is_compressed(&sres->layout)) {
                c->stencil_meta_buffer_load =
                   agx_map_texture_gpu(sres, 0) +
@@ -1390,8 +1429,20 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
                   (first_layer * sres->layout.compression_layer_stride_B) +
                   sres->layout.level_offsets_compressed_B[level];
 
+               /* Meta stride in cache lines */
+               assert(is_aligned(sres->layout.compression_layer_stride_B,
+                                 AIL_CACHELINE) &&
+                      "Cacheline aligned S meta layers");
+               unsigned stride_lines =
+                  sres->layout.compression_layer_stride_B / AIL_CACHELINE;
+               c->stencil_meta_buffer_load_stride = (stride_lines - 1) << 14;
+
                c->stencil_meta_buffer_store = c->stencil_meta_buffer_load;
+               c->stencil_meta_buffer_store_stride =
+                  c->stencil_meta_buffer_load_stride;
                c->stencil_meta_buffer_partial = c->stencil_meta_buffer_load;
+               c->stencil_meta_buffer_partial_stride =
+                  c->stencil_meta_buffer_load_stride;
 
                zls_control.s_compress_1 = true;
                zls_control.s_compress_2 = true;
@@ -1559,13 +1610,13 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch)
       .encoder_end =
          batch->encoder->ptr.gpu +
          (batch->encoder_current - (uint8_t *)batch->encoder->ptr.cpu),
-      .buffer_descriptor = 0,
-      .buffer_descriptor_size = 0,
-      .ctx_switch_prog = 0,
+      .helper_arg = 0,
+      .helper_unk = 0,
+      .helper_program = 0,
       .encoder_id = encoder_id,
       .cmd_id = cmdbuf_id,
       .iogpu_unk_40 = 0x1c,
-      .iogpu_unk_44 = 0xffffffff,
+      .unk_mask = 0xffffffff,
    };
 
    agx_batch_submit(ctx, batch, BARRIER_RENDER | BARRIER_COMPUTE,
@@ -1909,21 +1960,16 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
    case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
    case PIPE_CAP_NULL_TEXTURES:
-      return 1;
-
    case PIPE_CAP_TEXTURE_MULTISAMPLE:
-      return 1;
-   case PIPE_CAP_SURFACE_SAMPLE_COUNT:
-      /* TODO: MSRTT */
-   case PIPE_CAP_SAMPLE_SHADING:
-      /* TODO: sample shading */
-      return 0;
-
    case PIPE_CAP_IMAGE_LOAD_FORMATTED:
    case PIPE_CAP_IMAGE_STORE_FORMATTED:
    case PIPE_CAP_COMPUTE:
    case PIPE_CAP_INT64:
-      return is_deqp;
+   case PIPE_CAP_SAMPLE_SHADING:
+      return 1;
+   case PIPE_CAP_SURFACE_SAMPLE_COUNT:
+      /* TODO: MSRTT */
+      return 0;
 
    case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
       return 0;
@@ -1946,7 +1992,7 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
       return is_deqp ? 330 : 140;
    case PIPE_CAP_ESSL_FEATURE_LEVEL:
-      return is_deqp ? 310 : 300;
+      return 320;
 
    case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
       return 16;
@@ -2090,11 +2136,15 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
                      enum pipe_shader_cap param)
 {
    bool is_no16 = agx_device(pscreen)->debug & AGX_DBG_NO16;
-   bool is_deqp = agx_device(pscreen)->debug & AGX_DBG_DEQP;
 
-   if (shader != PIPE_SHADER_VERTEX && shader != PIPE_SHADER_FRAGMENT &&
-       !(shader == PIPE_SHADER_COMPUTE && is_deqp))
-      return 0;
+   switch (shader) {
+   case PIPE_SHADER_VERTEX:
+   case PIPE_SHADER_FRAGMENT:
+   case PIPE_SHADER_COMPUTE:
+      break;
+   default:
+      return false;
+   }
 
    /* Don't allow side effects with vertex processing. The APIs don't require it
     * and it may be problematic on our hardware.
@@ -2165,10 +2215,10 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
       return (1 << PIPE_SHADER_IR_NIR);
 
    case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return (is_deqp && allow_side_effects) ? PIPE_MAX_SHADER_BUFFERS : 0;
+      return allow_side_effects ? PIPE_MAX_SHADER_BUFFERS : 0;
 
    case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return (is_deqp && allow_side_effects) ? PIPE_MAX_SHADER_IMAGES : 0;
+      return allow_side_effects ? PIPE_MAX_SHADER_IMAGES : 0;
 
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
@@ -2186,9 +2236,6 @@ static int
 agx_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
                       enum pipe_compute_cap param, void *ret)
 {
-   if (!(agx_device(pscreen)->debug & AGX_DBG_DEQP))
-      return 0;
-
 #define RET(x)                                                                 \
    do {                                                                        \
       if (ret)                                                                 \

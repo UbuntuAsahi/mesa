@@ -43,6 +43,13 @@
 
 #include <vulkan/vulkan.h>
 
+#ifdef HAVE_LIBDRM
+#include <xf86drm.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#endif
+
 #ifdef VK_USE_PLATFORM_XCB_KHR
 #include <xcb/xcb.h>
 #include <xcb/dri3.h>
@@ -109,6 +116,43 @@ static const __DRIextension *drivk_sw_screen_extensions[] = {
    NULL
 };
 
+static int
+kopper_render_rdev(int fd, struct pipe_loader_device *pipe_loader)
+{
+   int ret = 0;
+   pipe_loader->dev_major = -1;
+   pipe_loader->dev_minor = -1;
+
+#ifdef HAVE_LIBDRM
+   struct stat stx;
+   drmDevicePtr dev;
+
+   if (fd == -1)
+      return 0;
+
+   if (drmGetDevice2(fd, 0, &dev))
+      return -1;
+
+   if(!(dev->available_nodes & (1 << DRM_NODE_RENDER))) {
+      ret = -1;
+      goto free_device;
+   }
+
+   if(stat(dev->nodes[DRM_NODE_RENDER], &stx)) {
+      ret = -1;
+      goto free_device;
+   }
+
+   pipe_loader->dev_major = major(stx.st_rdev);
+   pipe_loader->dev_minor = minor(stx.st_rdev);
+
+free_device:
+   drmFreeDevice(&dev);
+#endif //HAVE_LIBDRM
+
+   return ret;
+}
+
 static const __DRIconfig **
 kopper_init_screen(struct dri_screen *screen)
 {
@@ -130,8 +174,11 @@ kopper_init_screen(struct dri_screen *screen)
    else
       success = pipe_loader_vk_probe_dri(&screen->dev, NULL);
 
-   if (success)
+   if (success) {
+      if (kopper_render_rdev(screen->fd, screen->dev))
+         goto fail;
       pscreen = pipe_loader_create_screen(screen->dev);
+   }
 
    if (!pscreen)
       goto fail;
@@ -191,11 +238,20 @@ get_dri_format(enum pipe_format pf)
    case PIPE_FORMAT_R16G16B16X16_FLOAT:
       image_format = __DRI_IMAGE_FORMAT_XBGR16161616F;
       break;
+   case PIPE_FORMAT_B5G6R5_UNORM:
+      image_format = __DRI_IMAGE_FORMAT_RGB565;
+      break;
    case PIPE_FORMAT_B5G5R5A1_UNORM:
       image_format = __DRI_IMAGE_FORMAT_ARGB1555;
       break;
-   case PIPE_FORMAT_B5G6R5_UNORM:
-      image_format = __DRI_IMAGE_FORMAT_RGB565;
+   case PIPE_FORMAT_R5G5B5A1_UNORM:
+      image_format = __DRI_IMAGE_FORMAT_ABGR1555;
+      break;
+   case PIPE_FORMAT_B4G4R4A4_UNORM:
+      image_format = __DRI_IMAGE_FORMAT_ARGB4444;
+      break;
+   case PIPE_FORMAT_R4G4B4A4_UNORM:
+      image_format = __DRI_IMAGE_FORMAT_ABGR4444;
       break;
    case PIPE_FORMAT_BGRX8888_UNORM:
       image_format = __DRI_IMAGE_FORMAT_XRGB8888;
@@ -253,6 +309,10 @@ image_format_to_fourcc(int format)
    case __DRI_IMAGE_FORMAT_ABGR2101010: return DRM_FORMAT_ABGR2101010;
    case __DRI_IMAGE_FORMAT_XBGR16161616F: return DRM_FORMAT_XBGR16161616F;
    case __DRI_IMAGE_FORMAT_ABGR16161616F: return DRM_FORMAT_ABGR16161616F;
+   case __DRI_IMAGE_FORMAT_ARGB1555: return DRM_FORMAT_ARGB1555;
+   case __DRI_IMAGE_FORMAT_ABGR1555: return DRM_FORMAT_ABGR1555;
+   case __DRI_IMAGE_FORMAT_ARGB4444: return DRM_FORMAT_ARGB4444;
+   case __DRI_IMAGE_FORMAT_ABGR4444: return DRM_FORMAT_ABGR4444;
    }
    return 0;
 }
@@ -395,7 +455,7 @@ kopper_get_pixmap_buffer(struct dri_drawable *drawable,
    struct dri_screen *screen = drawable->screen;
 
 #ifdef HAVE_DRI3_MODIFIERS
-   if (screen->has_modifiers) {
+   if (drawable->has_modifiers) {
       xcb_dri3_buffers_from_pixmap_cookie_t bps_cookie;
       xcb_dri3_buffers_from_pixmap_reply_t *bps_reply;
       xcb_generic_error_t *error;
@@ -410,6 +470,8 @@ kopper_get_pixmap_buffer(struct dri_drawable *drawable,
          dri3_create_image_from_buffers(conn, bps_reply, format,
                                         screen, &driVkImageExtension,
                                         drawable);
+      if (!drawable->image)
+         return NULL;
       width = bps_reply->width;
       height = bps_reply->height;
       free(bps_reply);
@@ -430,6 +492,8 @@ kopper_get_pixmap_buffer(struct dri_drawable *drawable,
       drawable->image = dri3_create_image(conn, bp_reply, format,
                                        screen, &driVkImageExtension,
                                        drawable);
+      if (!drawable->image)
+         return NULL;
       width = bp_reply->width;
       height = bp_reply->height;
       free(bp_reply);
@@ -594,13 +658,13 @@ XXX do this once swapinterval is hooked up
 #ifdef VK_USE_PLATFORM_XCB_KHR
          else if (is_pixmap && statts[i] == ST_ATTACHMENT_FRONT_LEFT && !screen->is_sw) {
             drawable->textures[statts[i]] = kopper_get_pixmap_buffer(drawable, format);
-            handle_in_fence(ctx, drawable->image);
+            if (drawable->textures[statts[i]])
+               handle_in_fence(ctx, drawable->image);
          }
 #endif
-         else {
+         if (!drawable->textures[statts[i]])
             drawable->textures[statts[i]] =
                screen->base.screen->resource_create(screen->base.screen, &templ);
-         }
       }
       if (drawable->stvis.samples > 1 && !drawable->msaa_textures[statts[i]]) {
          templ.bind = bind &
@@ -889,13 +953,15 @@ static __DRIdrawable *
 kopperCreateNewDrawable(__DRIscreen *psp,
                         const __DRIconfig *config,
                         void *data,
-                        int is_pixmap)
+                        __DRIkopperDrawableInfo *info)
 {
     assert(data != NULL);
 
     struct dri_screen *screen = dri_screen(psp);
     struct dri_drawable *drawable =
-       screen->create_drawable(screen, &config->modes, is_pixmap, data);
+       screen->create_drawable(screen, &config->modes, info->is_pixmap, data);
+   if (drawable)
+      drawable->has_modifiers = screen->has_modifiers && info->multiplanes_available;
 
     return opaque_dri_drawable(drawable);
 }

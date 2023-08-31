@@ -136,6 +136,7 @@ struct rendering_state {
    uint8_t patch_vertices;
    uint8_t index_size;
    unsigned index_offset;
+   unsigned index_buffer_size; //UINT32_MAX for unset
    struct pipe_resource *index_buffer;
    struct pipe_constant_buffer const_buffer[LVP_SHADER_STAGES][16];
    struct lvp_descriptor_set *desc_sets[2][MAX_SETS];
@@ -145,7 +146,11 @@ struct rendering_state {
    int num_const_bufs[LVP_SHADER_STAGES];
    int num_vb;
    unsigned start_vb;
+   bool vb_strides_dirty;
+   unsigned vb_strides[PIPE_MAX_ATTRIBS];
    struct pipe_vertex_buffer vb[PIPE_MAX_ATTRIBS];
+   size_t vb_sizes[PIPE_MAX_ATTRIBS]; //UINT32_MAX for unset
+   uint8_t vertex_buffer_index[PIPE_MAX_ATTRIBS]; /* temp storage to sort for start_vb */
    struct cso_velems_state velem;
 
    bool disable_multisample;
@@ -164,7 +169,7 @@ struct rendering_state {
    bool suspending;
    bool render_cond;
    uint32_t color_att_count;
-   struct lvp_render_attachment *color_att;
+   struct lvp_render_attachment color_att[PIPE_MAX_COLOR_BUFS];
    struct lvp_render_attachment depth_att;
    struct lvp_render_attachment stencil_att;
    struct lvp_image_view *ds_imgv;
@@ -401,6 +406,12 @@ update_min_samples(struct rendering_state *state)
    }
 }
 
+static void update_vertex_elements_buffer_index(struct rendering_state *state)
+{
+   for (int i = 0; i < state->velem.count; i++)
+      state->velem.velems[i].vertex_buffer_index = state->vertex_buffer_index[i] - state->start_vb;
+}
+
 static void emit_state(struct rendering_state *state)
 {
    if (!state->shaders[MESA_SHADER_FRAGMENT] && !state->noop_fs_bound) {
@@ -480,12 +491,19 @@ static void emit_state(struct rendering_state *state)
       state->stencil_ref_dirty = false;
    }
 
+   if (state->vb_strides_dirty) {
+      for (unsigned i = 0; i < state->velem.count; i++)
+         state->velem.velems[i].src_stride = state->vb_strides[state->velem.velems[i].vertex_buffer_index];
+      state->vb_strides_dirty = false;
+   }
+
    if (state->vb_dirty) {
-      cso_set_vertex_buffers(state->cso, state->start_vb, state->num_vb, 0, false, state->vb);
+      cso_set_vertex_buffers(state->cso, state->num_vb, 0, false, state->vb);
       state->vb_dirty = false;
    }
 
    if (state->ve_dirty) {
+      update_vertex_elements_buffer_index(state);
       cso_set_vertex_elements(state->cso, &state->velem);
       state->ve_dirty = false;
    }
@@ -907,6 +925,7 @@ static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
       }
    } else if (ps->rp->color_attachment_count == 0) {
       memset(&state->blend_state, 0, sizeof(state->blend_state));
+      state->blend_state.rt[0].colormask = 0xf;
       state->blend_dirty = true;
    }
 
@@ -950,8 +969,10 @@ static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
 
    if (!BITSET_TEST(ps->dynamic, MESA_VK_DYNAMIC_VI_BINDING_STRIDES)) {
       if (ps->vi) {
-         u_foreach_bit(b, ps->vi->bindings_valid)
-            state->vb[b].stride = ps->vi->bindings[b].stride;
+         u_foreach_bit(a, ps->vi->attributes_valid) {
+            uint32_t b = ps->vi->attributes[a].binding;
+            state->velem.velems[a].src_stride = ps->vi->bindings[b].stride;
+         }
          state->vb_dirty = true;
       }
    }
@@ -960,7 +981,7 @@ static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
       u_foreach_bit(a, ps->vi->attributes_valid) {
          uint32_t b = ps->vi->attributes[a].binding;
          state->velem.velems[a].src_offset = ps->vi->attributes[a].offset;
-         state->velem.velems[a].vertex_buffer_index = b;
+         state->vertex_buffer_index[a] = b;
          state->velem.velems[a].src_format =
             lvp_vk_format_to_pipe_format(ps->vi->attributes[a].format);
          state->velem.velems[a].dual_slot = false;
@@ -1069,11 +1090,28 @@ static void handle_vertex_buffers2(struct vk_cmd_queue_entry *cmd,
       int idx = i + vcb->first_binding;
 
       state->vb[idx].buffer_offset = vcb->offsets[i];
-      state->vb[idx].buffer.resource =
-         vcb->buffers[i] ? lvp_buffer_from_handle(vcb->buffers[i])->bo : NULL;
+      if (state->vb_sizes[idx] != UINT32_MAX)
+         pipe_resource_reference(&state->vb[idx].buffer.resource, NULL);
+      state->vb[idx].buffer.resource = vcb->buffers[i] && (!vcb->sizes || vcb->sizes[i]) ? lvp_buffer_from_handle(vcb->buffers[i])->bo : NULL;
+      if (state->vb[idx].buffer.resource && vcb->sizes) {
+         if (vcb->sizes[i] == VK_WHOLE_SIZE || vcb->offsets[i] + vcb->sizes[i] >= state->vb[idx].buffer.resource->width0) {
+            state->vb_sizes[idx] = UINT32_MAX;
+         } else {
+            struct pipe_transfer *xfer;
+            uint8_t *mem = pipe_buffer_map(state->pctx, state->vb[idx].buffer.resource, 0, &xfer);
+            state->pctx->buffer_unmap(state->pctx, xfer);
+            state->vb[idx].buffer.resource = get_buffer_resource(state->pctx, mem);
+            state->vb[idx].buffer.resource->width0 = MIN2(vcb->offsets[i] + vcb->sizes[i], state->vb[idx].buffer.resource->width0);
+            state->vb_sizes[idx] = vcb->sizes[i];
+         }
+      } else {
+         state->vb_sizes[idx] = UINT32_MAX;
+      }
 
-      if (vcb->strides)
-         state->vb[idx].stride = vcb->strides[i];
+      if (vcb->strides) {
+         state->vb_strides[idx] = vcb->strides[i];
+         state->vb_strides_dirty = true;
+      }
    }
    if (vcb->first_binding < state->start_vb)
       state->start_vb = vcb->first_binding;
@@ -1252,9 +1290,7 @@ static void add_img_view_surface(struct rendering_state *state,
                                  int layer_count)
 {
    if (imgv->surface) {
-      if (imgv->surface->width != width ||
-          imgv->surface->height != height ||
-          (imgv->surface->u.tex.last_layer - imgv->surface->u.tex.first_layer) != (layer_count - 1))
+      if ((imgv->surface->u.tex.last_layer - imgv->surface->u.tex.first_layer) != (layer_count - 1))
          pipe_surface_reference(&imgv->surface, NULL);
    }
 
@@ -1549,6 +1585,7 @@ resolve_color(struct rendering_state *state, bool multi)
       info.src.box.depth = state->framebuffer.layers;
 
       info.dst.box = info.src.box;
+      info.src.box.z = src_imgv->vk.base_array_layer;
       info.dst.box.z = dst_imgv->vk.base_array_layer;
 
       info.src.level = src_imgv->vk.base_mip_level;
@@ -1713,7 +1750,7 @@ handle_begin_rendering(struct vk_cmd_queue_entry *cmd,
    state->framebuffer.nr_cbufs = info->colorAttachmentCount;
 
    state->color_att_count = info->colorAttachmentCount;
-   state->color_att = realloc(state->color_att, sizeof(*state->color_att) * state->color_att_count);
+   memset(state->framebuffer.cbufs, 0, sizeof(state->framebuffer.cbufs));
    for (unsigned i = 0; i < info->colorAttachmentCount; i++) {
       render_att_init(&state->color_att[i], &info->pColorAttachments[i], state->poison_mem, false);
       if (state->color_att[i].imgv) {
@@ -2118,6 +2155,14 @@ copy_depth_box(uint8_t *dst,
    }
 }
 
+static unsigned
+subresource_layercount(const struct lvp_image *image, const VkImageSubresourceLayers *sub)
+{
+   if (sub->layerCount != VK_REMAINING_ARRAY_LAYERS)
+      return sub->layerCount;
+   return image->vk.array_layers - sub->baseArrayLayer;
+}
+
 static void handle_copy_image_to_buffer2(struct vk_cmd_queue_entry *cmd,
                                              struct rendering_state *state)
 {
@@ -2134,7 +2179,7 @@ static void handle_copy_image_to_buffer2(struct vk_cmd_queue_entry *cmd,
       box.z = src_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageOffset.z : copycmd->pRegions[i].imageSubresource.baseArrayLayer;
       box.width = copycmd->pRegions[i].imageExtent.width;
       box.height = copycmd->pRegions[i].imageExtent.height;
-      box.depth = src_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageExtent.depth : copycmd->pRegions[i].imageSubresource.layerCount;
+      box.depth = src_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageExtent.depth : subresource_layercount(src_image, &copycmd->pRegions[i].imageSubresource);
 
       src_data = state->pctx->texture_map(state->pctx,
                                            src_image->bo,
@@ -2222,7 +2267,7 @@ static void handle_copy_buffer_to_image(struct vk_cmd_queue_entry *cmd,
       box.z = dst_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageOffset.z : copycmd->pRegions[i].imageSubresource.baseArrayLayer;
       box.width = copycmd->pRegions[i].imageExtent.width;
       box.height = copycmd->pRegions[i].imageExtent.height;
-      box.depth = dst_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageExtent.depth : copycmd->pRegions[i].imageSubresource.layerCount;
+      box.depth = dst_image->vk.image_type == VK_IMAGE_TYPE_3D ? copycmd->pRegions[i].imageExtent.depth : subresource_layercount(dst_image, &copycmd->pRegions[i].imageSubresource);
 
       dst_data = state->pctx->texture_map(state->pctx,
                                            dst_image->bo,
@@ -2288,7 +2333,7 @@ static void handle_copy_image(struct vk_cmd_queue_entry *cmd,
          src_box.depth = copycmd->pRegions[i].extent.depth;
          src_box.z = copycmd->pRegions[i].srcOffset.z;
       } else {
-         src_box.depth = copycmd->pRegions[i].srcSubresource.layerCount;
+         src_box.depth = subresource_layercount(src_image, &copycmd->pRegions[i].srcSubresource);
          src_box.z = copycmd->pRegions[i].srcSubresource.baseArrayLayer;
       }
 
@@ -2395,8 +2440,8 @@ static void handle_blit_image(struct vk_cmd_queue_entry *cmd,
       } else {
          info.src.box.z = blitcmd->pRegions[i].srcSubresource.baseArrayLayer;
          info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
-         info.src.box.depth = blitcmd->pRegions[i].srcSubresource.layerCount;
-         info.dst.box.depth = blitcmd->pRegions[i].dstSubresource.layerCount;
+         info.src.box.depth = subresource_layercount(src_image, &blitcmd->pRegions[i].srcSubresource);
+         info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
       }
 
       info.src.level = blitcmd->pRegions[i].srcSubresource.mipLevel;
@@ -2460,7 +2505,7 @@ static void handle_draw_indexed(struct vk_cmd_queue_entry *cmd,
    if (state->info.primitive_restart)
       state->info.restart_index = util_prim_restart_index_from_size(state->info.index_size);
 
-   draw.count = cmd->u.draw_indexed.index_count;
+   draw.count = MIN2(cmd->u.draw_indexed.index_count, state->index_buffer_size / state->index_size);
    draw.index_bias = cmd->u.draw_indexed.vertex_offset;
    /* TODO: avoid calculating multiple times if cmdbuf is submitted again */
    draw.start = util_clamped_uadd(state->index_offset / state->index_size,
@@ -2491,6 +2536,10 @@ static void handle_draw_multi_indexed(struct vk_cmd_queue_entry *cmd,
 
    unsigned size = cmd->u.draw_multi_indexed_ext.draw_count * sizeof(struct pipe_draw_start_count_bias);
    memcpy(draws, cmd->u.draw_multi_indexed_ext.index_info, size);
+   if (state->index_buffer_size != UINT32_MAX) {
+      for (unsigned i = 0; i < cmd->u.draw_multi_indexed_ext.draw_count; i++)
+         draws[i].count = MIN2(draws[i].count, state->index_buffer_size / state->index_size - draws[i].start);
+   }
 
    /* only the first member is read if index_bias_varies is true */
    if (cmd->u.draw_multi_indexed_ext.draw_count &&
@@ -2522,12 +2571,12 @@ static void handle_draw_indirect(struct vk_cmd_queue_entry *cmd,
       state->info.max_index = ~0U;
       if (state->info.primitive_restart)
          state->info.restart_index = util_prim_restart_index_from_size(state->info.index_size);
-      if (state->index_offset) {
+      if (state->index_offset || state->index_buffer_size != UINT32_MAX) {
          struct pipe_transfer *xfer;
          uint8_t *mem = pipe_buffer_map(state->pctx, state->index_buffer, 0, &xfer);
          state->pctx->buffer_unmap(state->pctx, xfer);
          index = get_buffer_resource(state->pctx, mem + state->index_offset);
-         index->width0 = state->index_buffer->width0 - state->index_offset;
+         index->width0 = MIN2(state->index_buffer->width0 - state->index_offset, state->index_buffer_size);
          state->info.index.resource = index;
       }
    } else
@@ -2546,6 +2595,25 @@ static void handle_index_buffer(struct vk_cmd_queue_entry *cmd,
 {
    struct vk_cmd_bind_index_buffer *ib = &cmd->u.bind_index_buffer;
    state->index_size = vk_index_type_to_bytes(ib->index_type);
+   state->index_buffer_size = UINT32_MAX;
+
+   if (ib->buffer) {
+      state->index_offset = ib->offset;
+      state->index_buffer = lvp_buffer_from_handle(ib->buffer)->bo;
+   } else {
+      state->index_offset = 0;
+      state->index_buffer = state->device->zero_buffer;
+   }
+
+   state->ib_dirty = true;
+}
+
+static void handle_index_buffer2(struct vk_cmd_queue_entry *cmd,
+                                 struct rendering_state *state)
+{
+   struct vk_cmd_bind_index_buffer2_khr *ib = &cmd->u.bind_index_buffer2_khr;
+   state->index_size = vk_index_type_to_bytes(ib->index_type);
+   state->index_buffer_size = ib->size;
 
    if (ib->buffer) {
       state->index_offset = ib->offset;
@@ -3015,8 +3083,8 @@ static void handle_resolve_image(struct vk_cmd_queue_entry *cmd,
       info.dst.box.height = resolvecmd->pRegions[i].extent.height;
       info.src.box.height = resolvecmd->pRegions[i].extent.height;
 
-      info.dst.box.depth = resolvecmd->pRegions[i].dstSubresource.layerCount;
-      info.src.box.depth = resolvecmd->pRegions[i].srcSubresource.layerCount;
+      info.dst.box.depth = subresource_layercount(dst_image, &resolvecmd->pRegions[i].dstSubresource);
+      info.src.box.depth = subresource_layercount(src_image, &resolvecmd->pRegions[i].srcSubresource);
 
       info.src.level = resolvecmd->pRegions[i].srcSubresource.mipLevel;
       info.src.box.z = resolvecmd->pRegions[i].srcOffset.z + resolvecmd->pRegions[i].srcSubresource.baseArrayLayer;
@@ -3038,12 +3106,12 @@ static void handle_draw_indirect_count(struct vk_cmd_queue_entry *cmd,
       state->info.index_size = state->index_size;
       state->info.index.resource = state->index_buffer;
       state->info.max_index = ~0U;
-      if (state->index_offset) {
+      if (state->index_offset || state->index_buffer_size != UINT32_MAX) {
          struct pipe_transfer *xfer;
          uint8_t *mem = pipe_buffer_map(state->pctx, state->index_buffer, 0, &xfer);
          state->pctx->buffer_unmap(state->pctx, xfer);
          index = get_buffer_resource(state->pctx, mem + state->index_offset);
-         index->width0 = state->index_buffer->width0 - state->index_offset;
+         index->width0 = MIN2(state->index_buffer->width0 - state->index_offset, state->index_buffer_size);
          state->info.index.resource = index;
       }
    } else
@@ -3249,9 +3317,9 @@ static void handle_set_vertex_input(struct vk_cmd_queue_entry *cmd,
       }
       assert(binding);
       state->velem.velems[location].src_offset = attrs[i].offset;
-      state->velem.velems[location].vertex_buffer_index = attrs[i].binding;
+      state->vertex_buffer_index[location] = attrs[i].binding;
       state->velem.velems[location].src_format = lvp_vk_format_to_pipe_format(attrs[i].format);
-      state->vb[attrs[i].binding].stride = binding->stride;
+      state->velem.velems[location].src_stride = binding->stride;
       uint32_t d = binding->divisor;
       switch (binding->inputRate) {
       case VK_VERTEX_INPUT_RATE_VERTEX:
@@ -4011,7 +4079,9 @@ bind_db_samplers(struct rendering_state *state, bool is_compute, unsigned set)
 
       for (uint32_t sampler_index = 0; sampler_index < bind_layout->array_size; sampler_index++) {
          if (bind_layout->immutable_samplers[sampler_index]) {
-            desc[sampler_index].sampler = bind_layout->immutable_samplers[sampler_index]->sampler;
+            struct lp_descriptor *immutable_desc = &bind_layout->immutable_samplers[sampler_index]->desc;
+            desc[sampler_index].sampler = immutable_desc->sampler;
+            desc[sampler_index].sampler_index = immutable_desc->sampler_index;
             u_foreach_bit(stage, set_layout->shader_stages)
                did_update |= BITFIELD_BIT(vk_to_mesa_shader_stage(1<<stage));
          }
@@ -4088,6 +4158,7 @@ void lvp_add_enqueue_cmd_entrypoints(struct vk_device_dispatch_table *disp)
    ENQUEUE_CMD(CmdSetStencilReference)
    ENQUEUE_CMD(CmdBindDescriptorSets)
    ENQUEUE_CMD(CmdBindIndexBuffer)
+   ENQUEUE_CMD(CmdBindIndexBuffer2KHR)
    ENQUEUE_CMD(CmdBindVertexBuffers2)
    ENQUEUE_CMD(CmdDraw)
    ENQUEUE_CMD(CmdDrawMultiEXT)
@@ -4249,6 +4320,9 @@ static void lvp_execute_cmd_buffer(struct list_head *cmds,
          break;
       case VK_CMD_BIND_INDEX_BUFFER:
          handle_index_buffer(cmd, state);
+         break;
+      case VK_CMD_BIND_INDEX_BUFFER2_KHR:
+         handle_index_buffer2(cmd, state);
          break;
       case VK_CMD_BIND_VERTEX_BUFFERS2:
          handle_vertex_buffers2(cmd, state);
@@ -4611,7 +4685,6 @@ VkResult lvp_execute_cmds(struct lvp_device *device,
    for (unsigned i = 0; i < ARRAY_SIZE(state->desc_buffers); i++)
       pipe_resource_reference(&state->desc_buffers[i], NULL);
 
-   free(state->color_att);
    return VK_SUCCESS;
 }
 

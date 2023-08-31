@@ -558,6 +558,11 @@ emit_3dstate_sbe(struct anv_graphics_pipeline *pipeline)
             sbe_mesh.PerVertexURBEntryOutputReadLength += 1;
          }
 
+         if (mue->user_data_in_vertex_header) {
+            sbe_mesh.PerVertexURBEntryOutputReadOffset -= 1;
+            sbe_mesh.PerVertexURBEntryOutputReadLength += 1;
+         }
+
          assert(mue->per_primitive_header_size_dw % 8 == 0);
          sbe_mesh.PerPrimitiveURBEntryOutputReadOffset = mue->per_primitive_header_size_dw / 8;
          sbe_mesh.PerPrimitiveURBEntryOutputReadLength = DIV_ROUND_UP(mue->per_primitive_data_size_dw, 8);
@@ -569,7 +574,8 @@ emit_3dstate_sbe(struct anv_graphics_pipeline *pipeline)
           */
          if (wm_prog_data->urb_setup[VARYING_SLOT_VIEWPORT] >= 0 ||
              wm_prog_data->urb_setup[VARYING_SLOT_PRIMITIVE_SHADING_RATE] >= 0 ||
-             wm_prog_data->urb_setup[VARYING_SLOT_LAYER] >= 0) {
+             wm_prog_data->urb_setup[VARYING_SLOT_LAYER] >= 0 ||
+             mue->user_data_in_primitive_header) {
             assert(sbe_mesh.PerPrimitiveURBEntryOutputReadOffset > 0);
             sbe_mesh.PerPrimitiveURBEntryOutputReadOffset -= 1;
             sbe_mesh.PerPrimitiveURBEntryOutputReadLength += 1;
@@ -685,55 +691,6 @@ const uint32_t genX(vk_to_intel_front_face)[] = {
    [VK_FRONT_FACE_CLOCKWISE]                 = 0
 };
 
-void
-genX(rasterization_mode)(VkPolygonMode raster_mode,
-                         VkLineRasterizationModeEXT line_mode,
-                         float line_width,
-                         uint32_t *api_mode,
-                         bool *msaa_rasterization_enable)
-{
-   if (raster_mode == VK_POLYGON_MODE_LINE) {
-      /* Unfortunately, configuring our line rasterization hardware on gfx8
-       * and later is rather painful.  Instead of giving us bits to tell the
-       * hardware what line mode to use like we had on gfx7, we now have an
-       * arcane combination of API Mode and MSAA enable bits which do things
-       * in a table which are expected to magically put the hardware into the
-       * right mode for your API.  Sadly, Vulkan isn't any of the APIs the
-       * hardware people thought of so nothing works the way you want it to.
-       *
-       * Look at the table titled "Multisample Rasterization Modes" in Vol 7
-       * of the Skylake PRM for more details.
-       */
-      switch (line_mode) {
-      case VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT:
-         *api_mode = DX101;
-#if GFX_VER <= 9
-         /* Prior to ICL, the algorithm the HW uses to draw wide lines
-          * doesn't quite match what the CTS expects, at least for rectangular
-          * lines, so we set this to false here, making it draw parallelograms
-          * instead, which work well enough.
-          */
-         *msaa_rasterization_enable = line_width < 1.0078125;
-#else
-         *msaa_rasterization_enable = true;
-#endif
-         break;
-
-      case VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_EXT:
-      case VK_LINE_RASTERIZATION_MODE_BRESENHAM_EXT:
-         *api_mode = DX9OGL;
-         *msaa_rasterization_enable = false;
-         break;
-
-      default:
-         unreachable("Unsupported line rasterization mode");
-      }
-   } else {
-      *api_mode = DX101;
-      *msaa_rasterization_enable = true;
-   }
-}
-
 static void
 emit_rs_state(struct anv_graphics_pipeline *pipeline,
               const struct vk_input_assembly_state *ia,
@@ -789,10 +746,6 @@ emit_rs_state(struct anv_graphics_pipeline *pipeline,
 
    raster.ScissorRectangleEnable = true;
 
-   raster.ConservativeRasterizationEnable =
-      rs && rs->conservative_mode != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
-   raster.APIMode = DX101;
-
    GENX(3DSTATE_SF_pack)(NULL, pipeline->gfx8.sf, &sf);
    GENX(3DSTATE_RASTER_pack)(NULL, pipeline->gfx8.raster, &raster);
 }
@@ -802,9 +755,18 @@ emit_ms_state(struct anv_graphics_pipeline *pipeline,
               const struct vk_multisample_state *ms)
 {
    struct anv_batch *batch = &pipeline->base.base.batch;
+   anv_batch_emit(batch, GENX(3DSTATE_MULTISAMPLE), ms) {
+      ms.NumberofMultisamples       = __builtin_ffs(pipeline->rasterization_samples) - 1;
 
-   /* On Gfx8+ 3DSTATE_MULTISAMPLE only holds the number of samples. */
-   genX(emit_multisample)(batch, pipeline->rasterization_samples);
+      ms.PixelLocation              = CENTER;
+
+      /* The PRM says that this bit is valid only for DX9:
+       *
+       *    SW can choose to set this bit only for DX9 API. DX10/OGL API's
+       *    should not have any effect by setting or not setting this bit.
+       */
+      ms.PixelPositionOffsetEnable  = false;
+   }
 }
 
 const uint32_t genX(vk_to_intel_logic_op)[] = {
@@ -1157,8 +1119,7 @@ get_scratch_surf(struct anv_pipeline *pipeline,
       anv_scratch_pool_alloc(pipeline->device,
                              &pipeline->device->scratch_pool,
                              stage, bin->prog_data->total_scratch);
-   anv_reloc_list_add_bo(pipeline->batch.relocs,
-                         pipeline->batch.alloc, bo);
+   anv_reloc_list_add_bo(pipeline->batch.relocs, bo);
    return anv_scratch_pool_get_surf(pipeline->device,
                                     &pipeline->device->scratch_pool,
                                     bin->prog_data->total_scratch) >> 4;
@@ -1382,19 +1343,17 @@ emit_3dstate_hs_ds(struct anv_graphics_pipeline *pipeline,
 static void
 emit_3dstate_gs(struct anv_graphics_pipeline *pipeline)
 {
-   struct anv_batch *batch = &pipeline->base.base.batch;
    const struct intel_device_info *devinfo = pipeline->base.base.device->info;
    const struct anv_shader_bin *gs_bin =
       pipeline->base.shaders[MESA_SHADER_GEOMETRY];
 
-   if (!anv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY)) {
-      anv_batch_emit(batch, GENX(3DSTATE_GS), gs);
-      return;
-   }
+   struct GENX(3DSTATE_GS) gs = {
+      GENX(3DSTATE_GS_header),
+   };
 
-   const struct brw_gs_prog_data *gs_prog_data = get_gs_prog_data(pipeline);
+   if (anv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY)) {
+       const struct brw_gs_prog_data *gs_prog_data = get_gs_prog_data(pipeline);
 
-   anv_batch_emit(batch, GENX(3DSTATE_GS), gs) {
       gs.Enable                  = true;
       gs.StatisticsEnable        = true;
       gs.KernelStartPointer      = gs_bin->kernel.offset;
@@ -1415,12 +1374,12 @@ emit_3dstate_gs(struct anv_graphics_pipeline *pipeline)
       gs.ControlDataFormat       = gs_prog_data->control_data_format;
       gs.ControlDataHeaderSize   = gs_prog_data->control_data_header_size_hwords;
       gs.InstanceControl         = MAX2(gs_prog_data->invocations, 1) - 1;
-      gs.ReorderMode             = TRAILING;
+      gs.ReorderMode             = LEADING;
 
       gs.ExpectedVertexCount     = gs_prog_data->vertices_in;
       gs.StaticOutput            = gs_prog_data->static_vertex_count >= 0;
       gs.StaticOutputVertexCount = gs_prog_data->static_vertex_count >= 0 ?
-                                   gs_prog_data->static_vertex_count : 0;
+         gs_prog_data->static_vertex_count : 0;
 
       gs.VertexURBEntryReadOffset = 0;
       gs.VertexURBEntryReadLength = gs_prog_data->base.urb_read_length;
@@ -1441,6 +1400,8 @@ emit_3dstate_gs(struct anv_graphics_pipeline *pipeline)
          get_scratch_address(&pipeline->base.base, MESA_SHADER_GEOMETRY, gs_bin);
 #endif
    }
+
+   GENX(3DSTATE_GS_pack)(&pipeline->base.base.batch, pipeline->gfx8.gs, &gs);
 }
 
 static bool

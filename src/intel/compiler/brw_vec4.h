@@ -306,12 +306,12 @@ public:
    virtual void nir_emit_alu(nir_alu_instr *instr);
    virtual void nir_emit_jump(nir_jump_instr *instr);
    virtual void nir_emit_texture(nir_tex_instr *instr);
-   virtual void nir_emit_undef(nir_ssa_undef_instr *instr);
+   virtual void nir_emit_undef(nir_undef_instr *instr);
    virtual void nir_emit_ssbo_atomic(int op, nir_intrinsic_instr *instr);
 
-   dst_reg get_nir_dest(const nir_dest &dest, enum brw_reg_type type);
-   dst_reg get_nir_dest(const nir_dest &dest, nir_alu_type type);
-   dst_reg get_nir_dest(const nir_dest &dest);
+   dst_reg get_nir_def(const nir_def &def, enum brw_reg_type type);
+   dst_reg get_nir_def(const nir_def &def, nir_alu_type type);
+   dst_reg get_nir_def(const nir_def &def);
    src_reg get_nir_src(const nir_src &src, enum brw_reg_type type,
                        unsigned num_components = 4);
    src_reg get_nir_src(const nir_src &src, nir_alu_type type,
@@ -342,8 +342,6 @@ private:
    const bool no_spills;
 
    unsigned last_scratch; /**< measured in 32-byte (register size) units */
-
-   const struct brw_compile_params *params;
 };
 
 } /* namespace brw */

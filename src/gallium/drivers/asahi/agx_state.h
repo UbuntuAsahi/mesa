@@ -188,9 +188,6 @@ struct agx_uncompiled_shader {
     */
    bool internal_bindless;
 
-   /* For compute kernels */
-   unsigned static_shared_mem;
-
    /* Set on VS, passed to FS for linkage */
    unsigned base_varying;
 };
@@ -229,6 +226,7 @@ struct agx_batch {
    struct pipe_framebuffer_state key;
    uint64_t seqnum;
    uint32_t syncobj;
+   uint32_t draws;
 
    struct agx_tilebuffer_layout tilebuffer_layout;
 
@@ -273,6 +271,9 @@ struct agx_batch {
     */
    struct util_dynarray occlusion_queries;
    struct agx_ptr occlusion_buffer;
+
+   /* Non-occlusion queries */
+   struct util_dynarray nonocclusion_queries;
 
    /* Result buffer where the kernel places command execution information */
    union agx_batch_result *result;
@@ -535,6 +536,12 @@ struct agx_query {
    struct agx_batch *writer;
    unsigned writer_index;
 
+   /* For GPU queries other than occlusion queries, the value of the query as
+    * written by the `writer` if a writer is non-NULL, and irrelevant otherwise.
+    * When flushing the query, this value is read and added to agx_query::value.
+    */
+   struct agx_ptr ptr;
+
    /* Accumulator flushed to the CPU */
    uint64_t value;
 };
@@ -661,6 +668,10 @@ agx_map_texture_gpu(struct agx_resource *rsrc, unsigned z)
 void agx_decompress(struct agx_context *ctx, struct agx_resource *rsrc,
                     const char *reason);
 
+void agx_legalize_compression(struct agx_context *ctx,
+                              struct agx_resource *rsrc,
+                              enum pipe_format format);
+
 struct agx_transfer {
    struct pipe_transfer base;
    void *map;
@@ -711,10 +722,14 @@ agx_batch_add_bo(struct agx_batch *batch, struct agx_bo *bo)
 {
    /* Double the size of the BO list if we run out, this is amortized O(1) */
    if (unlikely(bo->handle > agx_batch_bo_list_bits(batch))) {
+      unsigned word_count =
+         MAX2(batch->bo_list.word_count * 2,
+              util_next_power_of_two(BITSET_WORDS(bo->handle + 1)));
+
       batch->bo_list.set =
          rerzalloc(batch->ctx, batch->bo_list.set, BITSET_WORD,
-                   batch->bo_list.word_count, batch->bo_list.word_count * 2);
-      batch->bo_list.word_count *= 2;
+                   batch->bo_list.word_count, word_count);
+      batch->bo_list.word_count = word_count;
    }
 
    /* The batch holds a single reference to each BO in the batch, released when
@@ -748,8 +763,6 @@ void agx_flush_readers(struct agx_context *ctx, struct agx_resource *rsrc,
                        const char *reason);
 void agx_flush_writer(struct agx_context *ctx, struct agx_resource *rsrc,
                       const char *reason);
-void agx_flush_batches_writing_occlusion_queries(struct agx_context *ctx);
-void agx_flush_occlusion_queries(struct agx_context *ctx);
 
 void agx_sync_writer(struct agx_context *ctx, struct agx_resource *rsrc,
                      const char *reason);
@@ -796,8 +809,10 @@ uint64_t agx_build_meta(struct agx_batch *batch, bool store,
 
 /* Query management */
 uint16_t agx_get_oq_index(struct agx_batch *batch, struct agx_query *query);
+uint64_t agx_get_query_address(struct agx_batch *batch,
+                               struct agx_query *query);
 
-void agx_finish_batch_occlusion_queries(struct agx_batch *batch);
+void agx_finish_batch_queries(struct agx_batch *batch);
 
 bool agx_render_condition_check_inner(struct agx_context *ctx);
 

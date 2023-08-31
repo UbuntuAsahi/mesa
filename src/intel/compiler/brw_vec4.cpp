@@ -30,7 +30,6 @@
 #include "brw_dead_control_flow.h"
 #include "brw_private.h"
 #include "dev/intel_debug.h"
-#include "program/prog_parameter.h"
 #include "util/u_math.h"
 
 #define MAX_INSTRUCTION (1 << 30)
@@ -2495,7 +2494,7 @@ vec4_visitor::run()
    bool allocated_without_spills = reg_allocate();
 
    if (!allocated_without_spills) {
-      brw_shader_perf_log(compiler, params->log_data,
+      brw_shader_perf_log(compiler, log_data,
                           "%s shader triggered register spilling.  "
                           "Try reducing the number of live vec4 values "
                           "to improve performance.\n",
@@ -2557,7 +2556,7 @@ brw_compile_vs(const struct brw_compiler *compiler,
    brw_nir_lower_vs_inputs(nir, params->edgeflag_is_last, key->gl_attrib_wa_flags);
    brw_nir_lower_vue_outputs(nir);
    brw_postprocess_nir(nir, compiler, debug_enabled,
-                       key->base.robust_buffer_access);
+                       key->base.robust_flags);
 
    prog_data->base.clip_distance_mask =
       ((1 << nir->info.clip_distance_array_size) - 1);

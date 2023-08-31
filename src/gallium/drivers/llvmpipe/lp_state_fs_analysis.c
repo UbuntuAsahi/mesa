@@ -178,10 +178,6 @@ finished:
 static bool
 is_fs_input(const nir_src *src)
 {
-   if (!src->is_ssa) {
-      return false;
-   }
-
    const nir_instr *parent = src->ssa[0].parent_instr;
    if (!parent) {
       return false;
@@ -232,10 +228,6 @@ get_nir_input_info(const nir_alu_src *src,
                    unsigned *input_index,
                    int *input_component)
 {
-   if (!src->src.is_ssa) {
-      return false;
-   }
-
    // The parent instr should be a nir_intrinsic_load_deref.
    const nir_instr *parent = src->src.ssa[0].parent_instr;
    if (!parent || parent->type != nir_instr_type_intrinsic) {
@@ -243,8 +235,7 @@ get_nir_input_info(const nir_alu_src *src,
    }
    nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(parent);
    if (!intrin ||
-       intrin->intrinsic != nir_intrinsic_load_deref ||
-       !intrin->src[0].is_ssa) {
+       intrin->intrinsic != nir_intrinsic_load_deref) {
       return false;
    }
 

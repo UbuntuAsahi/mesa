@@ -65,7 +65,7 @@ L = (1 << 15)
 _ = None
 
 FORMAT = immediate("format", "enum agx_format")
-IMM = immediate("imm")
+IMM = immediate("imm", "uint64_t")
 WRITEOUT = immediate("writeout")
 INDEX = immediate("index")
 COMPONENT = immediate("component")
@@ -197,8 +197,8 @@ iunop("popcount",  0b10)
 iunop("ffs",       0b11)
 
 op("fadd",
-      encoding_16 = (0x26 | L, 0x3F | L, 6, _),
-      encoding_32 = (0x2A | L, 0x3F | L, 6, _),
+      encoding_16 = (0x26, 0x3F, 4, 6),
+      encoding_32 = (0x2A, 0x3F, 4, 6),
       srcs = 2, is_float = True)
 
 op("fma",
@@ -207,8 +207,8 @@ op("fma",
       srcs = 3, is_float = True)
 
 op("fmul",
-      encoding_16 = ((0x16 | L), (0x3F | L), 6, _),
-      encoding_32 = ((0x1A | L), (0x3F | L), 6, _),
+      encoding_16 = (0x16, 0x3F, 4, 6),
+      encoding_32 = (0x1A, 0x3F, 4, 6),
       srcs = 2, is_float = True)
 
 op("mov_imm",
@@ -403,5 +403,5 @@ op("unit_test", _, dests = 0, srcs = 1, can_eliminate = False)
 # to be coalesced during RA, rather than lowered to a real move. 
 op("preload", _, srcs = 1)
 
-# Set the nesting counter. Lowers to mov r0l, x after RA.
-op("nest", _, dests = 0, srcs = 1, can_eliminate = False)
+# Set the nesting counter. Lowers to mov_imm r0l, #nest after RA.
+op("nest", _, dests = 0, imms = [IMM], can_eliminate = False)

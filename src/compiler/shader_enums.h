@@ -32,10 +32,6 @@
 
 /* Project-wide (GL and Vulkan) maximum. */
 #define MAX_DRAW_BUFFERS 8
-/* Size of an atomic counter in bytes according to ARB_shader_atomic_counters */
-#define ATOMIC_COUNTER_SIZE 4
-/** For GL_ARB_gpu_shader5 */
-#define MAX_VERTEX_STREAMS 4
 
 #ifdef __cplusplus
 extern "C" {
@@ -532,6 +528,27 @@ _mesa_varying_slot_in_fs(gl_varying_slot slot)
 #define VARYING_BIT_BOUNDING_BOX1 BITFIELD64_BIT(VARYING_SLOT_BOUNDING_BOX1)
 #define VARYING_BIT_VIEWPORT_MASK BITFIELD64_BIT(VARYING_SLOT_VIEWPORT_MASK)
 #define VARYING_BIT_VAR(V) BITFIELD64_BIT(VARYING_SLOT_VAR0 + (V))
+/*@}*/
+
+/**
+ * Writemask values, 1 bit per component.
+ */
+/*@{*/
+#define WRITEMASK_X     0x1
+#define WRITEMASK_Y     0x2
+#define WRITEMASK_XY    0x3
+#define WRITEMASK_Z     0x4
+#define WRITEMASK_XZ    0x5
+#define WRITEMASK_YZ    0x6
+#define WRITEMASK_XYZ   0x7
+#define WRITEMASK_W     0x8
+#define WRITEMASK_XW    0x9
+#define WRITEMASK_YW    0xa
+#define WRITEMASK_XYW   0xb
+#define WRITEMASK_ZW    0xc
+#define WRITEMASK_XZW   0xd
+#define WRITEMASK_YZW   0xe
+#define WRITEMASK_XYZW  0xf
 /*@}*/
 
 /**
@@ -1090,6 +1107,17 @@ enum gl_access_qualifier
     * from fragment mask buffer.
     */
    ACCESS_FMASK_LOWERED_AMD = (1 << 11),
+
+   /**
+    * Whether it is safe to speculatively execute this load. This allows
+    * hoisting loads out of conditional control flow (including out of software
+    * bounds checks). Setting this optimally depends on knowledge of the
+    * hardware. Speculation is safe if out-of-bounds access does not trigger
+    * undefined behaviour (even though the returned value of the speculated load
+    * is bogus). This is the case if there is hardware-level bounds checking, or
+    * if MMU faults are suppressed for the load.
+    */
+   ACCESS_CAN_SPECULATE = (1 << 12),
 };
 
 /**
@@ -1330,28 +1358,6 @@ enum ENUM_PACKED gl_subgroup_size
    SUBGROUP_SIZE_REQUIRE_64  = 64,  /**< VK_EXT_subgroup_size_control */
    SUBGROUP_SIZE_REQUIRE_128 = 128, /**< VK_EXT_subgroup_size_control */
 };
-
-/**
- * An index for each type of texture object.  These correspond to the GL
- * texture target enums, such as GL_TEXTURE_2D, GL_TEXTURE_CUBE_MAP, etc.
- * Note: the order is from highest priority to lowest priority.
- */
-typedef enum
-{
-   TEXTURE_2D_MULTISAMPLE_INDEX,
-   TEXTURE_2D_MULTISAMPLE_ARRAY_INDEX,
-   TEXTURE_CUBE_ARRAY_INDEX,
-   TEXTURE_BUFFER_INDEX,
-   TEXTURE_2D_ARRAY_INDEX,
-   TEXTURE_1D_ARRAY_INDEX,
-   TEXTURE_EXTERNAL_INDEX,
-   TEXTURE_CUBE_INDEX,
-   TEXTURE_3D_INDEX,
-   TEXTURE_RECT_INDEX,
-   TEXTURE_2D_INDEX,
-   TEXTURE_1D_INDEX,
-   NUM_TEXTURE_TARGETS
-} gl_texture_index;
 
 /* Ordered from narrower to wider scope. */
 typedef enum {

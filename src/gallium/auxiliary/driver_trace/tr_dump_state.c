@@ -30,7 +30,7 @@
 #include "util/u_memory.h"
 #include "util/format/u_format.h"
 #include "tgsi/tgsi_dump.h"
-
+#include "frontend/winsys_handle.h"
 #include "tr_dump.h"
 #include "tr_dump_defines.h"
 #include "tr_dump_state.h"
@@ -701,7 +701,6 @@ void trace_dump_vertex_buffer(const struct pipe_vertex_buffer *state)
 
    trace_dump_struct_begin("pipe_vertex_buffer");
 
-   trace_dump_member(uint, state, stride);
    trace_dump_member(bool, state, is_user_buffer);
    trace_dump_member(uint, state, buffer_offset);
    trace_dump_member(ptr, state, buffer.resource);
@@ -731,6 +730,7 @@ void trace_dump_vertex_element(const struct pipe_vertex_element *state)
    trace_dump_member(bool, state, dual_slot);
 
    trace_dump_member(format, state, src_format);
+   trace_dump_member(uint, state, src_stride);
 
    trace_dump_struct_end();
 }
@@ -1097,3 +1097,31 @@ void trace_dump_grid_info(const struct pipe_grid_info *state)
    trace_dump_struct_end();
 }
 
+void trace_dump_winsys_handle(const struct winsys_handle *whandle)
+{
+   if (!trace_dumping_enabled_locked())
+      return;
+
+   if (!whandle) {
+      trace_dump_null();
+      return;
+   }
+
+   trace_dump_struct_begin("winsys_handle");
+
+   trace_dump_member(uint, whandle, type);
+   trace_dump_member(uint, whandle, layer);
+   trace_dump_member(uint, whandle, plane);
+#ifdef _WIN32
+   trace_dump_member(ptr, whandle, handle);
+#else
+   trace_dump_member(uint, whandle, handle);
+#endif
+   trace_dump_member(uint, whandle, stride);
+   trace_dump_member(uint, whandle, offset);
+   trace_dump_member(format, whandle, format);
+   trace_dump_member(uint, whandle, modifier);
+   trace_dump_member(uint, whandle, size);
+
+   trace_dump_struct_end();
+}

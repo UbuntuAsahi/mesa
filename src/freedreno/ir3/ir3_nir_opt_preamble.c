@@ -33,7 +33,7 @@
  */
 
 static void
-def_size(nir_ssa_def *def, unsigned *size, unsigned *align)
+def_size(nir_def *def, unsigned *size, unsigned *align)
 {
    unsigned bit_size = def->bit_size == 1 ? 32 : def->bit_size;
    /* Due to the implicit const file promotion we want to expand 16-bit values
@@ -45,7 +45,7 @@ def_size(nir_ssa_def *def, unsigned *size, unsigned *align)
 }
 
 static bool
-all_uses_float(nir_ssa_def *def, bool allow_src2)
+all_uses_float(nir_def *def, bool allow_src2)
 {
    nir_foreach_use_including_if (use, def) {
       if (use->is_if)
@@ -75,7 +75,7 @@ all_uses_float(nir_ssa_def *def, bool allow_src2)
 }
 
 static bool
-all_uses_bit(nir_ssa_def *def)
+all_uses_bit(nir_def *def)
 {
    nir_foreach_use_including_if (use, def) {
       if (use->is_if)
@@ -123,7 +123,7 @@ instr_cost(nir_instr *instr, const void *data)
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
-      unsigned components = alu->dest.dest.ssa.num_components;
+      unsigned components = alu->def.num_components;
       switch (alu->op) {
       /* cat4 */
       case nir_op_frcp:
@@ -145,13 +145,13 @@ instr_cost(nir_instr *instr, const void *data)
       case nir_op_f2f16:
       case nir_op_f2fmp:
       case nir_op_fneg:
-         return all_uses_float(&alu->dest.dest.ssa, true) ? 0 : 1 * components;
+         return all_uses_float(&alu->def, true) ? 0 : 1 * components;
 
       case nir_op_fabs:
-         return all_uses_float(&alu->dest.dest.ssa, false) ? 0 : 1 * components;
+         return all_uses_float(&alu->def, false) ? 0 : 1 * components;
 
       case nir_op_inot:
-         return all_uses_bit(&alu->dest.dest.ssa) ? 0 : 1 * components;
+         return all_uses_bit(&alu->def) ? 0 : 1 * components;
 
       /* Instructions that become vector split/collect */
       case nir_op_vec2:
@@ -209,13 +209,25 @@ instr_cost(nir_instr *instr, const void *data)
       }
    }
 
+   case nir_instr_type_phi:
+      /* Although we can often coalesce phis, the cost of a phi is a proxy for
+       * the cost of the if-else statement... If all phis are moved, then the
+       * branches move too. So this needs to have a nonzero cost, even if we're
+       * optimistic about coalescing.
+       *
+       * Value chosen empirically. On Rob's shader-db, cost of 2 performs better
+       * across the board than a cost of 1. Values greater than 2 do not seem to
+       * have any change, so sticking with 2.
+       */
+      return 2;
+
    default:
       return 0;
    }
 }
 
 static float
-rewrite_cost(nir_ssa_def *def, const void *data)
+rewrite_cost(nir_def *def, const void *data)
 {
    /* We always have to expand booleans */
    if (def->bit_size == 1)
@@ -255,6 +267,33 @@ avoid_instr(const nir_instr *instr, const void *data)
    return intrin->intrinsic == nir_intrinsic_bindless_resource_ir3;
 }
 
+static bool
+set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   switch (intr->intrinsic) {
+   /* These instructions go through bounds-checked hardware descriptors so are
+    * always safe to speculate.
+    */
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ubo_vec4:
+   case nir_intrinsic_image_load:
+   case nir_intrinsic_image_samples_identical:
+   case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_load_ssbo_ir3:
+      nir_intrinsic_set_access(intr, nir_intrinsic_access(intr) |
+                                     ACCESS_CAN_SPECULATE);
+      return true;
+
+   default:
+      return false;
+   }
+}
+
 bool
 ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
 {
@@ -272,6 +311,11 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    if (max_size == 0)
       return false;
 
+   bool progress =
+      nir_shader_instructions_pass(nir, set_speculate,
+                                   nir_metadata_block_index |
+                                   nir_metadata_dominance, NULL);
+
    nir_opt_preamble_options options = {
       .drawid_uniform = true,
       .subgroup_size_uniform = true,
@@ -283,7 +327,7 @@ ir3_nir_opt_preamble(nir_shader *nir, struct ir3_shader_variant *v)
    };
 
    unsigned size = 0;
-   bool progress = nir_opt_preamble(nir, &options, &size);
+   progress |= nir_opt_preamble(nir, &options, &size);
 
    if (!v->binning_pass)
       const_state->preamble_size = DIV_ROUND_UP(size, 4);
@@ -322,12 +366,12 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
          if (intrin->intrinsic != nir_intrinsic_load_preamble)
             continue;
 
-         nir_ssa_def *dest = &intrin->dest.ssa;
+         nir_def *dest = &intrin->def;
 
          unsigned offset = preamble_base + nir_intrinsic_base(intrin);
          b->cursor = nir_before_instr(instr);
 
-         nir_ssa_def *new_dest =
+         nir_def *new_dest =
             nir_load_uniform(b, dest->num_components, 32, nir_imm_int(b, 0),
                              .base = offset);
 
@@ -343,7 +387,7 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
             }
          }
 
-         nir_ssa_def_rewrite_uses(dest, new_dest);
+         nir_def_rewrite_uses(dest, new_dest);
          nir_instr_remove(instr);
          nir_instr_free(instr);
       }
@@ -361,7 +405,7 @@ ir3_nir_lower_preamble(nir_shader *nir, struct ir3_shader_variant *v)
          if (intrin->intrinsic != nir_intrinsic_store_preamble)
             continue;
 
-         nir_ssa_def *src = intrin->src[0].ssa;
+         nir_def *src = intrin->src[0].ssa;
          unsigned offset = preamble_base + nir_intrinsic_base(intrin);
 
          b->cursor = nir_before_instr(instr);

@@ -224,7 +224,16 @@ __agxdecode_fetch_gpu_mem(const struct agx_bo *mem, uint64_t gpu_va,
    }
 
    assert(mem);
-   assert(size + (gpu_va - mem->ptr.gpu) <= mem->size);
+
+   if (size + (gpu_va - mem->ptr.gpu) > mem->size) {
+      fprintf(stderr,
+              "Overflowing to unknown memory %" PRIx64
+              " of size %zu (max size %zu) in %s:%d\n",
+              gpu_va, size, mem->size - (gpu_va - mem->ptr.gpu), filename,
+              line);
+      fflush(agxdecode_dump_stream);
+      assert(0);
+   }
 
    memcpy(buf, mem->ptr.cpu + gpu_va - mem->ptr.gpu, size);
 
@@ -793,6 +802,7 @@ agxdecode_drm_cmd_render(struct drm_asahi_params_global *params,
    DUMP_FIELD(c, "0x%llx", depth_bias_array);
    DUMP_FIELD(c, "%d", fb_width);
    DUMP_FIELD(c, "%d", fb_height);
+   DUMP_FIELD(c, "%d", layers);
    DUMP_FIELD(c, "0x%x", load_pipeline);
    DUMP_FIELD(c, "0x%x", load_pipeline_bind);
    agxdecode_stateful(c->load_pipeline & ~0x7, "Load pipeline", agxdecode_usc,
@@ -1040,17 +1050,24 @@ libagxdecode_writer(void *cookie, const char *buffer, size_t size)
    return lib_config.stream_write(buffer, size);
 }
 
+#ifdef _GNU_SOURCE
 static cookie_io_functions_t funcs = {.write = libagxdecode_writer};
+#endif
 
 static decoder_params lib_params;
 
 void
 libagxdecode_init(struct libagxdecode_config *config)
 {
+#ifdef _GNU_SOURCE
    lib_config = *config;
    agxdecode_dump_stream = fopencookie(NULL, "w", funcs);
 
    chip_id_to_params(&lib_params, config->chip_id);
+#else
+   /* fopencookie is a glibc extension */
+   unreachable("libagxdecode only available with glibc");
+#endif
 }
 
 void
