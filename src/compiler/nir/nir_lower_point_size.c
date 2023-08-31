@@ -51,9 +51,8 @@ lower_point_size_instr(nir_builder *b, nir_instr *instr, void *data)
 
    b->cursor = nir_before_instr(instr);
 
-   assert(intr->src[1].is_ssa);
    assert(intr->src[1].ssa->num_components == 1);
-   nir_ssa_def *psiz = intr->src[1].ssa;
+   nir_def *psiz = intr->src[1].ssa;
 
    if (minmax[0] > 0.0f)
       psiz = nir_fmax(b, psiz, nir_imm_float(b, minmax[0]));
@@ -79,8 +78,9 @@ nir_lower_point_size(nir_shader *s, float min, float max)
    assert(min > 0.0f || max > 0.0f);
    assert(min <= 0.0f || max <= 0.0f || min <= max);
 
-   float minmax[] = {min, max};
+   float minmax[] = { min, max };
    return nir_shader_instructions_pass(s, lower_point_size_instr,
                                        nir_metadata_block_index |
-                                       nir_metadata_dominance, minmax);
+                                          nir_metadata_dominance,
+                                       minmax);
 }

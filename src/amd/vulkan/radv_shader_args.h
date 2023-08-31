@@ -42,8 +42,10 @@ struct radv_shader_args {
    /* Streamout */
    struct ac_arg streamout_buffers;
 
+   /* Emulated query */
+   struct ac_arg shader_query_state;
+
    /* NGG */
-   struct ac_arg ngg_query_state;
    struct ac_arg ngg_provoking_vtx;
 
    /* NGG GS */
@@ -66,9 +68,13 @@ struct radv_shader_args {
     * # [6:13] = the number of tessellation patches
     */
    struct ac_arg tcs_offchip_layout;
+   struct ac_arg tcs_epilog_pc;
 
    /* TES */
-   struct ac_arg tes_num_patches;
+   /* # [0:7] = the number of tessellation patches
+    * # [8:15] = the number of TCS vertices output
+    */
+   struct ac_arg tes_state;
 
    /* NGG VS streamout */
    struct ac_arg num_verts_per_prim;
@@ -96,6 +102,9 @@ void radv_declare_shader_args(const struct radv_device *device, const struct rad
 
 void radv_declare_ps_epilog_args(const struct radv_device *device, const struct radv_ps_epilog_key *key,
                                  struct radv_shader_args *args);
+
+void radv_declare_tcs_epilog_args(const struct radv_device *device, const struct radv_tcs_epilog_key *key,
+                                  struct radv_shader_args *args);
 
 void radv_declare_rt_shader_args(enum amd_gfx_level gfx_level, struct radv_shader_args *args);
 #endif

@@ -47,6 +47,7 @@
 #include "intel/compiler/brw_prim.h"
 #include "crocus_context.h"
 #include "nir/tgsi_to_nir.h"
+#include "program/prog_instruction.h"
 
 #define KEY_INIT_NO_ID()                              \
    .base.tex.swizzles[0 ... BRW_MAX_SAMPLERS - 1] = 0x688
@@ -242,19 +243,19 @@ get_new_program_id(struct crocus_screen *screen)
    return p_atomic_inc_return(&screen->program_id);
 }
 
-static nir_ssa_def *
+static nir_def *
 get_aoa_deref_offset(nir_builder *b,
                      nir_deref_instr *deref,
                      unsigned elem_size)
 {
    unsigned array_size = elem_size;
-   nir_ssa_def *offset = nir_imm_int(b, 0);
+   nir_def *offset = nir_imm_int(b, 0);
 
    while (deref->deref_type != nir_deref_type_var) {
       assert(deref->deref_type == nir_deref_type_array);
 
       /* This level's element size is the previous level's array size */
-      nir_ssa_def *index = nir_ssa_for_src(b, deref->arr.index, 1);
+      nir_def *index = nir_ssa_for_src(b, deref->arr.index, 1);
       assert(deref->arr.index.ssa);
       offset = nir_iadd(b, offset,
                         nir_imul_imm(b, index, array_size));
@@ -300,7 +301,7 @@ crocus_lower_storage_image_derefs(nir_shader *nir)
             nir_variable *var = nir_deref_instr_get_variable(deref);
 
             b.cursor = nir_before_instr(&intrin->instr);
-            nir_ssa_def *index =
+            nir_def *index =
                nir_iadd_imm(&b, get_aoa_deref_offset(&b, deref, 1),
                             var->data.driver_location);
             nir_rewrite_image_intrinsic(intrin, index, false);
@@ -450,8 +451,8 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
    nir_builder b = nir_builder_at(nir_before_block(nir_start_block(impl)));
 
-   nir_ssa_def *temp_ubo_name = nir_ssa_undef(&b, 1, 32);
-   nir_ssa_def *temp_const_ubo_name = NULL;
+   nir_def *temp_ubo_name = nir_undef(&b, 1, 32);
+   nir_def *temp_const_ubo_name = NULL;
 
    /* Turn system value intrinsics into uniforms */
    nir_foreach_block(block, impl) {
@@ -460,13 +461,13 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             continue;
 
          nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-         nir_ssa_def *offset;
+         nir_def *offset;
 
          switch (intrin->intrinsic) {
          case nir_intrinsic_load_base_workgroup_id: {
             /* GL doesn't have a concept of base workgroup */
             b.cursor = nir_instr_remove(&intrin->instr);
-            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+            nir_def_rewrite_uses(&intrin->def,
                                      nir_imm_zero(&b, 3, 32));
             continue;
          }
@@ -475,7 +476,7 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
              * data and not cbuf0 which gallium uploads for us.
              */
             b.cursor = nir_before_instr(instr);
-            nir_ssa_def *offset =
+            nir_def *offset =
                nir_iadd_imm(&b, nir_ssa_for_src(&b, intrin->src[0], 1),
                             nir_intrinsic_base(intrin));
 
@@ -490,13 +491,13 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             nir_intrinsic_set_align(load_ubo, 4, 0);
             nir_intrinsic_set_range_base(load_ubo, 0);
             nir_intrinsic_set_range(load_ubo, ~0);
-            nir_ssa_dest_init(&load_ubo->instr, &load_ubo->dest,
-                              intrin->dest.ssa.num_components,
-                              intrin->dest.ssa.bit_size);
+            nir_def_init(&load_ubo->instr, &load_ubo->def,
+                         intrin->def.num_components,
+                         intrin->def.bit_size);
             nir_builder_instr_insert(&b, &load_ubo->instr);
 
-            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
-                                     &load_ubo->dest.ssa);
+            nir_def_rewrite_uses(&intrin->def,
+                                     &load_ubo->def);
             nir_instr_remove(&intrin->instr);
             continue;
          }
@@ -630,10 +631,10 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
          nir_intrinsic_set_align(load, 4, 0);
          nir_intrinsic_set_range_base(load, 0);
          nir_intrinsic_set_range(load, ~0);
-         nir_ssa_dest_init(&load->instr, &load->dest, comps, 32);
+         nir_def_init(&load->instr, &load->def, comps, 32);
          nir_builder_instr_insert(&b, &load->instr);
-         nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
-                                  &load->dest.ssa);
+         nir_def_rewrite_uses(&intrin->def,
+                                  &load->def);
          nir_instr_remove(instr);
       }
    }
@@ -668,10 +669,8 @@ crocus_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
             b.cursor = nir_before_instr(instr);
 
-            assert(load->src[0].is_ssa);
-
             if (load->src[0].ssa == temp_ubo_name) {
-               nir_ssa_def *imm = nir_imm_int(&b, sysval_cbuf_index);
+               nir_def *imm = nir_imm_int(&b, sysval_cbuf_index);
                nir_instr_rewrite_src(instr, &load->src[0],
                                      nir_src_for_ssa(imm));
             }
@@ -775,7 +774,7 @@ rewrite_src_with_bti(nir_builder *b, struct crocus_binding_table *bt,
    assert(bt->sizes[group] > 0);
 
    b->cursor = nir_before_instr(instr);
-   nir_ssa_def *bti;
+   nir_def *bti;
    if (nir_src_is_const(*src)) {
       uint32_t index = nir_src_as_uint(*src);
       bti = nir_imm_intN_t(b, crocus_group_index_to_bti(bt, group, index),
@@ -985,13 +984,13 @@ crocus_setup_binding_table(const struct intel_device_info *devinfo,
                enum gfx6_gather_sampler_wa wa = key->gfx6_gather_wa[tex->texture_index];
                int width = (wa & WA_8BIT) ? 8 : 16;
 
-               nir_ssa_def *val = nir_fmul_imm(&b, &tex->dest.ssa, (1 << width) - 1);
+               nir_def *val = nir_fmul_imm(&b, &tex->def, (1 << width) - 1);
                val = nir_f2u32(&b, val);
                if (wa & WA_SIGN) {
                   val = nir_ishl_imm(&b, val, 32 - width);
                   val = nir_ishr_imm(&b, val, 32 - width);
                }
-               nir_ssa_def_rewrite_uses_after(&tex->dest.ssa, val, val->parent_instr);
+               nir_def_rewrite_uses_after(&tex->def, val, val->parent_instr);
             }
 
             tex->texture_index =

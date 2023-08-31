@@ -28,7 +28,6 @@
 #include "brw_private.h"
 #include "brw_vec4_tes.h"
 #include "dev/intel_debug.h"
-#include "main/uniforms.h"
 #include "util/macros.h"
 
 enum brw_reg_type
@@ -1317,7 +1316,7 @@ brw_compile_tes(const struct brw_compiler *compiler,
    brw_nir_lower_tes_inputs(nir, input_vue_map);
    brw_nir_lower_vue_outputs(nir);
    brw_postprocess_nir(nir, compiler, debug_enabled,
-                       key->base.robust_buffer_access);
+                       key->base.robust_flags);
 
    brw_compute_vue_map(devinfo, &prog_data->base.vue_map,
                        nir->info.outputs_written,

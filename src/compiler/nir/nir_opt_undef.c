@@ -41,12 +41,7 @@ opt_undef_csel(nir_alu_instr *instr)
    if (!nir_op_is_selection(instr->op))
       return false;
 
-   assert(instr->dest.dest.is_ssa);
-
    for (int i = 1; i <= 2; i++) {
-      if (!instr->src[i].src.is_ssa)
-         continue;
-
       nir_instr *parent = instr->src[i].src.ssa->parent_instr;
       if (parent->type != nir_instr_type_ssa_undef)
          continue;
@@ -80,24 +75,21 @@ opt_undef_vecN(nir_builder *b, nir_alu_instr *alu)
    if (!nir_op_is_vec(alu->op))
       return false;
 
-   assert(alu->dest.dest.is_ssa);
-
    for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
-      if (!alu->src[i].src.is_ssa ||
-          alu->src[i].src.ssa->parent_instr->type != nir_instr_type_ssa_undef)
+      if (alu->src[i].src.ssa->parent_instr->type != nir_instr_type_ssa_undef)
          return false;
    }
 
    b->cursor = nir_before_instr(&alu->instr);
-   nir_ssa_def *undef = nir_ssa_undef(b, alu->dest.dest.ssa.num_components,
-                                      nir_dest_bit_size(alu->dest.dest));
-   nir_ssa_def_rewrite_uses(&alu->dest.dest.ssa, undef);
+   nir_def *undef = nir_undef(b, alu->def.num_components,
+                              alu->def.bit_size);
+   nir_def_rewrite_uses(&alu->def, undef);
 
    return true;
 }
 
 static uint32_t
-nir_get_undef_mask(nir_ssa_def *def)
+nir_get_undef_mask(nir_def *def)
 {
    nir_instr *instr = def->parent_instr;
 
@@ -112,8 +104,7 @@ nir_get_undef_mask(nir_ssa_def *def)
 
    if (nir_op_is_vec(alu->op)) {
       for (int i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
-         if (alu->src[i].src.is_ssa &&
-             alu->src[i].src.ssa->parent_instr->type ==
+         if (alu->src[i].src.ssa->parent_instr->type ==
              nir_instr_type_ssa_undef) {
             undef |= BITSET_MASK(nir_ssa_alu_instr_src_components(alu, i)) << i;
          }
@@ -142,16 +133,13 @@ opt_undef_store(nir_intrinsic_instr *intrin)
    case nir_intrinsic_store_shared:
    case nir_intrinsic_store_global:
    case nir_intrinsic_store_scratch:
-      arg_index =  0;
+      arg_index = 0;
       break;
    default:
       return false;
    }
 
-   if (!intrin->src[arg_index].is_ssa)
-      return false;
-
-   nir_ssa_def *def = intrin->src[arg_index].ssa;
+   nir_def *def = intrin->src[arg_index].ssa;
 
    unsigned write_mask = nir_intrinsic_write_mask(intrin);
    unsigned undef_mask = nir_get_undef_mask(def);
@@ -181,10 +169,10 @@ opt_undef_pack(nir_builder *b, nir_alu_instr *alu)
    default:
       return false;
    }
-   unsigned num_components = nir_dest_num_components(alu->dest.dest);
+   unsigned num_components = alu->def.num_components;
    b->cursor = nir_before_instr(&alu->instr);
-   nir_ssa_def *def = nir_ssa_undef(b, num_components, 32);
-   nir_ssa_def_rewrite_uses_after(&alu->dest.dest.ssa, def, &alu->instr);
+   nir_def *def = nir_undef(b, num_components, 32);
+   nir_def_rewrite_uses_after(&alu->def, def, &alu->instr);
    nir_instr_remove(&alu->instr);
    return true;
 }
@@ -209,6 +197,6 @@ nir_opt_undef(nir_shader *shader)
    return nir_shader_instructions_pass(shader,
                                        nir_opt_undef_instr,
                                        nir_metadata_block_index |
-                                       nir_metadata_dominance,
+                                          nir_metadata_dominance,
                                        NULL);
 }

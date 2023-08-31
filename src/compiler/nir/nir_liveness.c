@@ -22,8 +22,8 @@
  */
 
 #include "nir.h"
-#include "nir_worklist.h"
 #include "nir_vla.h"
+#include "nir_worklist.h"
 
 /*
  * Basic liveness analysis.  This works only in SSA form.
@@ -71,11 +71,8 @@ set_src_live(nir_src *src, void *void_live)
 {
    BITSET_WORD *live = void_live;
 
-   if (!src->is_ssa)
-      return true;
-
    if (nir_src_is_undef(*src))
-      return true;   /* undefined variables are never live */
+      return true; /* undefined variables are never live */
 
    BITSET_SET(live, src->ssa->index);
 
@@ -83,7 +80,7 @@ set_src_live(nir_src *src, void *void_live)
 }
 
 static bool
-set_ssa_def_dead(nir_ssa_def *def, void *void_live)
+set_ssa_def_dead(nir_def *def, void *void_live)
 {
    BITSET_WORD *live = void_live;
 
@@ -109,8 +106,7 @@ propagate_across_edge(nir_block *pred, nir_block *succ,
    memcpy(live, succ->live_in, state->bitset_words * sizeof *live);
 
    nir_foreach_phi(phi, succ) {
-      assert(phi->dest.is_ssa);
-      set_ssa_def_dead(&phi->dest.ssa, live);
+      set_ssa_def_dead(&phi->def, live);
    }
 
    nir_foreach_phi(phi, succ) {
@@ -141,7 +137,7 @@ nir_live_ssa_defs_impl(nir_function_impl *impl)
    /* Number the instructions so we can do cheap interference tests using the
     * instruction index.
     */
-   nir_metadata_require(impl, nir_metadata_instr_index);
+      nir_metadata_require(impl, nir_metadata_instr_index);
 
    nir_block_worklist_init(&state.worklist, impl->num_blocks, NULL);
 
@@ -151,7 +147,6 @@ nir_live_ssa_defs_impl(nir_function_impl *impl)
    nir_foreach_block(block, impl) {
       init_liveness_block(block, &state);
    }
-
 
    /* We're now ready to work through the worklist and update the liveness
     * sets of each of the blocks.  By the time we get to this point, every
@@ -181,7 +176,7 @@ nir_live_ssa_defs_impl(nir_function_impl *impl)
          if (instr->type == nir_instr_type_phi)
             break;
 
-         nir_foreach_ssa_def(instr, set_ssa_def_dead, block->live_in);
+         nir_foreach_def(instr, set_ssa_def_dead, block->live_in);
          nir_foreach_src(instr, set_src_live, block->live_in);
       }
 
@@ -249,7 +244,7 @@ nir_get_live_ssa_defs(nir_cursor cursor, void *mem_ctx)
       if (instr->type == nir_instr_type_phi)
          break;
 
-      nir_foreach_ssa_def(instr, set_ssa_def_dead, live);
+      nir_foreach_def(instr, set_ssa_def_dead, live);
       nir_foreach_src(instr, set_src_live, live);
 
       if (cursor.option == nir_cursor_before_instr && instr == cursor.instr)
@@ -262,11 +257,11 @@ nir_get_live_ssa_defs(nir_cursor cursor, void *mem_ctx)
 static bool
 src_does_not_use_def(nir_src *src, void *def)
 {
-   return !src->is_ssa || src->ssa != (nir_ssa_def *)def;
+   return src->ssa != (nir_def *)def;
 }
 
 static bool
-search_for_use_after_instr(nir_instr *start, nir_ssa_def *def)
+search_for_use_after_instr(nir_instr *start, nir_def *def)
 {
    /* Only look for a use strictly after the given instruction */
    struct exec_node *node = start->node.next;
@@ -281,8 +276,7 @@ search_for_use_after_instr(nir_instr *start, nir_ssa_def *def)
     * so we need to also check the following if condition, if any.
     */
    nir_if *following_if = nir_block_get_following_if(start->block);
-   if (following_if && following_if->condition.is_ssa &&
-       following_if->condition.ssa == def)
+   if (following_if && following_if->condition.ssa == def)
       return true;
 
    return false;
@@ -292,7 +286,7 @@ search_for_use_after_instr(nir_instr *start, nir_ssa_def *def)
  * instr in a pre DFS search of the dominance tree.
  */
 static bool
-nir_ssa_def_is_live_at(nir_ssa_def *def, nir_instr *instr)
+nir_def_is_live_at(nir_def *def, nir_instr *instr)
 {
    if (BITSET_TEST(instr->block->live_out, def->index)) {
       /* Since def dominates instr, if def is in the liveout of the block,
@@ -314,7 +308,7 @@ nir_ssa_def_is_live_at(nir_ssa_def *def, nir_instr *instr)
 }
 
 bool
-nir_ssa_defs_interfere(nir_ssa_def *a, nir_ssa_def *b)
+nir_defs_interfere(nir_def *a, nir_def *b)
 {
    if (a->parent_instr == b->parent_instr) {
       /* Two variables defined at the same time interfere assuming at
@@ -326,8 +320,8 @@ nir_ssa_defs_interfere(nir_ssa_def *a, nir_ssa_def *b)
       /* If either variable is an ssa_undef, then there's no interference */
       return false;
    } else if (a->parent_instr->index < b->parent_instr->index) {
-      return nir_ssa_def_is_live_at(a, b->parent_instr);
+      return nir_def_is_live_at(a, b->parent_instr);
    } else {
-      return nir_ssa_def_is_live_at(b, a->parent_instr);
+      return nir_def_is_live_at(b, a->parent_instr);
    }
 }

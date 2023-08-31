@@ -36,7 +36,7 @@
 extern "C" {
 #endif
 
-#define ACO_MAX_SO_OUTPUTS     64
+#define ACO_MAX_SO_OUTPUTS     128
 #define ACO_MAX_SO_BUFFERS     4
 #define ACO_MAX_VERTEX_ATTRIBS 32
 #define ACO_MAX_VBS            32
@@ -77,6 +77,11 @@ struct aco_ps_epilog_info {
    bool mrt0_is_dual_src;
 };
 
+struct aco_tcs_epilog_info {
+   enum tess_primitive_mode primitive_mode;
+   bool tes_reads_tessfactors;
+};
+
 struct aco_shader_info {
    enum ac_hw_stage hw_stage;
    uint8_t wave_size;
@@ -84,6 +89,7 @@ struct aco_shader_info {
    bool has_ngg_early_prim_export;
    bool image_2d_view_of_3d;
    unsigned workgroup_size;
+   bool has_epilog; /* Only for TCS or PS. */
    struct {
       bool tcs_in_out_eq;
       uint64_t tcs_temp_only_input_mask;
@@ -91,10 +97,8 @@ struct aco_shader_info {
    } vs;
    struct {
       uint32_t num_lds_blocks;
-      unsigned tess_input_vertices;
    } tcs;
    struct {
-      bool has_epilog;
       struct ac_arg epilog_pc;
       uint32_t num_interp;
       unsigned spi_ps_input;

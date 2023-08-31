@@ -157,10 +157,9 @@ agx_pack_pbe_lod(agx_index index, bool *flag)
 static unsigned
 agx_pack_memory_reg(agx_index index, bool *flag)
 {
-   assert(index.size == AGX_SIZE_16 || index.size == AGX_SIZE_32);
    assert_register_is_aligned(index);
 
-   *flag = (index.size == AGX_SIZE_32);
+   *flag = (index.size >= AGX_SIZE_32);
    return index.value;
 }
 
@@ -248,8 +247,6 @@ agx_pack_atomic_source(agx_index index)
 static unsigned
 agx_pack_atomic_dest(agx_index index, bool *flag)
 {
-   assert(index.size == AGX_SIZE_32 && "no 64-bit atomics yet");
-
    /* Atomic destinstions are optional (e.g. for update with no return) */
    if (index.type == AGX_INDEX_NULL) {
       *flag = 0;
@@ -257,6 +254,7 @@ agx_pack_atomic_dest(agx_index index, bool *flag)
    }
 
    /* But are otherwise registers */
+   assert(index.size == AGX_SIZE_32 && "no 64-bit atomics yet");
    assert_register_is_aligned(index);
    *flag = 1;
    return index.value;
@@ -433,7 +431,8 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
          unsigned fmod_offset = is_16 ? 9 : 10;
          src_short |= (fmod << fmod_offset);
       } else if (I->op == AGX_OPCODE_IMAD || I->op == AGX_OPCODE_IADD) {
-         bool zext = I->src[s].abs;
+         /* Force unsigned for immediates so uadd_sat works properly */
+         bool zext = I->src[s].abs || I->src[s].type == AGX_INDEX_IMMEDIATE;
          bool extends = I->src[s].size < AGX_SIZE_64;
 
          unsigned sxt = (extends && !zext) ? (1 << 10) : 0;
@@ -481,7 +480,7 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
 
    /* Determine length bit */
    unsigned length = encoding.length_short;
-   unsigned short_mask = (1 << length) - 1;
+   uint64_t short_mask = BITFIELD64_MASK(8 * length);
    bool length_bit = (extend || (raw & ~short_mask));
 
    if (encoding.extensible && length_bit) {
@@ -603,17 +602,17 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
          sample_index = agx_zero();
       }
 
-      bool kill = false; // TODO: optimize
+      bool kill = false;    // TODO: optimize
+      bool forward = false; // TODO: optimize
 
       uint64_t raw =
          0x21 | (flat ? (1 << 7) : 0) | (perspective ? (1 << 6) : 0) |
          ((D & 0xFF) << 7) | (1ull << 15) | /* XXX */
          ((cf_I & BITFIELD_MASK(6)) << 16) | ((cf_J & BITFIELD_MASK(6)) << 24) |
          (((uint64_t)channels) << 30) | (((uint64_t)sample_index.value) << 32) |
-         (!flat ? (1ull << 46) : 0) |                             /* XXX */
-         (((uint64_t)interp) << 48) | (kill ? (1ull << 52) : 0) | /* XXX */
-         (((uint64_t)(D >> 8)) << 56) | ((uint64_t)(cf_I >> 6) << 58) |
-         ((uint64_t)(cf_J >> 6) << 60);
+         (forward ? (1ull << 46) : 0) | (((uint64_t)interp) << 48) |
+         (kill ? (1ull << 52) : 0) | (((uint64_t)(D >> 8)) << 56) |
+         ((uint64_t)(cf_I >> 6) << 58) | ((uint64_t)(cf_J >> 6) << 60);
 
       unsigned size = 8;
       memcpy(util_dynarray_grow_bytes(emission, 1, size), &raw, size);
@@ -985,9 +984,13 @@ agx_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    struct util_dynarray fixups;
    util_dynarray_init(&fixups, ctx);
 
-   agx_foreach_instr_global_safe(ctx, I) {
-      if (I->op == AGX_OPCODE_LOGICAL_END)
-         agx_remove_instruction(I);
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block_rev(block, I) {
+         if (I->op == AGX_OPCODE_LOGICAL_END) {
+            agx_remove_instruction(I);
+            break;
+         }
+      }
    }
 
    agx_foreach_block(ctx, block) {

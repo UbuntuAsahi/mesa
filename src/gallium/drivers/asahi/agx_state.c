@@ -39,12 +39,13 @@
 #include "util/u_prim.h"
 #include "util/u_resource.h"
 #include "util/u_transfer.h"
+#include "util/u_upload_mgr.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
 #include "agx_tilebuffer.h"
 #include "pool.h"
 
-static void
+void
 agx_legalize_compression(struct agx_context *ctx, struct agx_resource *rsrc,
                          enum pipe_format format)
 {
@@ -1112,8 +1113,8 @@ agx_pack_image_atomic_data(void *packed, struct pipe_image_view *view)
             unsigned width_el = u_minify(tex->base.width0, level);
             cfg.tiles_per_row = DIV_ROUND_UP(width_el, tile_size.width_el);
 
-            cfg.layer_stride_elements =
-               DIV_ROUND_UP(tex->layout.layer_stride_B, blocksize_B);
+            cfg.layer_stride_pixels = DIV_ROUND_UP(
+               tex->layout.layer_stride_B, blocksize_B * cfg.sample_count);
          }
       }
    }
@@ -1266,8 +1267,16 @@ agx_set_constant_buffer(struct pipe_context *pctx, enum pipe_shader_type shader,
 {
    struct agx_context *ctx = agx_context(pctx);
    struct agx_stage *s = &ctx->stage[shader];
+   struct pipe_constant_buffer *constants = &s->cb[index];
 
    util_copy_constant_buffer(&s->cb[index], cb, take_ownership);
+
+   /* Upload user buffer immediately */
+   if (constants->user_buffer && !constants->buffer) {
+      u_upload_data(ctx->base.const_uploader, 0, constants->buffer_size, 64,
+                    constants->user_buffer, &constants->buffer_offset,
+                    &constants->buffer);
+   }
 
    unsigned mask = (1 << index);
 
@@ -1295,15 +1304,14 @@ agx_delete_state(struct pipe_context *ctx, void *state)
 /* BOs added to the batch in the uniform upload path */
 
 static void
-agx_set_vertex_buffers(struct pipe_context *pctx, unsigned start_slot,
-                       unsigned count, unsigned unbind_num_trailing_slots,
-                       bool take_ownership,
+agx_set_vertex_buffers(struct pipe_context *pctx, unsigned count,
+                       unsigned unbind_num_trailing_slots, bool take_ownership,
                        const struct pipe_vertex_buffer *buffers)
 {
    struct agx_context *ctx = agx_context(pctx);
 
    util_set_vertex_buffers_mask(ctx->vertex_buffers, &ctx->vb_mask, buffers,
-                                start_slot, count, unbind_num_trailing_slots,
+                                count, unbind_num_trailing_slots,
                                 take_ownership);
 
    ctx->dirty |= AGX_DIRTY_VERTEX;
@@ -1328,6 +1336,7 @@ agx_create_vertex_elements(struct pipe_context *ctx, unsigned count,
       attribs[i] = (struct agx_attribute){
          .buf = ve.vertex_buffer_index,
          .src_offset = ve.src_offset,
+         .stride = ve.src_stride,
          .format = ve.src_format,
          .divisor = ve.instance_divisor,
       };
@@ -1564,6 +1573,16 @@ agx_compile_variant(struct agx_device *dev, struct agx_uncompiled_shader *so,
          } else {
             colormasks[i] = BITFIELD_MASK(4);
          }
+
+         /* If not all bound RTs are fully written to, we need to force
+          * translucent pass type. agx_nir_lower_tilebuffer will take
+          * care of this for its own colormasks input.
+          */
+         unsigned comps = util_format_get_nr_components(key->rt_formats[i]);
+         if (i < key->nr_cbufs &&
+             (opts.rt[i].colormask & BITFIELD_MASK(comps)) !=
+                BITFIELD_MASK(comps))
+            force_translucent = true;
       }
 
       /* Clip plane lowering creates discard instructions, so run that before
@@ -1613,8 +1632,9 @@ agx_compile_variant(struct agx_device *dev, struct agx_uncompiled_shader *so,
    }
 
    struct agx_shader_key base_key = {
-      .needs_g13x_coherency =
-         dev->params.gpu_generation == 13 && dev->params.num_clusters_total > 1,
+      .needs_g13x_coherency = (dev->params.gpu_generation == 13 &&
+                               dev->params.num_clusters_total > 1) ||
+                              dev->params.num_dies > 1,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
@@ -1712,6 +1732,14 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
     */
    NIR_PASS_V(nir, agx_nir_lower_bindings, &so->internal_bindless);
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* Lower to maximum colour buffers, the excess stores will get cleaned up
+       * by tilebuffer lowering so they won't become real shader code. However,
+       * that depends on the shader key which we don't have at this point.
+       */
+      NIR_PASS_V(nir, nir_lower_fragcolor, 8);
+   }
+
    bool allow_mediump = !(dev->debug & AGX_DBG_NO16);
    agx_preprocess_nir(nir, true, allow_mediump, &so->info);
 
@@ -1764,9 +1792,9 @@ agx_create_shader_state(struct pipe_context *pctx,
       case PIPE_SHADER_VERTEX: {
          key.vs.vbuf.count = AGX_MAX_VBUFS;
          for (unsigned i = 0; i < AGX_MAX_VBUFS; ++i) {
-            key.vs.vbuf.strides[i] = 16;
             key.vs.vbuf.attributes[i] = (struct agx_attribute){
                .buf = i,
+               .stride = 16,
                .format = PIPE_FORMAT_R32G32B32A32_FLOAT,
             };
          }
@@ -1810,8 +1838,6 @@ agx_create_compute_state(struct pipe_context *pctx,
 
    if (!so)
       return NULL;
-
-   so->static_shared_mem = cso->static_shared_mem;
 
    so->variants = _mesa_hash_table_create(so, asahi_cs_shader_key_hash,
                                           asahi_cs_shader_key_equal);
@@ -1876,10 +1902,6 @@ agx_update_vs(struct agx_context *ctx)
 
    memcpy(key.vbuf.attributes, ctx->attributes,
           sizeof(key.vbuf.attributes[0]) * AGX_MAX_ATTRIBS);
-
-   u_foreach_bit(i, ctx->vb_mask) {
-      key.vbuf.strides[i] = ctx->vertex_buffers[i].stride;
-   }
 
    return agx_update_shader(ctx, &ctx->vs, PIPE_SHADER_VERTEX,
                             (union asahi_shader_key *)&key);
@@ -2222,9 +2244,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
    if (stage == PIPE_SHADER_FRAGMENT) {
       agx_usc_tilebuffer(&b, &batch->tilebuffer_layout);
    } else if (stage == PIPE_SHADER_COMPUTE) {
-      unsigned size =
-         ctx->stage[PIPE_SHADER_COMPUTE].shader->static_shared_mem +
-         variable_shared_mem;
+      unsigned size = cs->info.local_size + variable_shared_mem;
 
       agx_usc_pack(&b, SHARED, cfg) {
          cfg.layout = AGX_SHARED_LAYOUT_VERTEX_COMPUTE;
@@ -3158,12 +3178,17 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    assert(batch == agx_get_batch(ctx) && "batch should not change under us");
 
+   batch->draws++;
+
    /* The scissor/zbias arrays are indexed with 16-bit integers, imposigin a
     * maximum of UINT16_MAX descriptors. Flush if the next draw would overflow
     */
    if (unlikely((batch->scissor.size / AGX_SCISSOR_LENGTH) >= UINT16_MAX) ||
        (batch->depth_bias.size / AGX_DEPTH_BIAS_LENGTH) >= UINT16_MAX) {
       agx_flush_batch_for_reason(ctx, batch, "Scissor/depth bias overflow");
+   } else if (unlikely(batch->draws > 100000)) {
+      /* Mostly so drawoverhead doesn't OOM */
+      agx_flush_batch_for_reason(ctx, batch, "Absurd number of draws");
    }
 }
 

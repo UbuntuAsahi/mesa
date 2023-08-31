@@ -53,8 +53,7 @@
    .prefix.limit_trig_input_range = screen->driconf.limit_trig_input_range
 #define BRW_KEY_INIT(gen, prog_id, limit_trig_input)       \
    .base.program_string_id = prog_id,                      \
-   .base.limit_trig_input_range = limit_trig_input,        \
-   .base.tex.swizzles[0 ... BRW_MAX_SAMPLERS - 1] = 0x688
+   .base.limit_trig_input_range = limit_trig_input
 
 struct iris_threaded_compile_job {
    struct iris_screen *screen;
@@ -225,19 +224,19 @@ iris_upload_ubo_ssbo_surf_state(struct iris_context *ice,
                          .mocs = iris_mocs(res->bo, &screen->isl_dev, usage));
 }
 
-static nir_ssa_def *
+static nir_def *
 get_aoa_deref_offset(nir_builder *b,
                      nir_deref_instr *deref,
                      unsigned elem_size)
 {
    unsigned array_size = elem_size;
-   nir_ssa_def *offset = nir_imm_int(b, 0);
+   nir_def *offset = nir_imm_int(b, 0);
 
    while (deref->deref_type != nir_deref_type_var) {
       assert(deref->deref_type == nir_deref_type_array);
 
       /* This level's element size is the previous level's array size */
-      nir_ssa_def *index = nir_ssa_for_src(b, deref->arr.index, 1);
+      nir_def *index = nir_ssa_for_src(b, deref->arr.index, 1);
       assert(deref->arr.index.ssa);
       offset = nir_iadd(b, offset,
                            nir_imul_imm(b, index, array_size));
@@ -283,7 +282,7 @@ iris_lower_storage_image_derefs(nir_shader *nir)
             nir_variable *var = nir_deref_instr_get_variable(deref);
 
             b.cursor = nir_before_instr(&intrin->instr);
-            nir_ssa_def *index =
+            nir_def *index =
                nir_iadd_imm(&b, get_aoa_deref_offset(&b, deref, 1),
                                 var->data.driver_location);
             nir_rewrite_image_intrinsic(intrin, index, false);
@@ -465,7 +464,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
    nir_builder b = nir_builder_at(nir_before_block(nir_start_block(impl)));
 
-   nir_ssa_def *temp_ubo_name = nir_ssa_undef(&b, 1, 32);
+   nir_def *temp_ubo_name = nir_undef(&b, 1, 32);
 
    /* Turn system value intrinsics into uniforms */
    nir_foreach_block(block, impl) {
@@ -474,27 +473,27 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             continue;
 
          nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-         nir_ssa_def *offset;
+         nir_def *offset;
 
          switch (intrin->intrinsic) {
          case nir_intrinsic_load_base_workgroup_id: {
             /* GL doesn't have a concept of base workgroup */
             b.cursor = nir_instr_remove(&intrin->instr);
-            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+            nir_def_rewrite_uses(&intrin->def,
                                      nir_imm_zero(&b, 3, 32));
             continue;
          }
          case nir_intrinsic_load_constant: {
-            unsigned load_size = intrin->dest.ssa.num_components *
-                                 intrin->dest.ssa.bit_size / 8;
-            unsigned load_align = intrin->dest.ssa.bit_size / 8;
+            unsigned load_size = intrin->def.num_components *
+                                 intrin->def.bit_size / 8;
+            unsigned load_align = intrin->def.bit_size / 8;
 
             /* This one is special because it reads from the shader constant
              * data and not cbuf0 which gallium uploads for us.
              */
             b.cursor = nir_instr_remove(&intrin->instr);
 
-            nir_ssa_def *offset =
+            nir_def *offset =
                nir_iadd_imm(&b, nir_ssa_for_src(&b, intrin->src[0], 1),
                                 nir_intrinsic_base(intrin));
 
@@ -509,16 +508,16 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
              */
             assert(IRIS_MEMZONE_SHADER_START >> 32 == 0ull);
 
-            nir_ssa_def *const_data_addr =
+            nir_def *const_data_addr =
                nir_iadd(&b, nir_load_reloc_const_intel(&b, BRW_SHADER_RELOC_CONST_DATA_ADDR_LOW), offset);
 
-            nir_ssa_def *data =
+            nir_def *data =
                nir_load_global_constant(&b, nir_u2u64(&b, const_data_addr),
                                         load_align,
-                                        intrin->dest.ssa.num_components,
-                                        intrin->dest.ssa.bit_size);
+                                        intrin->def.num_components,
+                                        intrin->def.bit_size);
 
-            nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+            nir_def_rewrite_uses(&intrin->def,
                                      data);
             continue;
          }
@@ -663,15 +662,15 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             continue;
          }
 
-         nir_ssa_def *load =
-            nir_load_ubo(&b, intrin->dest.ssa.num_components, intrin->dest.ssa.bit_size,
+         nir_def *load =
+            nir_load_ubo(&b, intrin->def.num_components, intrin->def.bit_size,
                          temp_ubo_name, offset,
                          .align_mul = 4,
                          .align_offset = 0,
                          .range_base = 0,
                          .range = ~0);
 
-         nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
+         nir_def_rewrite_uses(&intrin->def,
                                   load);
          nir_instr_remove(instr);
       }
@@ -707,10 +706,8 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
             b.cursor = nir_before_instr(instr);
 
-            assert(load->src[0].is_ssa);
-
             if (load->src[0].ssa == temp_ubo_name) {
-               nir_ssa_def *imm = nir_imm_int(&b, sysval_cbuf_index);
+               nir_def *imm = nir_imm_int(&b, sysval_cbuf_index);
                nir_instr_rewrite_src(instr, &load->src[0],
                                      nir_src_for_ssa(imm));
             }
@@ -845,7 +842,7 @@ rewrite_src_with_bti(nir_builder *b, struct iris_binding_table *bt,
    assert(bt->sizes[group] > 0);
 
    b->cursor = nir_before_instr(instr);
-   nir_ssa_def *bti;
+   nir_def *bti;
    if (nir_src_is_const(*src)) {
       uint32_t index = nir_src_as_uint(*src);
       bti = nir_imm_intN_t(b, iris_group_index_to_bti(bt, group, index),

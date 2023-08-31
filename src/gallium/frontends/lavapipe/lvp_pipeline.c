@@ -22,6 +22,7 @@
  */
 
 #include "lvp_private.h"
+#include "vk_nir_convert_ycbcr.h"
 #include "vk_pipeline.h"
 #include "vk_render_pass.h"
 #include "vk_util.h"
@@ -124,12 +125,12 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 }
 
 static bool
-remove_scoped_barriers_impl(nir_builder *b, nir_instr *instr, void *data)
+remove_barriers_impl(nir_builder *b, nir_instr *instr, void *data)
 {
    if (instr->type != nir_instr_type_intrinsic)
       return false;
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-   if (intr->intrinsic != nir_intrinsic_scoped_barrier)
+   if (intr->intrinsic != nir_intrinsic_barrier)
       return false;
    if (data) {
       if (nir_intrinsic_memory_scope(intr) == SCOPE_WORKGROUP ||
@@ -142,9 +143,9 @@ remove_scoped_barriers_impl(nir_builder *b, nir_instr *instr, void *data)
 }
 
 static bool
-remove_scoped_barriers(nir_shader *nir, bool is_compute)
+remove_barriers(nir_shader *nir, bool is_compute)
 {
-   return nir_shader_instructions_pass(nir, remove_scoped_barriers_impl, nir_metadata_dominance, (void*)is_compute);
+   return nir_shader_instructions_pass(nir, remove_barriers_impl, nir_metadata_dominance, (void*)is_compute);
 }
 
 static bool
@@ -178,7 +179,7 @@ find_tex(const nir_instr *instr, const void *data_cb)
    return false;
 }
 
-static nir_ssa_def *
+static nir_def *
 fixup_tex_instr(struct nir_builder *b, nir_instr *instr, void *data_cb)
 {
    nir_tex_instr *tex_instr = nir_instr_as_tex(instr);
@@ -352,11 +353,25 @@ inline_variant_equals(const void *a, const void *b)
    return true;
 }
 
+static const struct vk_ycbcr_conversion_state *
+lvp_ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32_t array_index)
+{
+   const struct lvp_pipeline_layout *layout = data;
+
+   const struct lvp_descriptor_set_layout *set_layout = container_of(layout->vk.set_layouts[set], struct lvp_descriptor_set_layout, vk);
+   const struct lvp_descriptor_set_binding_layout *binding_layout = &set_layout->binding[binding];
+   if (!binding_layout->immutable_samplers)
+      return NULL;
+
+   struct vk_ycbcr_conversion *ycbcr_conversion = binding_layout->immutable_samplers[array_index]->ycbcr_conversion;
+   return ycbcr_conversion ? &ycbcr_conversion->state : NULL;
+}
+
 static void
 lvp_shader_lower(struct lvp_device *pdevice, nir_shader *nir, struct lvp_shader *shader, struct lvp_pipeline_layout *layout)
 {
    if (nir->info.stage != MESA_SHADER_TESS_CTRL)
-      NIR_PASS_V(nir, remove_scoped_barriers, nir->info.stage == MESA_SHADER_COMPUTE || nir->info.stage == MESA_SHADER_MESH || nir->info.stage == MESA_SHADER_TASK);
+      NIR_PASS_V(nir, remove_barriers, nir->info.stage == MESA_SHADER_COMPUTE || nir->info.stage == MESA_SHADER_MESH || nir->info.stage == MESA_SHADER_TASK);
 
    const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
       .frag_coord = true,
@@ -397,6 +412,8 @@ lvp_shader_lower(struct lvp_device *pdevice, nir_shader *nir, struct lvp_shader 
    NIR_PASS_V(nir, nir_lower_explicit_io,
               nir_var_mem_global,
               nir_address_format_64bit_global);
+
+   NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lvp_ycbcr_conversion_lookup, layout);
 
    nir_lower_non_uniform_access_options options = {
       .types = nir_lower_non_uniform_ubo_access | nir_lower_non_uniform_texture_access | nir_lower_non_uniform_image_access,
@@ -527,8 +544,7 @@ lvp_shader_xfb_init(struct lvp_shader *shader)
       memset(output_mapping, 0, sizeof(output_mapping));
 
       nir_foreach_shader_out_variable(var, shader->pipeline_nir->nir) {
-         unsigned slots = var->data.compact ? DIV_ROUND_UP(glsl_get_length(var->type), 4)
-                                            : glsl_count_attribute_slots(var->type, false);
+         unsigned slots = nir_variable_count_slots(var, var->type);
          for (unsigned i = 0; i < slots; i++)
             output_mapping[var->data.location + i] = var->data.driver_location + i;
       }
@@ -544,7 +560,7 @@ lvp_shader_xfb_init(struct lvp_shader *shader)
          shader->stream_output.output[i].dst_offset = xfb_info->outputs[i].offset / 4;
          shader->stream_output.output[i].register_index = output_mapping[xfb_info->outputs[i].location];
          shader->stream_output.output[i].num_components = util_bitcount(xfb_info->outputs[i].component_mask);
-         shader->stream_output.output[i].start_component = ffs(xfb_info->outputs[i].component_mask) - 1;
+         shader->stream_output.output[i].start_component = xfb_info->outputs[i].component_offset;
          shader->stream_output.output[i].stream = xfb_info->buffer_to_stream[xfb_info->outputs[i].buffer];
       }
 
@@ -739,7 +755,8 @@ static VkResult
 lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
                            struct lvp_device *device,
                            struct lvp_pipeline_cache *cache,
-                           const VkGraphicsPipelineCreateInfo *pCreateInfo)
+                           const VkGraphicsPipelineCreateInfo *pCreateInfo,
+                           VkPipelineCreateFlagBits2KHR flags)
 {
    VkResult result;
 
@@ -757,7 +774,7 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
                          VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
                          VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT;
 
-   if (pCreateInfo->flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR)
+   if (flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR)
       pipeline->library = true;
 
    struct lvp_pipeline_layout *layout = lvp_pipeline_layout_from_handle(pCreateInfo->layout);
@@ -924,6 +941,7 @@ lvp_graphics_pipeline_create(
    VkDevice _device,
    VkPipelineCache _cache,
    const VkGraphicsPipelineCreateInfo *pCreateInfo,
+   VkPipelineCreateFlagBits2KHR flags,
    VkPipeline *pPipeline,
    bool group)
 {
@@ -947,7 +965,7 @@ lvp_graphics_pipeline_create(
    vk_object_base_init(&device->vk, &pipeline->base,
                        VK_OBJECT_TYPE_PIPELINE);
    uint64_t t0 = os_time_get_nano();
-   result = lvp_graphics_pipeline_init(pipeline, device, cache, pCreateInfo);
+   result = lvp_graphics_pipeline_init(pipeline, device, cache, pCreateInfo, flags);
    if (result != VK_SUCCESS) {
       vk_free(&device->vk.alloc, pipeline);
       return result;
@@ -960,7 +978,7 @@ lvp_graphics_pipeline_create(
          pci.pTessellationState = g->pTessellationState;
          pci.pStages = g->pStages;
          pci.stageCount = g->stageCount;
-         result = lvp_graphics_pipeline_create(_device, _cache, &pci, &pipeline->groups[i], true);
+         result = lvp_graphics_pipeline_create(_device, _cache, &pci, flags, &pipeline->groups[i], true);
          if (result != VK_SUCCESS) {
             lvp_pipeline_destroy(device, pipeline);
             return result;
@@ -984,6 +1002,36 @@ lvp_graphics_pipeline_create(
    return VK_SUCCESS;
 }
 
+static VkPipelineCreateFlagBits2KHR
+get_pipeline_create_flags(const void *pCreateInfo)
+{
+   const VkBaseInStructure *base = pCreateInfo;
+   const VkPipelineCreateFlags2CreateInfoKHR *flags2 =
+      vk_find_struct_const(base->pNext, PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR);
+
+   if (flags2)
+      return flags2->flags;
+
+   switch (((VkBaseInStructure *)pCreateInfo)->sType) {
+   case VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: {
+      const VkGraphicsPipelineCreateInfo *create_info = (VkGraphicsPipelineCreateInfo *)pCreateInfo;
+      return create_info->flags;
+   }
+   case VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO: {
+      const VkComputePipelineCreateInfo *create_info = (VkComputePipelineCreateInfo *)pCreateInfo;
+      return create_info->flags;
+   }
+   case VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR: {
+      const VkRayTracingPipelineCreateInfoKHR *create_info = (VkRayTracingPipelineCreateInfoKHR *)pCreateInfo;
+      return create_info->flags;
+   }
+   default:
+      unreachable("invalid pCreateInfo pipeline struct");
+   }
+
+   return 0;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateGraphicsPipelines(
    VkDevice                                    _device,
    VkPipelineCache                             pipelineCache,
@@ -997,16 +1045,19 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateGraphicsPipelines(
 
    for (; i < count; i++) {
       VkResult r = VK_PIPELINE_COMPILE_REQUIRED;
-      if (!(pCreateInfos[i].flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT))
+      VkPipelineCreateFlagBits2KHR flags = get_pipeline_create_flags(&pCreateInfos[i]);
+
+      if (!(flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR))
          r = lvp_graphics_pipeline_create(_device,
                                           pipelineCache,
                                           &pCreateInfos[i],
+                                          flags,
                                           &pPipelines[i],
                                           false);
       if (r != VK_SUCCESS) {
          result = r;
          pPipelines[i] = VK_NULL_HANDLE;
-         if (pCreateInfos[i].flags & VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+         if (flags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT_KHR)
             break;
       }
    }
@@ -1047,6 +1098,7 @@ lvp_compute_pipeline_create(
    VkDevice _device,
    VkPipelineCache _cache,
    const VkComputePipelineCreateInfo *pCreateInfo,
+   VkPipelineCreateFlagBits2KHR flags,
    VkPipeline *pPipeline)
 {
    LVP_FROM_HANDLE(lvp_device, device, _device);
@@ -1095,15 +1147,18 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateComputePipelines(
 
    for (; i < count; i++) {
       VkResult r = VK_PIPELINE_COMPILE_REQUIRED;
-      if (!(pCreateInfos[i].flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT))
+      VkPipelineCreateFlagBits2KHR flags = get_pipeline_create_flags(&pCreateInfos[i]);
+
+      if (!(flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR))
          r = lvp_compute_pipeline_create(_device,
                                          pipelineCache,
                                          &pCreateInfos[i],
+                                         flags,
                                          &pPipelines[i]);
       if (r != VK_SUCCESS) {
          result = r;
          pPipelines[i] = VK_NULL_HANDLE;
-         if (pCreateInfos[i].flags & VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+         if (flags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT_KHR)
             break;
       }
    }

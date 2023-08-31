@@ -2228,9 +2228,13 @@ void select_vs_prolog(Program* program, const struct aco_vs_prolog_info* pinfo,
                       ac_shader_config* config, const struct aco_compiler_options* options,
                       const struct aco_shader_info* info, const struct ac_shader_args* args);
 
-void select_ps_epilog(Program* program, const struct aco_ps_epilog_info* epilog_info,
-                      ac_shader_config* config, const struct aco_compiler_options* options,
+void select_ps_epilog(Program* program, void* pinfo, ac_shader_config* config,
+                      const struct aco_compiler_options* options,
                       const struct aco_shader_info* info, const struct ac_shader_args* args);
+
+void select_tcs_epilog(Program* program, void* pinfo, ac_shader_config* config,
+                       const struct aco_compiler_options* options,
+                       const struct aco_shader_info* info, const struct ac_shader_args* args);
 
 void lower_phis(Program* program);
 void calc_min_waves(Program* program);
