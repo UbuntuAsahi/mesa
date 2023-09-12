@@ -510,9 +510,10 @@ copy_image(struct pipe_context *pipe,
            unsigned src_level,
            const struct pipe_box *src_box)
 {
-   if (src->format == dst->format ||
-       util_format_is_compressed(src->format) ||
-       util_format_is_compressed(dst->format)) {
+   if ((src->nr_samples <= 1 && dst->nr_samples <= 1) &&
+       (src->format == dst->format ||
+        util_format_is_compressed(src->format) ||
+        util_format_is_compressed(dst->format))) {
       pipe->resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
                                  src, src_level, src_box);
       return;
