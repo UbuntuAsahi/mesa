@@ -50,8 +50,8 @@
  * component size always return the same component type.
  *
  * X returns A.
- * Luminance, intensity, alpha, depth, stencil, and 8-bit and 16-bit packed
- * formats are not supported. (same as ARB_copy_image)
+ * intensity, depth, stencil, and 8-bit and 16-bit packed formats are not
+ * supported. (same as ARB_copy_image)
  */
 static enum pipe_format
 get_canonical_format(struct pipe_screen *screen,
@@ -115,6 +115,8 @@ get_canonical_format(struct pipe_screen *screen,
          switch (desc->channel[0].size) {
          case 8:
             RETURN_FOR_SWIZZLE1(X, PIPE_FORMAT_R8_UINT);
+            /* e.g. PIPE_FORMAT_A8_UNORM */
+            RETURN_FOR_SWIZZLE1(0, PIPE_FORMAT_R8_UNORM);
             break;
 
          case 16:
@@ -135,6 +137,8 @@ get_canonical_format(struct pipe_screen *screen,
              */
             RETURN_FOR_SWIZZLE2(X, Y, PIPE_FORMAT_R8G8_UNORM);
             RETURN_FOR_SWIZZLE2(Y, X, PIPE_FORMAT_G8R8_UNORM);
+            /* e.g. PIPE_FORMAT_L8A8_UNORM */
+            RETURN_FOR_SWIZZLE2(X, X, PIPE_FORMAT_R16_UNORM);
             break;
 
          case 16:
