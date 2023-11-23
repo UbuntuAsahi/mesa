@@ -1,3 +1,9 @@
+mesa (24.0~pre20231121-0asahi1.22.04) jammy; urgency=medium
+
+  * Bump wayland-protocols dependency
+
+ -- Tobias Heider <me@tobhe.de>  Thu, 23 Nov 2023 01:34:41 +0100
+
 mesa (24.0~pre20231121-0asahi0.22.04) jammy; urgency=medium
 
   * Update to asahi-20231121
