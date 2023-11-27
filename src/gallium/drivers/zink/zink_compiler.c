@@ -1165,9 +1165,10 @@ lower_system_values_to_inlined_uniforms_instr(nir_builder *b,
    }
 
    b->cursor = nir_before_instr(&intrin->instr);
-   nir_def *new_dest_def = nir_load_ubo(b, 1, 32, nir_imm_int(b, 0),
+   nir_def *new_dest_def = nir_load_ubo(b, 1, intrin->def.bit_size, nir_imm_int(b, 0),
                                             nir_imm_int(b, inlined_uniform_offset),
-                                            .align_mul = 4, .align_offset = 0,
+                                            .align_mul = intrin->def.bit_size / 8,
+                                            .align_offset = 0,
                                             .range_base = 0, .range = ~0);
    nir_def_rewrite_uses(&intrin->def, new_dest_def);
    nir_instr_remove(&intrin->instr);
@@ -4943,13 +4944,13 @@ fixup_io_locations(nir_shader *nir)
    return true;
 }
 
-static uint32_t
+static uint64_t
 zink_flat_flags(struct nir_shader *shader)
 {
-   uint32_t flat_flags = 0, c = 0;
+   uint64_t flat_flags = 0;
    nir_foreach_shader_in_variable(var, shader) {
       if (var->data.interpolation == INTERP_MODE_FLAT)
-         flat_flags |= 1u << (c++);
+         flat_flags |= 1ull << var->data.location;
    }
 
    return flat_flags;
