@@ -1171,12 +1171,6 @@ transition_resource(struct pipe_context *pctx, struct agx_resource *rsrc,
    assert(new_res);
    assert(!(rsrc->base.bind & PIPE_BIND_SHARED) && "cannot swap BOs if shared");
 
-   /* Flush current writers out, so that rsrc->data_valid is correctly set (e.g.
-    * for render targets). The writers would have been flushed by the blits
-    * anyway, so this is not further harming performance.
-    */
-   agx_flush_writer(agx_context(pctx), rsrc, "Transition");
-
    int level;
    BITSET_FOREACH_SET(level, rsrc->data_valid, PIPE_MAX_TEXTURE_LEVELS) {
       /* Blit each valid level */
@@ -1347,12 +1341,11 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
             sres = zsres->separate_stencil;
 
          if (zres) {
-            bool valid = agx_resource_valid(zres, level);
             bool clear = (batch->clear & PIPE_CLEAR_DEPTH);
             bool load = (batch->load & PIPE_CLEAR_DEPTH);
 
             zls_control.z_store_enable = (batch->resolve & PIPE_CLEAR_DEPTH);
-            zls_control.z_load_enable = valid && !clear && load;
+            zls_control.z_load_enable = !clear && load;
 
             c->depth_buffer_load = agx_map_texture_gpu(zres, first_layer) +
                                    ail_get_level_offset_B(&zres->layout, level);
@@ -1411,12 +1404,11 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          }
 
          if (sres) {
-            bool valid = agx_resource_valid(sres, zsbuf->u.tex.level);
             bool clear = (batch->clear & PIPE_CLEAR_STENCIL);
             bool load = (batch->load & PIPE_CLEAR_STENCIL);
 
             zls_control.s_store_enable = (batch->resolve & PIPE_CLEAR_STENCIL);
-            zls_control.s_load_enable = valid && !clear && load;
+            zls_control.s_load_enable = !clear && load;
 
             c->stencil_buffer_load =
                agx_map_texture_gpu(sres, first_layer) +
@@ -1668,24 +1660,8 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
    for (unsigned i = 0; i < batch->key.nr_cbufs; ++i) {
       struct pipe_surface *surf = batch->key.cbufs[i];
 
-      if (surf && surf->texture) {
-         struct agx_resource *rt = agx_resource(surf->texture);
-         BITSET_SET(rt->data_valid, surf->u.tex.level);
-
-         if (!(batch->clear & (PIPE_CLEAR_COLOR0 << i)))
-            clear_pipeline_textures = true;
-      }
-   }
-
-   struct agx_resource *zbuf =
-      batch->key.zsbuf ? agx_resource(batch->key.zsbuf->texture) : NULL;
-
-   if (zbuf) {
-      unsigned level = batch->key.zsbuf->u.tex.level;
-      BITSET_SET(zbuf->data_valid, level);
-
-      if (zbuf->separate_stencil)
-         BITSET_SET(zbuf->separate_stencil->data_valid, level);
+      clear_pipeline_textures |=
+         surf && surf->texture && !(batch->clear & (PIPE_CLEAR_COLOR0 << i));
    }
 
    /* Scissor and depth bias arrays are staged to dynamic arrays on the CPU. At
