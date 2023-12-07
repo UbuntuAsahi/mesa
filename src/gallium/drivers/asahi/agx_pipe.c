@@ -1509,7 +1509,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
       cfg.uniforms = 4 + (framebuffer->nr_cbufs * 8);
 
       bool spills = agx_tilebuffer_spills(&batch->tilebuffer_layout);
-      unsigned nr_tex_per_rt = spills ? 2 : clear_pipeline_textures ? 1 : 0;
+      unsigned nr_tex_per_rt = (spills || clear_pipeline_textures) ? 2 : 0;
       cfg.texture_states = framebuffer->nr_cbufs * nr_tex_per_rt;
 
       cfg.sampler_states = clear_pipeline_textures
@@ -1550,7 +1550,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->merge_upper_y = fui(tan_60 / framebuffer->height);
 
    agx_pack(&c->partial_reload_pipeline_bind, COUNTS, cfg) {
-      cfg.texture_states = framebuffer->nr_cbufs;
+      cfg.texture_states = framebuffer->nr_cbufs * 2;
       cfg.sampler_states = AGX_SAMPLER_STATES_4_COMPACT;
       cfg.unknown = 0xFFFF;
    }
