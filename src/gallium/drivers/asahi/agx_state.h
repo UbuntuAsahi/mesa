@@ -456,6 +456,41 @@ enum agx_dirty {
  */
 #define AGX_MAX_BATCHES (128)
 
+static_assert(PIPE_TEX_FILTER_NEAREST < 2, "known order");
+static_assert(PIPE_TEX_FILTER_LINEAR < 2, "known order");
+
+enum asahi_blit_clamp {
+   ASAHI_BLIT_CLAMP_NONE,
+   ASAHI_BLIT_CLAMP_UINT_TO_SINT,
+   ASAHI_BLIT_CLAMP_SINT_TO_UINT,
+
+   /* keep last */
+   ASAHI_BLIT_CLAMP_COUNT,
+};
+
+struct asahi_blitter {
+   bool active;
+
+   /* [clamp_type][is_array] */
+   void *blit_cs[ASAHI_BLIT_CLAMP_COUNT][2];
+
+   /* [filter] */
+   void *sampler[2];
+
+   struct pipe_constant_buffer saved_cb;
+
+   bool has_saved_image;
+   struct pipe_image_view saved_image;
+
+   unsigned saved_num_sampler_states;
+   void *saved_sampler_states[PIPE_MAX_SAMPLERS];
+
+   unsigned saved_num_sampler_views;
+   struct pipe_sampler_view *saved_sampler_views[PIPE_MAX_SAMPLERS];
+
+   void *saved_cs;
+};
+
 struct agx_context {
    struct pipe_context base;
    struct agx_compiled_shader *vs, *fs, *gs;
@@ -514,6 +549,7 @@ struct agx_context {
    bool is_noop;
 
    struct blitter_context *blitter;
+   struct asahi_blitter compute_blitter;
 
    /* Map of GEM handle to (batch index + 1) that (conservatively) writes that
     * BO, or 0 if no writer.
