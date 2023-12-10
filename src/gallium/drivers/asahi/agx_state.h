@@ -485,8 +485,7 @@ struct asahi_blitter {
    unsigned saved_num_sampler_states;
    void *saved_sampler_states[PIPE_MAX_SAMPLERS];
 
-   unsigned saved_num_sampler_views;
-   struct pipe_sampler_view *saved_sampler_views[PIPE_MAX_SAMPLERS];
+   struct pipe_sampler_view *saved_sampler_view;
 
    void *saved_cs;
 };

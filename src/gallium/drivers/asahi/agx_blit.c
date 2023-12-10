@@ -144,11 +144,8 @@ asahi_compute_save(struct agx_context *ctx)
              sizeof(struct pipe_image_view));
    }
 
-   blitter->saved_num_sampler_views = stage->texture_count;
-   for (unsigned i = 0; i < stage->texture_count; i++) {
-      pipe_sampler_view_reference(&blitter->saved_sampler_views[i],
-                                  &stage->textures[i]->base);
-   }
+   pipe_sampler_view_reference(&blitter->saved_sampler_view,
+                               &stage->textures[0]->base);
 
    blitter->saved_num_sampler_states = stage->sampler_count;
    memcpy(blitter->saved_sampler_states, stage->samplers,
@@ -175,13 +172,11 @@ asahi_compute_restore(struct agx_context *ctx)
                              &blitter->saved_cb);
    blitter->saved_cb.buffer = NULL;
 
-   if (blitter->saved_num_sampler_views) {
-      pctx->set_sampler_views(pctx, PIPE_SHADER_COMPUTE, 0, 0,
-                              blitter->saved_num_sampler_views, true,
-                              blitter->saved_sampler_views);
+   if (blitter->saved_sampler_view) {
+      pctx->set_sampler_views(pctx, PIPE_SHADER_COMPUTE, 0, 1, 0, true,
+                              &blitter->saved_sampler_view);
 
-      for (unsigned i = 0; i < blitter->saved_num_sampler_views; i++)
-         blitter->saved_sampler_views[i] = NULL;
+      blitter->saved_sampler_view = NULL;
    }
 
    if (blitter->saved_num_sampler_states) {
