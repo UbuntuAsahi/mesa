@@ -1089,6 +1089,8 @@ agx_transfer_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
    if (trans->staging.rsrc && (transfer->usage & PIPE_MAP_WRITE)) {
       assert(prsrc->target != PIPE_BUFFER);
       agx_blit_from_staging(pctx, trans);
+      agx_flush_readers(agx_context(pctx), agx_resource(trans->staging.rsrc),
+                        "GPU write staging blit");
    } else if (trans->map && (transfer->usage & PIPE_MAP_WRITE)) {
       assert(
          ail_is_level_twiddled_uncompressed(&rsrc->layout, transfer->level));
