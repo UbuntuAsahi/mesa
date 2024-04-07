@@ -169,7 +169,13 @@ fi
 
 uncollapsed_section_switch deqp "deqp: deqp-runner"
 
-cat /deqp/version-log
+# Print the detailed version with the list of backports and local patches
+for api in vk gl; do
+  deqp_version_log=/deqp/version-$api
+  if [ -r "$deqp_version_log" ]; then
+    cat "$deqp_version_log"
+  fi
+done
 
 set +e
 if [ -z "$DEQP_SUITE" ]; then
@@ -230,7 +236,7 @@ deqp-runner junit \
    --results $RESULTS/failures.csv \
    --output $RESULTS/junit.xml \
    --limit 50 \
-   --template "See https://$CI_PROJECT_ROOT_NAMESPACE.pages.freedesktop.org/-/$CI_PROJECT_NAME/-/jobs/$CI_JOB_ID/artifacts/results/{{testcase}}.xml"
+   --template "See $ARTIFACTS_BASE_URL/results/{{testcase}}.xml"
 
 # Report the flakes to the IRC channel for monitoring (if configured):
 if [ -n "$FLAKES_CHANNEL" ]; then

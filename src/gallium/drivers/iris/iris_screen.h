@@ -45,6 +45,9 @@ struct iris_fs_prog_key;
 struct iris_cs_prog_key;
 enum iris_program_cache_id;
 
+typedef struct nir_builder nir_builder;
+typedef struct nir_shader nir_shader;
+
 struct u_trace;
 
 #define READ_ONCE(x) (*(volatile __typeof__(x) *)&(x))
@@ -63,6 +66,7 @@ struct iris_vtable {
    void (*destroy_state)(struct iris_context *ice);
    void (*init_render_context)(struct iris_batch *batch);
    void (*init_compute_context)(struct iris_batch *batch);
+   void (*init_copy_context)(struct iris_batch *batch);
    void (*upload_render_state)(struct iris_context *ice,
                                struct iris_batch *batch,
                                const struct pipe_draw_info *draw,
@@ -73,6 +77,10 @@ struct iris_vtable {
                                         const struct pipe_draw_info *draw,
                                         const struct pipe_draw_indirect_info *indirect,
                                         const struct pipe_draw_start_count_bias *sc);
+   void (*upload_indirect_shader_render_state)(struct iris_context *ice,
+                                               const struct pipe_draw_info *draw,
+                                               const struct pipe_draw_indirect_info *indirect,
+                                               const struct pipe_draw_start_count_bias *sc);
    void (*update_binder_address)(struct iris_batch *batch,
                                  struct iris_binder *binder);
    void (*upload_compute_state)(struct iris_context *ice,
@@ -150,6 +158,9 @@ struct iris_vtable {
                            struct iris_cs_prog_key *key);
    void (*lost_genx_state)(struct iris_context *ice, struct iris_batch *batch);
    void (*disable_rhwo_optimization)(struct iris_batch *batch, bool disable);
+
+   nir_shader *(*load_shader_lib)(struct iris_screen *screen, void *mem_ctx);
+   unsigned (*call_generation_shader)(struct iris_screen *screen, nir_builder *b);
 };
 
 struct iris_address {
@@ -194,6 +205,7 @@ struct iris_screen {
       float lower_depth_range_rate;
       bool intel_enable_wa_14018912822;
       bool enable_tbimr;
+      unsigned generated_indirect_threshold;
    } driconf;
 
    /** Does the kernel support various features (KERNEL_HAS_* bitfield)? */

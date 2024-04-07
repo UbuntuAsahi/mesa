@@ -37,6 +37,10 @@
 #endif
 
 struct intel_sample_positions;
+struct intel_urb_config;
+
+typedef struct nir_builder nir_builder;
+typedef struct nir_shader nir_shader;
 
 extern const uint32_t genX(vk_to_intel_cullmode)[];
 
@@ -57,6 +61,11 @@ void genX(init_physical_device_state)(struct anv_physical_device *device);
 VkResult genX(init_device_state)(struct anv_device *device);
 
 void genX(init_cps_device_state)(struct anv_device *device);
+
+nir_shader *genX(load_libanv_shader)(struct anv_device *device, void *mem_ctx);
+
+uint32_t genX(call_internal_shader)(nir_builder *b,
+                                    enum anv_internal_kernel_name shader_name);
 
 void
 genX(set_fast_clear_state)(struct anv_cmd_buffer *cmd_buffer,
@@ -88,9 +97,13 @@ void genX(cmd_buffer_emit_hashing_mode)(struct anv_cmd_buffer *cmd_buffer,
                                         unsigned width, unsigned height,
                                         unsigned scale);
 
+void genX(urb_workaround)(struct anv_cmd_buffer *cmd_buffer,
+                          const struct intel_urb_config *urb_cfg);
+
 void genX(flush_pipeline_select_3d)(struct anv_cmd_buffer *cmd_buffer);
 void genX(flush_pipeline_select_gpgpu)(struct anv_cmd_buffer *cmd_buffer);
-void genX(emit_pipeline_select)(struct anv_batch *batch, uint32_t pipeline);
+void genX(emit_pipeline_select)(struct anv_batch *batch, uint32_t pipeline,
+                                const struct anv_device *device);
 
 void genX(apply_task_urb_workaround)(struct anv_cmd_buffer *cmd_buffer);
 
@@ -106,6 +119,12 @@ genX(emit_apply_pipe_flushes)(struct anv_batch *batch,
                               uint32_t current_pipeline,
                               enum anv_pipe_bits bits,
                               enum anv_pipe_bits *emitted_flush_bits);
+void
+genX(invalidate_aux_map)(struct anv_batch *batch,
+                         struct anv_device *device,
+                         enum intel_engine_class engine_class,
+                         enum anv_pipe_bits bits);
+
 
 void genX(emit_so_memcpy_init)(struct anv_memcpy_state *state,
                                struct anv_device *device,
@@ -125,6 +144,17 @@ void genX(emit_l3_config)(struct anv_batch *batch,
 
 void genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
                                 const struct intel_l3_config *cfg);
+
+uint32_t
+genX(cmd_buffer_flush_descriptor_sets)(struct anv_cmd_buffer *cmd_buffer,
+                                       struct anv_cmd_pipeline_state *pipe_state,
+                                       const VkShaderStageFlags dirty,
+                                       struct anv_shader_bin **shaders,
+                                       uint32_t num_shaders);
+void
+genX(cmd_buffer_flush_push_descriptor_set)(struct anv_cmd_buffer *cmd_buffer,
+                                           struct anv_cmd_pipeline_state *state,
+                                           struct anv_pipeline *pipeline);
 
 void genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer);
 
@@ -154,7 +184,8 @@ void
 genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
                      const struct intel_l3_config *l3_config,
                      VkShaderStageFlags active_stages,
-                     const unsigned entry_size[4],
+                     const struct intel_urb_config *urb_cfg_in,
+                     struct intel_urb_config *urb_cfg_out,
                      enum intel_urb_deref_block_size *deref_block_size);
 
 void genX(emit_sample_pattern)(struct anv_batch *batch,
@@ -172,6 +203,12 @@ void genX(cmd_buffer_dispatch_kernel)(struct anv_cmd_buffer *cmd_buffer,
 
 void genX(blorp_exec)(struct blorp_batch *batch,
                       const struct blorp_params *params);
+
+void genX(batch_emit_secondary_call)(struct anv_batch *batch,
+                                     struct anv_address secondary_addr,
+                                     struct anv_address secondary_return_addr);
+
+void *genX(batch_emit_return)(struct anv_batch *batch);
 
 void genX(cmd_emit_timestamp)(struct anv_batch *batch,
                               struct anv_device *device,

@@ -41,22 +41,6 @@ LibGL environment variables
 Core Mesa environment variables
 -------------------------------
 
-.. envvar:: MESA_NO_ASM
-
-   if set, disables all assembly language optimizations
-
-.. envvar:: MESA_NO_MMX
-
-   if set, disables Intel MMX optimizations
-
-.. envvar:: MESA_NO_3DNOW
-
-   if set, disables AMD 3DNow! optimizations
-
-.. envvar:: MESA_NO_SSE
-
-   if set, disables Intel SSE optimizations
-
 .. envvar:: MESA_NO_ERROR
 
    if set to 1, error checking is disabled as per :ext:`GL_KHR_no_error`.
@@ -365,6 +349,9 @@ Core Mesa environment variables
       * - ``rra``
         - Radeon Raytracing Analyzer
         - ``RADV``
+      * - ``ctxroll``
+        - Context rolls
+        - ``RADV``
 
    - Creating RMV captures requires the ``scripts/setup.sh`` script in the
      Radeon Developer Tools folder to be run beforehand
@@ -494,6 +481,12 @@ Intel driver environment variables
    for compute dispatches if one is detected. For Vulkan, anvil will
    advertise support for a compute queue if a compute engine is
    detected.
+
+.. envvar:: INTEL_COPY_CLASS
+
+   If set to 1, true or yes, then I915_ENGINE_CLASS_COPY will be
+   supported. For Vulkan, anvil will advertise support for a transfer
+   queue if a copy engine is detected.
 
 .. envvar:: INTEL_DEBUG
 
@@ -713,6 +706,14 @@ Intel driver environment variables
 
    ``INTEL_MEASURE=cpu {workload}``
 
+.. envvar:: INTEL_MODIFIER_OVERRIDE
+
+   if set, determines the single DRM modifier reported back to (Vulkan)
+   applications, in order to make selecting modifier deterministic
+   between Vulkan driver and applications. The value can be one of the
+   supported modifiers on a platform, but other values are also acceptable
+   for debug purposes.
+
 .. envvar:: INTEL_NO_HW
 
    if set to 1, true or yes, prevents batches from being submitted to the
@@ -754,6 +755,19 @@ Intel driver environment variables
    The success of assembly override would be signified by "Successfully
    overrode shader with sha1 <SHA-1>" in stderr replacing the original
    assembly.
+
+.. envvar:: INTEL_SHADER_BIN_DUMP_PATH
+
+   if set, determines the directory to which the compiled shaders will be
+   dumped. They will be dumped as ``sha1_of_assembly.bin``, where the sha1
+   values will be the same as can be found in the :envvar:`INTEL_DEBUG`
+   output, and can be used for :envvar:`INTEL_SHADER_ASM_READ_PATH` input.
+
+   .. note::
+      Unlike the text form of shader dumping, :envvar:`INTEL_DEBUG`
+      does not affect on the list of shaders to dump. All generated shaders
+      are always dumped if :envvar:`INTEL_SHADER_BIN_DUMP_PATH` variable is
+      set.
 
 .. envvar:: INTEL_SIMD_DEBUG
 
@@ -997,7 +1011,7 @@ Clover environment variables
    allows specifying additional linker options. Specified options are
    appended after the options set by the OpenCL program in
    ``clLinkProgram``.
-   
+
 .. _rusticl-env-var:
 
 .. envvar:: IRIS_ENABLE_CLOVER
@@ -1053,6 +1067,7 @@ Rusticl environment variables
    - ``clc`` dumps all OpenCL C source being compiled
    - ``program`` dumps compilation logs to stderr
    - ``sync`` waits on the GPU to complete after every event
+   - ``validate`` validates any internally generated SPIR-Vs, e.g. through compiling OpenCL C code
 
 .. _clc-env-var:
 
@@ -1265,7 +1280,9 @@ RADV driver environment variables
    ``nongg``
       disable NGG for GFX10 and GFX10.3
    ``nonggc``
-      disable NGG culling on GPUs where it's enabled by default (GFX10.3+ only).
+      disable NGG culling on GPUs where it's enabled by default (GFX10.3 only).
+   ``nongg_gs``
+      disable NGG GS for GFX10 and GFX10.3
    ``nort``
       skip executing vkCmdTraceRays and ray queries (RT extensions will still be
       advertised)
@@ -1329,22 +1346,31 @@ RADV driver environment variables
       rt extensions with older hardware.
    ``gewave32``
       enable wave32 for vertex/tess/geometry shaders (GFX10+)
+   ``gsfastlaunch2``
+      use GS_FAST_LAUNCH=2 for Mesh shaders (GFX11+)
    ``localbos``
       enable local BOs
+   ``nggc``
+      enable NGG culling on GPUs where it's not enabled by default (GFX10.1 only).
+   ``nircache``
+      cache per-stage NIR for graphics pipelines
    ``nosam``
       disable optimizations that get enabled when all VRAM is CPU visible.
    ``pswave32``
       enable wave32 for pixel shaders (GFX10+)
-   ``nggc``
-      enable NGG culling on GPUs where it's not enabled by default (GFX10.1 only).
+   ``rtwave32``
+      enable wave32 for ray tracing shaders (GFX11+)
+   ``rtwave64``
+      enable wave64 for ray tracing shaders (GFX10-10.3)
    ``sam``
       enable optimizations to move more driver internal objects to VRAM.
-   ``rtwave64``
-      enable wave64 for ray tracing shaders (GFX10+)
+   ``shader_object``
+      enable experimental implementation of VK_EXT_shader_object (GFX6-8 and
+      VEGA10)
+   ``transfer_queue``
+      enable experimental transfer queue support (GFX9+, not yet spec compliant)
    ``video_decode``
       enable experimental video decoding support
-   ``gsfastlaunch2``
-      use GS_FAST_LAUNCH=2 for Mesh shaders (GFX11+)
 
 .. envvar:: RADV_TEX_ANISO
 
@@ -1371,6 +1397,16 @@ RADV driver environment variables
 
    enable validation of captured acceleration structures. Can be
    useful if RRA crashes upon opening a trace.
+
+.. envvar:: RADV_RRA_TRACE_HISTORY_SIZE
+
+   set the ray history buffer size when capturing RRA traces (default value is 100MiB,
+   small buffers may result in incomplete traces)
+
+.. envvar:: RADV_RRA_TRACE_RESOLUTION_SCALE
+
+   decrease the resolution used for dumping the ray history resolution when capturing
+   RRA traces. This allows for dumping every Nth invocation along each dispatch dimension.
 
 .. envvar:: ACO_DEBUG
 

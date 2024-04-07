@@ -228,7 +228,7 @@ iris_init_batch(struct iris_context *ice,
          batch->other_batches[batch->num_other_batches++] = other_batch;
    }
 
-   if (INTEL_DEBUG(DEBUG_ANY)) {
+   if (INTEL_DEBUG(DEBUG_BATCH | DEBUG_BATCH_STATS)) {
       const unsigned decode_flags = INTEL_BATCH_DECODE_DEFAULT_FLAGS |
          (INTEL_DEBUG(DEBUG_COLOR) ? INTEL_BATCH_DECODE_IN_COLOR : 0);
 
@@ -277,6 +277,9 @@ static int
 find_exec_index(struct iris_batch *batch, struct iris_bo *bo)
 {
    unsigned index = READ_ONCE(bo->index);
+
+   if (index == -1)
+      return -1;
 
    if (index < batch->exec_count && batch->exec_bos[index] == bo)
       return index;
@@ -533,7 +536,7 @@ iris_batch_free(const struct iris_context *ice, struct iris_batch *batch)
 
    _mesa_hash_table_destroy(batch->bo_aux_modes, NULL);
 
-   if (INTEL_DEBUG(DEBUG_ANY))
+   if (INTEL_DEBUG(DEBUG_BATCH | DEBUG_BATCH_STATS))
       intel_batch_decode_ctx_finish(&batch->decoder);
 }
 
@@ -859,11 +862,12 @@ iris_batch_name_to_string(enum iris_batch_name name)
    return names[name];
 }
 
-static inline bool
-context_or_exec_queue_was_banned(struct iris_bufmgr *bufmgr, int ret)
+bool
+iris_batch_is_banned(struct iris_bufmgr *bufmgr, int ret)
 {
    enum intel_kmd_type kmd_type = iris_bufmgr_get_device_info(bufmgr)->kmd_type;
 
+   assert(ret < 0);
    /* In i915 EIO means our context is banned, while on Xe ECANCELED means
     * our exec queue was banned
     */
@@ -957,7 +961,7 @@ _iris_batch_flush(struct iris_batch *batch, const char *file, int line)
     * has been lost and needs to be re-initialized.  If this succeeds,
     * dubiously claim success...
     */
-   if (ret && context_or_exec_queue_was_banned(bufmgr, ret)) {
+   if (ret && iris_batch_is_banned(bufmgr, ret)) {
       enum pipe_reset_status status = iris_batch_check_for_reset(batch);
 
       if (status != PIPE_NO_RESET || ice->context_reset_signaled)

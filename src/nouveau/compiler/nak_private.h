@@ -18,11 +18,12 @@ bool nak_should_print_nir(void);
 
 struct nak_compiler {
    uint8_t sm;
+   uint8_t warps_per_sm;
 
    struct nir_shader_compiler_options nir_options;
 };
 
-enum PACKED nak_attr {
+enum ENUM_PACKED nak_attr {
    /* System values A */
    NAK_ATTR_TESS_LOD_LEFT     = 0x000,
    NAK_ATTR_TESS_LOD_RIGHT    = 0x004,
@@ -85,8 +86,10 @@ enum PACKED nak_attr {
    NAK_ATTR_FRONT_FACE        = 0x3fc,
 };
 
-enum PACKED nak_sv {
+enum ENUM_PACKED nak_sv {
    NAK_SV_LANE_ID          = 0x00,
+   NAK_SV_VIRTCFG          = 0x02,
+   NAK_SV_VIRTID           = 0x03,
    NAK_SV_VERTEX_COUNT     = 0x10,
    NAK_SV_INVOCATION_ID    = 0x11,
    NAK_SV_THREAD_KILL      = 0x13,
@@ -105,7 +108,9 @@ enum PACKED nak_sv {
    NAK_SV_LANEMASK_LE      = 0x3a,
    NAK_SV_LANEMASK_GT      = 0x3b,
    NAK_SV_LANEMASK_GE      = 0x3c,
-   NAK_SV_CLOCK            = 0x50,
+   NAK_SV_CLOCK_LO         = 0x50,
+   NAK_SV_CLOCK_HI         = 0x51,
+   NAK_SV_CLOCK            = NAK_SV_CLOCK_LO,
 };
 
 bool nak_nir_workgroup_has_one_subgroup(const nir_shader *nir);
@@ -146,6 +151,7 @@ struct nak_nir_tex_flags {
 bool nak_nir_lower_scan_reduce(nir_shader *shader);
 bool nak_nir_lower_tex(nir_shader *nir, const struct nak_compiler *nak);
 bool nak_nir_lower_gs_intrinsics(nir_shader *shader);
+bool nak_nir_lower_algebraic_late(nir_shader *nir, const struct nak_compiler *nak);
 
 struct nak_nir_attr_io_flags {
    bool output : 1;

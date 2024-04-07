@@ -113,11 +113,15 @@ blorp_get_surface_base_address(struct blorp_batch *batch);
 #if GFX_VER >= 7
 static const struct intel_l3_config *
 blorp_get_l3_config(struct blorp_batch *batch);
-# else
+#endif
+
+static void
+blorp_pre_emit_urb_config(struct blorp_batch *batch,
+                          struct intel_urb_config *urb_config);
+
 static void
 blorp_emit_urb_config(struct blorp_batch *batch,
-                      unsigned vs_entry_size, unsigned sf_entry_size);
-#endif
+                      struct intel_urb_config *urb_config);
 
 static void
 blorp_emit_pipeline(struct blorp_batch *batch,
@@ -241,14 +245,19 @@ emit_urb_config(struct blorp_batch *batch,
 
 #if GFX_VER >= 7
    assert(sf_entry_size == 0);
-   const unsigned entry_size[4] = { vs_entry_size, 1, 1, 1 };
 
-   unsigned entries[4], start[4];
+   struct intel_urb_config urb_cfg = {
+      .size = { vs_entry_size, 1, 1, 1 },
+   };
+
    bool constrained;
    intel_get_urb_config(batch->blorp->compiler->devinfo,
                         blorp_get_l3_config(batch),
-                        false, false, entry_size,
-                        entries, start, deref_block_size, &constrained);
+                        false, false, &urb_cfg,
+                        deref_block_size, &constrained);
+
+   /* Tell drivers about the config. */
+   blorp_pre_emit_urb_config(batch, &urb_cfg);
 
 #if GFX_VERx10 == 70
    /* From the IVB PRM Vol. 2, Part 1, Section 3.2.1:
@@ -269,9 +278,9 @@ emit_urb_config(struct blorp_batch *batch,
    for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
       blorp_emit(batch, GENX(3DSTATE_URB_VS), urb) {
          urb._3DCommandSubOpcode      += i;
-         urb.VSURBStartingAddress      = start[i];
-         urb.VSURBEntryAllocationSize  = entry_size[i] - 1;
-         urb.VSNumberofURBEntries      = entries[i];
+         urb.VSURBStartingAddress      = urb_cfg.start[i];
+         urb.VSURBEntryAllocationSize  = urb_cfg.size[i] - 1;
+         urb.VSNumberofURBEntries      = urb_cfg.entries[i];
       }
    }
 
@@ -283,7 +292,10 @@ emit_urb_config(struct blorp_batch *batch,
    }
 
 #else /* GFX_VER < 7 */
-   blorp_emit_urb_config(batch, vs_entry_size, sf_entry_size);
+   struct intel_urb_config urb_cfg = {
+      .size = { vs_entry_size, 0, 0, 0, sf_entry_size, },
+   };
+   blorp_emit_urb_config(batch, &urb_cfg);
 #endif
 }
 
@@ -729,9 +741,10 @@ blorp_emit_vs_config(struct blorp_batch *batch,
          vs.MaximumNumberofThreads =
             batch->blorp->isl_dev->info->max_vs_threads - 1;
 
-#if GFX_VER >= 8
-         vs.SIMD8DispatchEnable =
-            vs_prog_data->base.dispatch_mode == DISPATCH_MODE_SIMD8;
+         assert(GFX_VER < 8 ||
+                vs_prog_data->base.dispatch_mode == DISPATCH_MODE_SIMD8);
+#if GFX_VER >= 8 && GFX_VER < 20
+         vs.SIMD8DispatchEnable = true;
 #endif
       }
    }
@@ -947,22 +960,28 @@ blorp_emit_ps_config(struct blorp_batch *batch,
             brw_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 0);
          ps.DispatchGRFStartRegisterForConstantSetupData1 =
             brw_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 1);
+#if GFX_VER < 20
          ps.DispatchGRFStartRegisterForConstantSetupData2 =
             brw_wm_prog_data_dispatch_grf_start_reg(prog_data, ps, 2);
+#endif
 
          ps.KernelStartPointer0 = params->wm_prog_kernel +
                                   brw_wm_prog_data_prog_offset(prog_data, ps, 0);
          ps.KernelStartPointer1 = params->wm_prog_kernel +
                                   brw_wm_prog_data_prog_offset(prog_data, ps, 1);
+#if GFX_VER < 20
          ps.KernelStartPointer2 = params->wm_prog_kernel +
                                   brw_wm_prog_data_prog_offset(prog_data, ps, 2);
+#endif
       }
    }
 
    blorp_emit(batch, GENX(3DSTATE_PS_EXTRA), psx) {
       if (prog_data) {
          psx.PixelShaderValid = true;
+#if GFX_VER < 20
          psx.AttributeEnable = prog_data->num_varying_inputs > 0;
+#endif
          psx.PixelShaderIsPerSample = prog_data->persample_dispatch;
          psx.PixelShaderComputedDepthMode = prog_data->computed_depth_mode;
 #if GFX_VER >= 9
@@ -1844,6 +1863,9 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
       blorp_emit_depth_stencil_config(batch, params);
    }
 
+   /* TODO - If we ever start using 3DSTATE_WM_HZ_OP::StencilBufferResolveEnable
+    * we need to implement required steps, flushes documented in Wa_1605967699.
+    */
    blorp_emit(batch, GENX(3DSTATE_WM_HZ_OP), hzp) {
       switch (params->hiz_op) {
       case ISL_AUX_OP_FAST_CLEAR:
@@ -1851,6 +1873,9 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
          hzp.DepthBufferClearEnable = params->depth.enabled;
          hzp.StencilClearValue = params->stencil_ref;
          hzp.FullSurfaceDepthandStencilClear = params->full_surface_hiz_op;
+#if GFX_VER >= 20
+         hzp.DepthClearValue = params->depth.clear_color.f32[0];
+#endif
          break;
       case ISL_AUX_OP_FULL_RESOLVE:
          assert(params->full_surface_hiz_op);
@@ -2181,6 +2206,14 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
       cw.IndirectDataStartAddress       = push_const_offset;
       cw.IndirectDataLength             = push_const_size;
 
+#if GFX_VERx10 >= 125
+      cw.GenerateLocalID                = cs_prog_data->generate_local_id != 0;
+      cw.EmitLocal                      = cs_prog_data->generate_local_id;
+      cw.WalkOrder                      = cs_prog_data->walk_order;
+      cw.TileLayout = cs_prog_data->walk_order == BRW_WALK_ORDER_YXZ ?
+                      TileY32bpe : Linear;
+#endif
+
       cw.InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
          .KernelStartPointer = params->cs_prog_kernel,
          .SamplerStatePointer = samplers_offset,
@@ -2325,6 +2358,7 @@ xy_bcb_tiling(const struct isl_surf *surf)
    case ISL_TILING_4:
       return XY_TILE_4;
    case ISL_TILING_64:
+   case ISL_TILING_64_XE2:
       return XY_TILE_64;
 #else
    case ISL_TILING_Y0:

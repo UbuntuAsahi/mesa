@@ -3659,20 +3659,15 @@ crocus_delete_state(struct pipe_context *ctx, void *state)
 static void
 crocus_set_vertex_buffers(struct pipe_context *ctx,
                           unsigned count,
-                          unsigned unbind_num_trailing_slots,
-                          bool take_ownership,
                           const struct pipe_vertex_buffer *buffers)
 {
    struct crocus_context *ice = (struct crocus_context *) ctx;
    struct crocus_screen *screen = (struct crocus_screen *) ctx->screen;
    const unsigned padding =
       (GFX_VERx10 < 75 && screen->devinfo.platform != INTEL_PLATFORM_BYT) * 2;
-   ice->state.bound_vertex_buffers &=
-      ~u_bit_consecutive64(0, count + unbind_num_trailing_slots);
 
    util_set_vertex_buffers_mask(ice->state.vertex_buffers, &ice->state.bound_vertex_buffers,
-                                buffers, count, unbind_num_trailing_slots,
-                                take_ownership);
+                                buffers, count, true);
 
    for (unsigned i = 0; i < count; i++) {
       struct pipe_vertex_buffer *state =
@@ -6062,49 +6057,46 @@ crocus_upload_dirty_render_state(struct crocus_context *ice,
       const struct intel_device_info *devinfo = &batch->screen->devinfo;
       bool gs_present = ice->shaders.prog[MESA_SHADER_GEOMETRY] != NULL;
       bool tess_present = ice->shaders.prog[MESA_SHADER_TESS_EVAL] != NULL;
-      unsigned entry_size[4];
+      struct intel_urb_config urb_cfg;
 
       for (int i = MESA_SHADER_VERTEX; i <= MESA_SHADER_GEOMETRY; i++) {
          if (!ice->shaders.prog[i]) {
-            entry_size[i] = 1;
+            urb_cfg.size[i] = 1;
          } else {
             struct brw_vue_prog_data *vue_prog_data =
                (void *) ice->shaders.prog[i]->prog_data;
-            entry_size[i] = vue_prog_data->urb_entry_size;
+            urb_cfg.size[i] = vue_prog_data->urb_entry_size;
          }
-         assert(entry_size[i] != 0);
+         assert(urb_cfg.size[i] != 0);
       }
 
       /* If we're just switching between programs with the same URB requirements,
        * skip the rest of the logic.
        */
       bool no_change = false;
-      if (ice->urb.vsize == entry_size[MESA_SHADER_VERTEX] &&
+      if (ice->urb.vsize == urb_cfg.size[MESA_SHADER_VERTEX] &&
           ice->urb.gs_present == gs_present &&
-          ice->urb.gsize == entry_size[MESA_SHADER_GEOMETRY] &&
+          ice->urb.gsize == urb_cfg.size[MESA_SHADER_GEOMETRY] &&
           ice->urb.tess_present == tess_present &&
-          ice->urb.hsize == entry_size[MESA_SHADER_TESS_CTRL] &&
-          ice->urb.dsize == entry_size[MESA_SHADER_TESS_EVAL]) {
+          ice->urb.hsize == urb_cfg.size[MESA_SHADER_TESS_CTRL] &&
+          ice->urb.dsize == urb_cfg.size[MESA_SHADER_TESS_EVAL]) {
          no_change = true;
       }
 
       if (!no_change) {
-         ice->urb.vsize = entry_size[MESA_SHADER_VERTEX];
+         ice->urb.vsize = urb_cfg.size[MESA_SHADER_VERTEX];
          ice->urb.gs_present = gs_present;
-         ice->urb.gsize = entry_size[MESA_SHADER_GEOMETRY];
+         ice->urb.gsize = urb_cfg.size[MESA_SHADER_GEOMETRY];
          ice->urb.tess_present = tess_present;
-         ice->urb.hsize = entry_size[MESA_SHADER_TESS_CTRL];
-         ice->urb.dsize = entry_size[MESA_SHADER_TESS_EVAL];
+         ice->urb.hsize = urb_cfg.size[MESA_SHADER_TESS_CTRL];
+         ice->urb.dsize = urb_cfg.size[MESA_SHADER_TESS_EVAL];
 
-         unsigned entries[4];
-         unsigned start[4];
          bool constrained;
          intel_get_urb_config(devinfo,
                               batch->screen->l3_config_3d,
                               tess_present,
                               gs_present,
-                              entry_size,
-                              entries, start, NULL, &constrained);
+                              &urb_cfg, NULL, &constrained);
 
 #if GFX_VER == 7
          if (devinfo->platform == INTEL_PLATFORM_IVB)
@@ -6113,9 +6105,9 @@ crocus_upload_dirty_render_state(struct crocus_context *ice,
          for (int i = MESA_SHADER_VERTEX; i <= MESA_SHADER_GEOMETRY; i++) {
             crocus_emit_cmd(batch, GENX(3DSTATE_URB_VS), urb) {
                urb._3DCommandSubOpcode += i;
-               urb.VSURBStartingAddress     = start[i];
-               urb.VSURBEntryAllocationSize = entry_size[i] - 1;
-               urb.VSNumberofURBEntries     = entries[i];
+               urb.VSURBStartingAddress     = urb_cfg.start[i];
+               urb.VSURBEntryAllocationSize = urb_cfg.size[i] - 1;
+               urb.VSNumberofURBEntries     = urb_cfg.entries[i];
             }
          }
       }

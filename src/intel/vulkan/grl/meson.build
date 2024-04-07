@@ -142,7 +142,8 @@ foreach t : [['125', 'gfx125', 'dg2']]
                                    # without modifying grl source code, remove
                                    # if fixed there
       ],
-      env: ['MESA_SHADER_CACHE_DISABLE=true'],
+      env: ['MESA_SHADER_CACHE_DISABLE=true',
+            'MESA_SPIRV_LOG_LEVEL=error'],
       depends : dep_prog_intel_clc
     )
   endforeach
@@ -175,7 +176,7 @@ foreach t : [['125', 'gfx125', 'dg2']]
     ],
     dependencies : [
       dep_valgrind, idep_nir_headers, idep_vulkan_util_headers, idep_vulkan_wsi_headers,
-      idep_vulkan_runtime_headers, idep_anv_headers,
+      idep_vulkan_runtime_headers, idep_anv_headers, idep_genxml,
     ],
     gnu_symbol_visibility : 'hidden',
   )

@@ -42,7 +42,6 @@ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
 {
    const struct panvk_device *dev = queue->device;
    unsigned debug = dev->physical_device->instance->debug_flags;
-   const struct panfrost_device *pdev = &dev->physical_device->pdev;
    int ret;
 
    /* Reset the batch if it's already been issued */
@@ -67,20 +66,22 @@ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
          .jc = batch->jc.first_job,
       };
 
-      ret = drmIoctl(pdev->fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
+      ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
       assert(!ret);
 
       if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC)) {
-         ret =
-            drmSyncobjWait(pdev->fd, &submit.out_sync, 1, INT64_MAX, 0, NULL);
+         ret = drmSyncobjWait(dev->vk.drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
+                              NULL);
          assert(!ret);
       }
 
-      if (debug & PANVK_DEBUG_TRACE)
-         pandecode_jc(pdev->decode_ctx, batch->jc.first_job, pdev->gpu_id);
+      if (debug & PANVK_DEBUG_TRACE) {
+         pandecode_jc(dev->debug.decode_ctx, batch->jc.first_job,
+                      dev->physical_device->kmod.props.gpu_prod_id);
+      }
 
       if (debug & PANVK_DEBUG_DUMP)
-         pandecode_dump_mappings(pdev->decode_ctx);
+         pandecode_dump_mappings(dev->debug.decode_ctx);
    }
 
    if (batch->fragment_job) {
@@ -100,23 +101,24 @@ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
          submit.in_sync_count = nr_in_fences;
       }
 
-      ret = drmIoctl(pdev->fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
+      ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
       assert(!ret);
       if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC)) {
-         ret =
-            drmSyncobjWait(pdev->fd, &submit.out_sync, 1, INT64_MAX, 0, NULL);
+         ret = drmSyncobjWait(dev->vk.drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
+                              NULL);
          assert(!ret);
       }
 
       if (debug & PANVK_DEBUG_TRACE)
-         pandecode_jc(pdev->decode_ctx, batch->fragment_job, pdev->gpu_id);
+         pandecode_jc(dev->debug.decode_ctx, batch->fragment_job,
+                      dev->physical_device->kmod.props.gpu_prod_id);
 
       if (debug & PANVK_DEBUG_DUMP)
-         pandecode_dump_mappings(pdev->decode_ctx);
+         pandecode_dump_mappings(dev->debug.decode_ctx);
    }
 
    if (debug & PANVK_DEBUG_TRACE)
-      pandecode_next_frame(0);
+      pandecode_next_frame(dev->debug.decode_ctx);
 
    batch->issued = true;
 }
@@ -124,7 +126,7 @@ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
 static void
 panvk_queue_transfer_sync(struct panvk_queue *queue, uint32_t syncobj)
 {
-   const struct panfrost_device *pdev = &queue->device->physical_device->pdev;
+   struct panvk_device *dev = queue->device;
    int ret;
 
    struct drm_syncobj_handle handle = {
@@ -133,12 +135,12 @@ panvk_queue_transfer_sync(struct panvk_queue *queue, uint32_t syncobj)
       .fd = -1,
    };
 
-   ret = drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &handle);
+   ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &handle);
    assert(!ret);
    assert(handle.fd >= 0);
 
    handle.handle = syncobj;
-   ret = drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &handle);
+   ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &handle);
    assert(!ret);
 
    close(handle.fd);
@@ -169,7 +171,7 @@ static void
 panvk_signal_event_syncobjs(struct panvk_queue *queue,
                             struct panvk_batch *batch)
 {
-   const struct panfrost_device *pdev = &queue->device->physical_device->pdev;
+   struct panvk_device *dev = queue->device;
 
    util_dynarray_foreach(&batch->event_ops, struct panvk_event_op, op) {
       switch (op->type) {
@@ -184,7 +186,7 @@ panvk_signal_event_syncobjs(struct panvk_queue *queue,
             .handles = (uint64_t)(uintptr_t)&event->syncobj,
             .count_handles = 1};
 
-         int ret = drmIoctl(pdev->fd, DRM_IOCTL_SYNCOBJ_RESET, &objs);
+         int ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_SYNCOBJ_RESET, &objs);
          assert(!ret);
          break;
       }
@@ -202,7 +204,7 @@ panvk_per_arch(queue_submit)(struct vk_queue *vk_queue,
                              struct vk_queue_submit *submit)
 {
    struct panvk_queue *queue = container_of(vk_queue, struct panvk_queue, vk);
-   const struct panfrost_device *pdev = &queue->device->physical_device->pdev;
+   struct panvk_device *dev = queue->device;
 
    unsigned nr_semaphores = submit->wait_count + 1;
    uint32_t semaphores[nr_semaphores];
@@ -243,22 +245,25 @@ panvk_per_arch(queue_submit)(struct vk_queue *vk_queue,
 
          if (batch->fb.info) {
             for (unsigned i = 0; i < batch->fb.info->attachment_count; i++) {
-               const struct pan_image *image = pan_image_view_get_plane(
-                  &batch->fb.info->attachments[i].iview->pview, 0);
-               bos[bo_idx++] = image->data.bo->gem_handle;
+               struct panvk_image_view *iview =
+                  batch->fb.info->attachments[i].iview;
+               struct panvk_image *img =
+                  container_of(iview->vk.image, struct panvk_image, vk);
+
+               bos[bo_idx++] = pan_kmod_bo_handle(img->bo);
             }
          }
 
          if (batch->blit.src)
-            bos[bo_idx++] = batch->blit.src->gem_handle;
+            bos[bo_idx++] = pan_kmod_bo_handle(batch->blit.src);
 
          if (batch->blit.dst)
-            bos[bo_idx++] = batch->blit.dst->gem_handle;
+            bos[bo_idx++] = pan_kmod_bo_handle(batch->blit.dst);
 
          if (batch->jc.first_tiler)
-            bos[bo_idx++] = pdev->tiler_heap->gem_handle;
+            bos[bo_idx++] = pan_kmod_bo_handle(dev->tiler_heap->bo);
 
-         bos[bo_idx++] = pdev->sample_positions->gem_handle;
+         bos[bo_idx++] = pan_kmod_bo_handle(dev->sample_positions->bo);
          assert(bo_idx == nr_bos);
 
          /* Merge identical BO entries. */

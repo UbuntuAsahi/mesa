@@ -102,12 +102,6 @@ enum radeon_value_id {
    RADEON_CURRENT_MCLK,
 };
 
-enum radv_reset_status {
-   RADV_NO_RESET,
-   RADV_GUILTY_CONTEXT_RESET,
-   RADV_INNOCENT_CONTEXT_RESET,
-};
-
 struct radeon_cmdbuf {
    /* These are uint64_t to tell the compiler that buf can't alias them.
     * If they're uint32_t the generated code needs to redundantly
@@ -184,8 +178,10 @@ struct radeon_winsys_ctx;
 
 struct radeon_winsys_bo {
    uint64_t va;
+   /* buffer is created with AMDGPU_GEM_CREATE_VM_ALWAYS_VALID */
    bool is_local;
    bool vram_no_cpu_access;
+   /* buffer is added to the BO list of all submissions */
    bool use_global_list;
    enum radeon_bo_domain initial_domain;
 };
@@ -230,6 +226,11 @@ struct radv_winsys_gpuvm_fault_info {
    uint64_t addr;
    uint32_t status;
    uint32_t vmhub;
+};
+
+enum radv_cs_dump_type {
+   RADV_CS_DUMP_TYPE_IBS,
+   RADV_CS_DUMP_TYPE_CTX_ROLLS,
 };
 
 struct radeon_winsys {
@@ -280,8 +281,6 @@ struct radeon_winsys {
 
    int (*ctx_set_pstate)(struct radeon_winsys_ctx *ctx, uint32_t pstate);
 
-   enum radv_reset_status (*ctx_query_reset_status)(struct radeon_winsys_ctx *rwctx);
-
    enum radeon_bo_domain (*cs_domain)(const struct radeon_winsys *ws);
 
    struct radeon_cmdbuf *(*cs_create)(struct radeon_winsys *ws, enum amd_ip_type amd_ip_type, bool is_secondary);
@@ -309,7 +308,8 @@ struct radeon_winsys {
    void (*cs_execute_ib)(struct radeon_cmdbuf *cs, struct radeon_winsys_bo *bo, const uint64_t offset,
                          const uint32_t cdw, const bool predicate);
 
-   void (*cs_dump)(struct radeon_cmdbuf *cs, FILE *file, const int *trace_ids, int trace_id_count);
+   void (*cs_dump)(struct radeon_cmdbuf *cs, FILE *file, const int *trace_ids, int trace_id_count,
+                   enum radv_cs_dump_type type);
 
    void (*dump_bo_ranges)(struct radeon_winsys *ws, FILE *file);
 
@@ -345,10 +345,16 @@ radv_buffer_get_va(const struct radeon_winsys_bo *bo)
    return bo->va;
 }
 
+static inline bool
+radv_buffer_is_resident(const struct radeon_winsys_bo *bo)
+{
+   return bo->use_global_list || bo->is_local;
+}
+
 static inline void
 radv_cs_add_buffer(struct radeon_winsys *ws, struct radeon_cmdbuf *cs, struct radeon_winsys_bo *bo)
 {
-   if (bo->use_global_list)
+   if (radv_buffer_is_resident(bo))
       return;
 
    ws->cs_add_buffer(cs, bo);

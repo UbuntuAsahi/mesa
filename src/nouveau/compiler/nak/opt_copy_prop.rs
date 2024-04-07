@@ -1,7 +1,5 @@
-/*
- * Copyright © 2022 Collabora, Ltd.
- * SPDX-License-Identifier: MIT
- */
+// Copyright © 2022 Collabora, Ltd.
+// SPDX-License-Identifier: MIT
 
 use crate::ir::*;
 
@@ -75,7 +73,7 @@ impl CopyPropPass {
                 _ => return,
             };
 
-            let entry = match self.get_copy(&src_ssa) {
+            let entry = match self.get_copy(src_ssa) {
                 Some(e) => e,
                 None => return,
             };
@@ -142,7 +140,7 @@ impl CopyPropPass {
         loop {
             let src_ssa = match &mut src.src_ref {
                 SrcRef::SSA(ssa) => {
-                    /* First, try to propagate SSA components */
+                    // First, try to propagate SSA components
                     if self.prop_to_ssa_ref(ssa) {
                         continue;
                     }
@@ -163,7 +161,7 @@ impl CopyPropPass {
                 }
             }
 
-            /* If we got here, all the components are zero */
+            // If we got here, all the components are zero
             src.src_ref = SrcRef::Zero;
         }
     }
@@ -181,7 +179,7 @@ impl CopyPropPass {
                 None => return,
             };
 
-            /* If there are modifiers, the source types have to match */
+            // If there are modifiers, the source types have to match
             if !entry.src.src_mod.is_none() && entry.src_type != src_type {
                 return;
             }
@@ -200,14 +198,13 @@ impl CopyPropPass {
 
             assert!(src_ssa.comps() == 2);
 
-            /* First, try to propagate the two halves individually.  Source
-             * modifiers only apply to the high 32 bits so we have to reject
-             * any copies with source modifiers in the low bits and apply
-             * source modifiers as needed when propagating the high bits.
-             */
+            // First, try to propagate the two halves individually.  Source
+            // modifiers only apply to the high 32 bits so we have to reject
+            // any copies with source modifiers in the low bits and apply
+            // source modifiers as needed when propagating the high bits.
             let lo_entry_or_none = self.get_copy(&src_ssa[0]);
             if let Some(lo_entry) = lo_entry_or_none {
-                if !lo_entry.src.src_mod.is_none() {
+                if lo_entry.src.src_mod.is_none() {
                     if let SrcRef::SSA(lo_entry_ssa) = lo_entry.src.src_ref {
                         src_ssa[0] = lo_entry_ssa[0];
                         continue;
@@ -221,21 +218,19 @@ impl CopyPropPass {
                     || hi_entry.src_type == SrcType::F64
                 {
                     if let SrcRef::SSA(hi_entry_ssa) = hi_entry.src.src_ref {
-                        src_ssa[0] = hi_entry_ssa[0];
+                        src_ssa[1] = hi_entry_ssa[0];
                         src.src_mod = hi_entry.src.src_mod.modify(src.src_mod);
                         continue;
                     }
                 }
             }
 
-            let lo_entry = match lo_entry_or_none {
-                Some(e) => e,
-                None => return,
+            let Some(lo_entry) = lo_entry_or_none else {
+                return;
             };
 
-            let hi_entry = match hi_entry_or_none {
-                Some(e) => e,
-                None => return,
+            let Some(hi_entry) = hi_entry_or_none else {
+                return;
             };
 
             if !lo_entry.src.src_mod.is_none() {
@@ -254,9 +249,8 @@ impl CopyPropPass {
                     _ => return,
                 },
                 SrcRef::Imm32(i) => {
-                    /* 32-bit immediates for f64 srouces are the top 32 bits
-                     * with zero in the lower 32.
-                     */
+                    // 32-bit immediates for f64 srouces are the top 32 bits
+                    // with zero in the lower 32.
                     match lo_entry.src.src_ref {
                         SrcRef::Zero | SrcRef::Imm32(0) => SrcRef::Imm32(i),
                         _ => return,
@@ -277,7 +271,7 @@ impl CopyPropPass {
                     }
                     _ => return,
                 },
-                /* SrcRef::SSA is already handled above */
+                // SrcRef::SSA is already handled above
                 _ => return,
             };
 
@@ -308,125 +302,142 @@ impl CopyPropPass {
         }
     }
 
+    fn try_add_instr(&mut self, instr: &Instr) {
+        match &instr.op {
+            Op::FAdd(add) => {
+                let dst = add.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                let dst = dst[0];
+
+                if !add.saturate {
+                    if add.srcs[0].is_fneg_zero(SrcType::F32) {
+                        self.add_copy(dst, SrcType::F32, add.srcs[1]);
+                    } else if add.srcs[1].is_fneg_zero(SrcType::F32) {
+                        self.add_copy(dst, SrcType::F32, add.srcs[0]);
+                    }
+                }
+            }
+            Op::DAdd(add) => {
+                let dst = add.dst.as_ssa().unwrap();
+                if add.srcs[0].is_fneg_zero(SrcType::F64) {
+                    self.add_fp64_copy(dst, add.srcs[1]);
+                } else if add.srcs[1].is_fneg_zero(SrcType::F64) {
+                    self.add_fp64_copy(dst, add.srcs[0]);
+                }
+            }
+            Op::Lop3(lop) => {
+                let dst = lop.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                let dst = dst[0];
+
+                let op = lop.op;
+                if op.lut == 0 {
+                    self.add_copy(dst, SrcType::ALU, SrcRef::Zero.into());
+                } else if op.lut == !0 {
+                    self.add_copy(
+                        dst,
+                        SrcType::ALU,
+                        SrcRef::Imm32(u32::MAX).into(),
+                    );
+                } else {
+                    for s in 0..3 {
+                        if op.lut == LogicOp3::SRC_MASKS[s] {
+                            self.add_copy(dst, SrcType::ALU, lop.srcs[s]);
+                        }
+                    }
+                }
+            }
+            Op::PLop3(lop) => {
+                for i in 0..2 {
+                    let dst = match lop.dsts[i] {
+                        Dst::SSA(vec) => {
+                            assert!(vec.comps() == 1);
+                            vec[0]
+                        }
+                        _ => continue,
+                    };
+
+                    let op = lop.ops[i];
+                    if op.lut == 0 {
+                        self.add_copy(dst, SrcType::Pred, SrcRef::False.into());
+                    } else if op.lut == !0 {
+                        self.add_copy(dst, SrcType::Pred, SrcRef::True.into());
+                    } else {
+                        for s in 0..3 {
+                            if op.lut == LogicOp3::SRC_MASKS[s] {
+                                self.add_copy(dst, SrcType::Pred, lop.srcs[s]);
+                            } else if op.lut == !LogicOp3::SRC_MASKS[s] {
+                                self.add_copy(
+                                    dst,
+                                    SrcType::Pred,
+                                    lop.srcs[s].bnot(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Op::INeg(neg) => {
+                let dst = neg.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                self.add_copy(dst[0], SrcType::I32, neg.src.ineg());
+            }
+            Op::Prmt(prmt) => {
+                let dst = prmt.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                if prmt.mode != PrmtMode::Index {
+                    return;
+                }
+                let SrcRef::Imm32(sel) = prmt.sel.src_ref else {
+                    return;
+                };
+
+                if sel == 0x3210 {
+                    self.add_copy(dst[0], SrcType::GPR, prmt.srcs[0]);
+                } else if sel == 0x7654 {
+                    self.add_copy(dst[0], SrcType::GPR, prmt.srcs[1]);
+                } else {
+                    let mut is_imm = true;
+                    let mut imm = 0_u32;
+                    for d in 0..4 {
+                        let s = ((sel >> d * 4) & 0x7) as usize;
+                        let sign = (sel >> d * 4) & 0x8 != 0;
+                        if let Some(u) = prmt.srcs[s / 4].as_u32() {
+                            let mut sb = (u >> (s * 8)) as u8;
+                            if sign {
+                                sb = ((sb as i8) >> 7) as u8;
+                            }
+                            imm |= (sb as u32) << (d * 8);
+                        } else {
+                            is_imm = false;
+                            break;
+                        }
+                    }
+                    if is_imm {
+                        self.add_copy(dst[0], SrcType::GPR, imm.into());
+                    }
+                }
+            }
+            Op::Copy(copy) => {
+                let dst = copy.dst.as_ssa().unwrap();
+                assert!(dst.comps() == 1);
+                self.add_copy(dst[0], SrcType::GPR, copy.src);
+            }
+            Op::ParCopy(pcopy) => {
+                for (dst, src) in pcopy.dsts_srcs.iter() {
+                    let dst = dst.as_ssa().unwrap();
+                    assert!(dst.comps() == 1);
+                    self.add_copy(dst[0], SrcType::GPR, *src);
+                }
+            }
+            _ => (),
+        }
+    }
+
     pub fn run(&mut self, f: &mut Function) {
         for b in &mut f.blocks {
             for instr in &mut b.instrs {
-                match &instr.op {
-                    Op::FAdd(add) => {
-                        let dst = add.dst.as_ssa().unwrap();
-                        assert!(dst.comps() == 1);
-                        let dst = dst[0];
-
-                        if !add.saturate {
-                            if add.srcs[0].is_fneg_zero(SrcType::F32) {
-                                self.add_copy(dst, SrcType::F32, add.srcs[1]);
-                            } else if add.srcs[1].is_fneg_zero(SrcType::F32) {
-                                self.add_copy(dst, SrcType::F32, add.srcs[0]);
-                            }
-                        }
-                    }
-                    Op::DAdd(add) => {
-                        let dst = add.dst.as_ssa().unwrap();
-                        if !add.saturate {
-                            if add.srcs[0].is_zero() {
-                                self.add_fp64_copy(dst, add.srcs[1]);
-                            } else if add.srcs[1].is_zero() {
-                                self.add_fp64_copy(dst, add.srcs[0]);
-                            }
-                        }
-                    }
-                    Op::Lop3(lop) => {
-                        let dst = lop.dst.as_ssa().unwrap();
-                        assert!(dst.comps() == 1);
-                        let dst = dst[0];
-
-                        let op = lop.op;
-                        if op.lut == 0 {
-                            self.add_copy(
-                                dst,
-                                SrcType::ALU,
-                                SrcRef::Zero.into(),
-                            );
-                        } else if op.lut == !0 {
-                            self.add_copy(
-                                dst,
-                                SrcType::ALU,
-                                SrcRef::Imm32(u32::MAX).into(),
-                            );
-                        } else {
-                            for s in 0..3 {
-                                if op.lut == LogicOp3::SRC_MASKS[s] {
-                                    self.add_copy(
-                                        dst,
-                                        SrcType::ALU,
-                                        lop.srcs[s],
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Op::PLop3(lop) => {
-                        for i in 0..2 {
-                            let dst = match lop.dsts[i] {
-                                Dst::SSA(vec) => {
-                                    assert!(vec.comps() == 1);
-                                    vec[0]
-                                }
-                                _ => continue,
-                            };
-
-                            let op = lop.ops[i];
-                            if op.lut == 0 {
-                                self.add_copy(
-                                    dst,
-                                    SrcType::Pred,
-                                    SrcRef::False.into(),
-                                );
-                            } else if op.lut == !0 {
-                                self.add_copy(
-                                    dst,
-                                    SrcType::Pred,
-                                    SrcRef::True.into(),
-                                );
-                            } else {
-                                for s in 0..3 {
-                                    if op.lut == LogicOp3::SRC_MASKS[s] {
-                                        self.add_copy(
-                                            dst,
-                                            SrcType::Pred,
-                                            lop.srcs[s],
-                                        );
-                                    } else if op.lut == !LogicOp3::SRC_MASKS[s]
-                                    {
-                                        self.add_copy(
-                                            dst,
-                                            SrcType::Pred,
-                                            lop.srcs[s].bnot(),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Op::INeg(neg) => {
-                        let dst = neg.dst.as_ssa().unwrap();
-                        assert!(dst.comps() == 1);
-                        self.add_copy(dst[0], SrcType::I32, neg.src.ineg());
-                    }
-                    Op::Copy(copy) => {
-                        let dst = copy.dst.as_ssa().unwrap();
-                        assert!(dst.comps() == 1);
-                        self.add_copy(dst[0], SrcType::GPR, copy.src);
-                    }
-                    Op::ParCopy(pcopy) => {
-                        for (dst, src) in pcopy.dsts_srcs.iter() {
-                            let dst = dst.as_ssa().unwrap();
-                            assert!(dst.comps() == 1);
-                            self.add_copy(dst[0], SrcType::GPR, *src);
-                        }
-                    }
-                    _ => (),
-                }
+                self.try_add_instr(instr);
 
                 self.prop_to_pred(&mut instr.pred);
 

@@ -128,9 +128,11 @@ nouveau_ws_device_set_dbg_flags(struct nouveau_ws_device *dev)
 {
    const struct debug_control flags[] = {
       { "push_dump", NVK_DEBUG_PUSH_DUMP },
+      { "push", NVK_DEBUG_PUSH_DUMP },
       { "push_sync", NVK_DEBUG_PUSH_SYNC },
       { "zero_memory", NVK_DEBUG_ZERO_MEMORY },
       { "vm", NVK_DEBUG_VM },
+      { "no_cbuf", NVK_DEBUG_NO_CBUF },
       { NULL, 0 },
    };
 
@@ -324,7 +326,7 @@ nouveau_ws_device_new(drmDevicePtr drm_device)
    nouveau_ws_device_set_dbg_flags(device);
 
    struct nouveau_ws_context *tmp_ctx;
-   if (nouveau_ws_context_create(device, &tmp_ctx))
+   if (nouveau_ws_context_create(device, ~0, &tmp_ctx))
       goto out_err;
 
    device->info.sm = sm_for_chipset(device->info.chipset);

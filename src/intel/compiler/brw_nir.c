@@ -709,8 +709,8 @@ brw_nir_optimize(nir_shader *nir, bool is_scalar,
       }
 
       OPT(nir_opt_dead_cf);
-      if (OPT(nir_opt_trivial_continues)) {
-         /* If nir_opt_trivial_continues makes progress, then we need to clean
+      if (OPT(nir_opt_loop)) {
+         /* If nir_opt_loop makes progress, then we need to clean
           * things up if we want any hope of nir_opt_if or nir_opt_loop_unroll
           * to make progress.
           */
@@ -1001,6 +1001,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       .lower_quad_broadcast_dynamic = true,
       .lower_elect = true,
       .lower_inverse_ballot = true,
+      .lower_rotate_to_shuffle = true,
    };
    OPT(nir_lower_subgroups, &subgroups_options);
 
@@ -1685,6 +1686,7 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
    OPT(nir_opt_move, nir_move_comparisons);
    OPT(nir_opt_dead_cf);
 
+   bool divergence_analysis_dirty = false;
    NIR_PASS(_, nir, nir_convert_to_lcssa, true, true);
    NIR_PASS_V(nir, nir_divergence_analysis);
 
@@ -1710,11 +1712,19 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
 
       if (OPT(nir_lower_int64))
          brw_nir_optimize(nir, is_scalar, devinfo);
+
+      divergence_analysis_dirty = true;
    }
 
    /* Do this only after the last opt_gcm. GCM will undo this lowering. */
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      if (divergence_analysis_dirty) {
+         NIR_PASS(_, nir, nir_convert_to_lcssa, true, true);
+         NIR_PASS_V(nir, nir_divergence_analysis);
+      }
+
       OPT(brw_nir_lower_non_uniform_barycentric_at_sample);
+   }
 
    /* Clean up LCSSA phis */
    OPT(nir_opt_remove_phis);
@@ -1757,14 +1767,6 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
    if (OPT(nir_opt_rematerialize_compares))
       OPT(nir_opt_dce);
 
-   /* This is the last pass we run before we start emitting stuff.  It
-    * determines when we need to insert boolean resolves on Gen <= 5.  We
-    * run it last because it stashes data in instr->pass_flags and we don't
-    * want that to be squashed by other NIR passes.
-    */
-   if (devinfo->ver <= 5)
-      brw_nir_analyze_boolean_resolves(nir);
-
    OPT(nir_opt_dce);
 
    /* The mesh stages require this pass to be called at the last minute,
@@ -1777,6 +1779,15 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
       brw_nir_adjust_payload(nir);
 
    nir_trivialize_registers(nir);
+
+   /* This is the last pass we run before we start emitting stuff.  It
+    * determines when we need to insert boolean resolves on Gen <= 5.  We
+    * run it last because it stashes data in instr->pass_flags and we don't
+    * want that to be squashed by other NIR passes.
+    */
+   if (devinfo->ver <= 5)
+      brw_nir_analyze_boolean_resolves(nir);
+
    nir_sweep(nir);
 
    if (unlikely(debug_enabled)) {
@@ -1883,6 +1894,11 @@ brw_nir_apply_key(nir_shader *nir,
    bool progress = false;
 
    OPT(brw_nir_apply_sampler_key, compiler, &key->tex);
+
+   const struct brw_nir_lower_texture_opts tex_opts = {
+      .combined_lod_and_array_index = compiler->devinfo->ver >= 20,
+   };
+   OPT(brw_nir_lower_texture, &tex_opts);
 
    const nir_lower_subgroups_options subgroups_options = {
       .subgroup_size = get_subgroup_size(&nir->info, max_subgroup_size),

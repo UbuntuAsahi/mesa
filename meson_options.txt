@@ -31,6 +31,15 @@ option(
 )
 
 option(
+  'android-strict',
+  type : 'boolean',
+  value : true,
+  description : 'Enable strict Android compliance. Disabling may cause CTS ' +
+                'failures or other problems, but allows drivers to expose ' +
+                'capabilities that are normally hidden. Default: true'
+)
+
+option(
   'android-libbacktrace',
   type : 'feature',
   description : 'Use Android\'s libbacktrace',
@@ -168,11 +177,19 @@ option(
 )
 
 option(
-  'gallium-windows-dll-name',
+  'gallium-wgl-dll-name',
   type : 'string',
   value : 'libgallium_wgl',
-  description : 'name of gallium megadriver DLL built for Windows. ' +
+  description : 'name of gallium wgl target DLL built for Windows. ' +
                 'defaults to libgallium_wgl.dll to match DRI',
+)
+
+option(
+  'gallium-d3d10-dll-name',
+  type : 'string',
+  value : 'libgallium_d3d10',
+  description : 'name of gallium d3d10 target DLL built for Windows. ' +
+                'defaults to libgallium_d3d10.dll to match DRI',
 )
 
 option(
@@ -189,13 +206,6 @@ option(
   value : [],
   choices : ['spirv', 'spirv64', 'all'],
   description : 'Link libclc SPIR-V statically.',
-)
-
-option(
-  'opencl-external-clang-headers',
-  type : 'feature',
-  description : 'Use system Clang headers at runtime for OpenCL kernel ' +
-                'compilation.',
 )
 
 option(
@@ -224,7 +234,7 @@ option(
   'freedreno-kmds',
   type : 'array',
   value : ['msm'],
-  choices : ['msm', 'kgsl', 'virtio'],
+  choices : ['msm', 'kgsl', 'virtio', 'wsl'],
   description : 'List of kernel-mode drivers to enable for freedreno ' +
                 'gallium and vulkan driver',
 )
@@ -583,6 +593,13 @@ option(
 )
 
 option(
+  'teflon',
+  type : 'boolean',
+  value : false,
+  description : 'Enable TensorFlow Lite delegate. Default: false'
+)
+
+option(
   'gpuvis',
   type : 'boolean',
   value : false,
@@ -618,12 +635,29 @@ option(
   'intel-clc',
   type : 'combo',
   deprecated: {'true': 'enabled', 'false': 'disabled'},
+  value : 'auto',
+  choices : [
+    'enabled', 'system', 'auto'
+  ],
+  description : 'Build the intel-clc compiler or use a system version.'
+)
+
+option(
+  'install-intel-clc',
+  type : 'boolean',
+  value : false,
+  description : 'Install the intel-clc compiler (if needed for cross builds).'
+)
+
+option(
+  'intel-rt',
+  type : 'combo',
+  deprecated: {'true': 'enabled', 'false': 'disabled'},
   value : 'disabled',
   choices : [
-    'enabled', 'disabled', 'system',
+    'enabled', 'disabled',
   ],
-  description : 'Build the intel-clc compiler (enables Vulkan Intel ' +
-                'Ray Tracing on supported hardware).'
+  description : 'Build Ray Tracing on supported hardware.'
 )
 
 option(

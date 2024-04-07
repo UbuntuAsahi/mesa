@@ -1055,27 +1055,9 @@ anv_cmd_buffer_end_batch_buffer(struct anv_cmd_buffer *cmd_buffer)
       const uint32_t length = cmd_buffer->batch.next - cmd_buffer->batch.start;
       if (cmd_buffer->device->physical->use_call_secondary) {
          cmd_buffer->exec_mode = ANV_CMD_BUFFER_EXEC_MODE_CALL_AND_RETURN;
-         /* If the secondary command buffer begins & ends in the same BO and
-          * its length is less than the length of CS prefetch, add some NOOPs
-          * instructions so the last MI_BATCH_BUFFER_START is outside the CS
-          * prefetch.
-          */
-         if (cmd_buffer->batch_bos.next == cmd_buffer->batch_bos.prev) {
-            const enum intel_engine_class engine_class = cmd_buffer->queue_family->engine_class;
-            /* Careful to have everything in signed integer. */
-            int32_t prefetch_len = devinfo->engine_class_prefetch[engine_class];
-            int32_t batch_len = cmd_buffer->batch.next - cmd_buffer->batch.start;
-
-            for (int32_t i = 0; i < (prefetch_len - batch_len); i += 4)
-               anv_batch_emit(&cmd_buffer->batch, GFX9_MI_NOOP, noop);
-         }
 
          void *jump_addr =
-            anv_batch_emitn(&cmd_buffer->batch,
-                            GFX9_MI_BATCH_BUFFER_START_length,
-                            GFX9_MI_BATCH_BUFFER_START,
-                            .AddressSpaceIndicator = ASI_PPGTT,
-                            .SecondLevelBatchBuffer = Firstlevelbatch) +
+            anv_genX(devinfo, batch_emit_return)(&cmd_buffer->batch) +
             (GFX9_MI_BATCH_BUFFER_START_BatchBufferStartAddress_start / 8);
          cmd_buffer->return_addr = anv_batch_address(&cmd_buffer->batch, jump_addr);
 
@@ -1195,18 +1177,10 @@ anv_cmd_buffer_add_secondary(struct anv_cmd_buffer *primary,
       struct anv_batch_bo *first_bbo =
          list_first_entry(&secondary->batch_bos, struct anv_batch_bo, link);
 
-      uint64_t *write_return_addr =
-         anv_batch_emitn(&primary->batch,
-                         GFX9_MI_STORE_DATA_IMM_length + 1 /* QWord write */,
-                         GFX9_MI_STORE_DATA_IMM,
-                         .Address = secondary->return_addr)
-         + (GFX9_MI_STORE_DATA_IMM_ImmediateData_start / 8);
-
-      emit_batch_buffer_start(&primary->batch, first_bbo->bo, 0);
-
-      *write_return_addr =
-         anv_address_physical(anv_batch_address(&primary->batch,
-                                                primary->batch.next));
+      anv_genX(primary->device->info, batch_emit_secondary_call)(
+         &primary->batch,
+         (struct anv_address) { .bo = first_bbo->bo },
+         secondary->return_addr);
 
       anv_cmd_buffer_add_seen_bbos(primary, &secondary->batch_bos);
       break;
@@ -1274,8 +1248,7 @@ anv_cmd_buffer_exec_batch_debug(struct anv_queue *queue,
                                 uint32_t cmd_buffer_count,
                                 struct anv_cmd_buffer **cmd_buffers,
                                 struct anv_query_pool *perf_query_pool,
-                                uint32_t perf_query_pass,
-                                bool is_companion_rcs_cmd_buffer)
+                                uint32_t perf_query_pass)
 {
    if (!INTEL_DEBUG(DEBUG_BATCH | DEBUG_BATCH_STATS))
       return;
@@ -1303,13 +1276,8 @@ anv_cmd_buffer_exec_batch_debug(struct anv_queue *queue,
          }
       }
 
-      for (uint32_t i = 0; i < cmd_buffer_count; i++) {
-         struct anv_cmd_buffer *cmd_buffer =
-            is_companion_rcs_cmd_buffer ?
-            cmd_buffers[i]->companion_rcs_cmd_buffer :
-            cmd_buffers[i];
-         anv_print_batch(device, queue, cmd_buffer);
-      }
+      for (uint32_t i = 0; i < cmd_buffer_count; i++)
+         anv_print_batch(device, queue, cmd_buffers[i]);
    } else if (INTEL_DEBUG(DEBUG_BATCH)) {
       intel_print_batch(queue->decoder, device->trivial_batch_bo->map,
                         device->trivial_batch_bo->size,

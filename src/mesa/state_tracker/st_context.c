@@ -66,26 +66,11 @@
 #include "util/u_vbuf.h"
 #include "util/u_memory.h"
 #include "util/hash_table.h"
+#include "util/thread_sched.h"
 #include "cso_cache/cso_context.h"
 #include "compiler/glsl/glsl_parser_extras.h"
 
 DEBUG_GET_ONCE_BOOL_OPTION(mesa_mvp_dp4, "MESA_MVP_DP4", false)
-
-/* The list of state update functions. */
-st_update_func_t st_update_functions[ST_NUM_ATOMS];
-
-static void
-init_atoms_once(void)
-{
-   STATIC_ASSERT(ARRAY_SIZE(st_update_functions) <= 64);
-
-#define ST_STATE(FLAG, st_update) st_update_functions[FLAG##_INDEX] = st_update;
-#include "st_atom_list.h"
-#undef ST_STATE
-
-   if (util_get_cpu_caps()->has_popcnt)
-      st_update_functions[ST_NEW_VERTEX_ARRAYS_INDEX] = st_update_array_with_popcnt;
-}
 
 void
 st_invalidate_buffers(struct st_context *st)
@@ -486,8 +471,16 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
    st->cso_context = cso_create_context(pipe, cso_flags);
    ctx->cso_context = st->cso_context;
 
-   static once_flag flag = ONCE_FLAG_INIT;
-   call_once(&flag, init_atoms_once);
+   STATIC_ASSERT(ARRAY_SIZE(st->update_functions) <= 64);
+
+#define ST_STATE(FLAG, st_update) st->update_functions[FLAG##_INDEX] = st_update;
+#include "st_atom_list.h"
+#undef ST_STATE
+
+   if (util_get_cpu_caps()->has_popcnt) {
+      st->update_functions[ST_NEW_VERTEX_ARRAYS_INDEX] =
+         st_update_array_with_popcnt;
+   }
 
    st_init_clear(st);
    {
@@ -595,7 +588,7 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
       !screen->get_param(screen, PIPE_CAP_GL_CLAMP);
    st->has_time_elapsed =
       screen->get_param(screen, PIPE_CAP_QUERY_TIME_ELAPSED);
-   st->has_half_float_packing =
+   ctx->Const.GLSLHasHalfFloatPacking =
       screen->get_param(screen, PIPE_CAP_SHADER_PACK_HALF_FLOAT);
    st->has_multi_draw_indirect =
       screen->get_param(screen, PIPE_CAP_MULTI_DRAW_INDIRECT);
@@ -730,9 +723,8 @@ st_create_context_priv(struct gl_context *ctx, struct pipe_context *pipe,
          !st->lower_ucp;
    st->shader_has_one_variant[MESA_SHADER_COMPUTE] = st->has_shareable_shaders;
 
-   if (util_get_cpu_caps()->num_L3_caches == 1 ||
-       !st->pipe->set_context_param)
-      st->pin_thread_counter = ST_L3_PINNING_DISABLED;
+   if (!st->pipe->set_context_param || !util_thread_scheduler_enabled())
+      st->pin_thread_counter = ST_THREAD_SCHEDULER_DISABLED;
 
    st->bitmap.cache.empty = true;
 

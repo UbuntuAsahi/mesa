@@ -318,6 +318,10 @@ index("enum glsl_matrix_layout", "matrix_layout")
 index("nir_cmat_signed", "cmat_signed_mask")
 index("nir_op", "alu_op")
 
+# For Intel DPAS instrinsic.
+index("unsigned", "systolic_depth")
+index("unsigned", "repeat_count")
+
 intrinsic("nop", flags=[CAN_ELIMINATE])
 
 intrinsic("convert_alu_types", dest_comp=0, src_comp=[0],
@@ -441,6 +445,14 @@ intrinsic("shader_clock", dest_comp=2, bit_sizes=[32], flags=[CAN_ELIMINATE],
 intrinsic("ballot", src_comp=[1], dest_comp=0, flags=[CAN_ELIMINATE])
 intrinsic("read_invocation", src_comp=[0, 1], dest_comp=0, bit_sizes=src0, flags=[CAN_ELIMINATE])
 intrinsic("read_first_invocation", src_comp=[0], dest_comp=0, bit_sizes=src0, flags=[CAN_ELIMINATE])
+
+# Same as ballot, but inactive invocations contribute undefined bits.
+intrinsic("ballot_relaxed", src_comp=[1], dest_comp=0, flags=[CAN_ELIMINATE])
+
+# Allows the backend compiler to move this value to an uniform register.
+# Result is undefined if src is not uniform.
+# Unlike read_first_invocation, it may be replaced by a divergent move or CSE'd.
+intrinsic("as_uniform", src_comp=[0], dest_comp=0, bit_sizes=src0, flags=[CAN_ELIMINATE])
 
 # Returns the value of the first source for the lane where the second source is
 # true. The second source must be true for exactly one lane.
@@ -1186,7 +1198,7 @@ intrinsic("load_frag_shading_rate", dest_comp=1, bit_sizes=[32],
 system_value("fully_covered", dest_comp=1, bit_sizes=[1])
 
 # OpenCL printf instruction
-# First source is a deref to the format string
+# First source is an index to the format string (u_printf_info element of the shader)
 # Second source is a deref to a struct containing the args
 # Dest is success or failure
 intrinsic("printf", src_comp=[1, 1], dest_comp=1, bit_sizes=[32])
@@ -1308,7 +1320,8 @@ load("shared_ir3", [1], [BASE, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 store("global_ir3", [2, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET])
 # src[] = { address(vec2 of hi+lo uint32_t), offset }.
 # const_index[] = { access, align_mul, align_offset }
-load("global_ir3", [2, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET], flags=[CAN_ELIMINATE])
+# the alignment applies to the base address
+load("global_ir3", [2, 1], indices=[ACCESS, ALIGN_MUL, ALIGN_OFFSET, RANGE_BASE, RANGE], flags=[CAN_ELIMINATE])
 
 # IR3-specific bindless handle specifier. Similar to vulkan_resource_index, but
 # without the binding because the hardware expects a single flattened index
@@ -1341,9 +1354,23 @@ store("uniform_ir3", [], indices=[BASE])
 # vec4's.
 intrinsic("copy_ubo_to_uniform_ir3", [1, 1], indices=[BASE, RANGE])
 
+# IR3-specific intrinsic for ldg.k.
+# base is an offset to apply to the address in bytes, range_base is the
+# const file base in components, range is the amount to copy in vec4's.
+intrinsic("copy_global_to_uniform_ir3", [2], indices=[BASE, RANGE_BASE, RANGE])
+
 # IR3-specific intrinsic for stsc. Loads from push consts to constant file
 # Should be used in the shader preamble.
 intrinsic("copy_push_const_to_uniform_ir3", [1], indices=[BASE, RANGE])
+
+intrinsic("brcst_active_ir3", dest_comp=1, src_comp=[1, 1], bit_sizes=src0,
+          indices=[CLUSTER_SIZE])
+intrinsic("reduce_clusters_ir3", dest_comp=1, src_comp=[1], bit_sizes=src0,
+          indices=[REDUCTION_OP])
+intrinsic("inclusive_scan_clusters_ir3", dest_comp=1, src_comp=[1],
+          bit_sizes=src0, indices=[REDUCTION_OP])
+intrinsic("exclusive_scan_clusters_ir3", dest_comp=1, src_comp=[1, 1],
+          bit_sizes=src0, indices=[REDUCTION_OP])
 
 # Intrinsics used by the Midgard/Bifrost blend pipeline. These are defined
 # within a blend shader to read/write the raw value from the tile buffer,
@@ -1710,6 +1737,19 @@ store("tlb_sample_color_v3d", [1], [BASE, COMPONENT, SRC_TYPE], [])
 # the target framebuffer
 intrinsic("load_fb_layers_v3d", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# Active invocation index within the subgroup.
+# Equivalent to popcount(ballot(true) & ((1 << subgroup_invocation) - 1))
+system_value("active_subgroup_invocation_agx", 1)
+
+# With [0, 1] clipping, no transform is needed on the output z' = z. But with [-1,
+# 1] clipping, we need to transform z' = (z + w) / 2. We express both cases as a
+# lerp between z and w, where this is the lerp coefficient: 0 for [0, 1] and 0.5
+# for [-1, 1].
+system_value("clip_z_coeff_agx", 1)
+
+# mesa_prim for the input topology (in a geometry shader)
+system_value("input_topology_agx", 1)
+
 # Load a bindless sampler handle mapping a binding table sampler.
 intrinsic("load_sampler_handle_agx", [1], 1, [],
           flags=[CAN_ELIMINATE, CAN_REORDER],
@@ -1812,9 +1852,15 @@ store("agx", [1, 1], [ACCESS, BASE, FORMAT, SIGN_EXTEND])
 # Logical complement of load_front_face, mapping to an AGX system value
 system_value("back_face_agx", 1, bit_sizes=[1, 32])
 
-# Load the base address of an indexed VBO (for lowering VBOs)
+# Load the base address of an indexed vertex attribute (for lowering).
 intrinsic("load_vbo_base_agx", src_comp=[1], dest_comp=1, bit_sizes=[64],
           flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# When vertex robustness is enabled, loads the maximum valid attribute index for
+# a given attribute. This is unsigned: the driver ensures that at least one
+# vertex is always valid to load, directing loads to a zero sink if necessary.
+intrinsic("load_attrib_clamp_agx", src_comp=[1], dest_comp=1,
+          bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Load a driver-internal system value from a given system value set at a given
 # binding within the set. This is used for correctness when lowering things like
@@ -1836,6 +1882,11 @@ intrinsic("sample_mask_agx", src_comp=[1, 1])
 # sample_mask_agx also triggers depth/stencil testing.
 intrinsic("discard_agx", src_comp=[1])
 
+# For a given row of the polygon stipple given as an integer source in [0, 31],
+# load the 32-bit stipple pattern for that row.
+intrinsic("load_polygon_stipple_agx", src_comp=[1], dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_ELIMINATE])
+
 # The fixed-function sample mask specified in the API (e.g. glSampleMask)
 system_value("api_sample_mask_agx", 1, bit_sizes=[16])
 
@@ -1844,6 +1895,9 @@ system_value("sample_positions_agx", 1, bit_sizes=[32])
 
 # Loads the fixed-function glPointSize() value
 system_value("fixed_point_size_agx", 1, bit_sizes=[32])
+
+# Bit mask of TEX locations that are replaced with point sprites
+system_value("tex_sprite_mask_agx", 1, bit_sizes=[16])
 
 # Image loads go through the texture cache, which is not coherent with the PBE
 # or memory access, so fencing is necessary for writes to become visible.
@@ -1858,17 +1912,31 @@ barrier("fence_mem_to_tex_agx")
 # act like render target writes, in conjunction with fragment interlock.
 barrier("fence_pbe_to_tex_pixel_agx")
 
+# Unknown fence used in the helper program on exit.
+barrier("fence_helper_exit_agx")
+
+# Pointer to the buffer passing outputs VS->TCS, VS->GS, or TES->GS linkage.
+system_value("vs_output_buffer_agx", 1, bit_sizes=[64])
+
+# Indirect for the above, used for indirect draws.
+system_value("vs_output_buffer_ptr_agx", 1, bit_sizes=[64])
+
+# Mask of VS->TCS, VS->GS, or TES->GS outputs. This is modelled as a sysval
+# directly so it can be dynamic with shader objects or constant folded with
+# pipelines (including GPL)
+system_value("vs_outputs_agx", 1, bit_sizes=[64])
+
 # Address of state for AGX input assembly lowering for geometry/tessellation
 system_value("input_assembly_buffer_agx", 1, bit_sizes=[64])
 
 # Address of the parameter buffer for AGX geometry shaders
 system_value("geometry_param_buffer_agx", 1, bit_sizes=[64])
 
-# Loads the vertex index within the current decomposed primitive. For a
-# triangle, this will be in [0, 2], where 2 is the last vertex. This is defined
-# only when the vertex shader is reinvoked for the same vertex in each
-# primitive, as occurs in the geometry shader lowering.
-system_value("vertex_id_in_primitive_agx", 1, bit_sizes=[32])
+# Address of the parameter buffer for AGX tessellation shaders
+system_value("tess_param_buffer_agx", 1, bit_sizes=[64])
+
+# Address of the pipeline statistic query result indexed by BASE
+system_value("stat_query_address_agx", 1, bit_sizes=[64], indices=[BASE])
 
 # Helper shader intrinsics
 # src[] = { value }.
@@ -1880,6 +1948,18 @@ intrinsic("stack_map_agx", src_comp=[1, 1])
 # src[] = { index }.
 # dst[] = { stack_address }.
 intrinsic("stack_unmap_agx", src_comp=[1], dest_comp=1, bit_sizes=[32])
+
+# dst[] = { GPU core ID }.
+system_value("core_id_agx", 1, bit_sizes=[32])
+
+# dst[] = { Helper operation type }.
+load("helper_op_id_agx", [], [], [CAN_ELIMINATE])
+
+# dst[] = { Helper argument low 32 bits }.
+load("helper_arg_lo_agx", [], [], [CAN_ELIMINATE])
+
+# dst[] = { Helper argument high 32 bits }.
+load("helper_arg_hi_agx", [], [], [CAN_ELIMINATE])
 
 # Intel-specific query for loading from the brw_image_param struct passed
 # into the shader as a uniform.  The variable is a deref to the image
@@ -2015,6 +2095,15 @@ system_value("leaf_procedural_intel", 1, bit_sizes=[1])
 system_value("btd_shader_type_intel", 1)
 system_value("ray_query_global_intel", 1, bit_sizes=[64])
 
+# Source 0: A matrix (type specified by SRC_TYPE)
+# Source 1: B matrix (type specified by SRC_TYPE)
+# Source 2: Accumulator matrix (type specified by DEST_TYPE)
+#
+# The matrix parameters are the slices owned by the invocation.
+intrinsic("dpas_intel", dest_comp=0, src_comp=[0, 0, 0],
+          indices=[DEST_TYPE, SRC_TYPE, SATURATE, CMAT_SIGNED_MASK, SYSTOLIC_DEPTH, REPEAT_COUNT],
+          flags=[CAN_ELIMINATE])
+
 # NVIDIA-specific intrinsics
 intrinsic("load_sysval_nv", dest_comp=1, src_comp=[], bit_sizes=[32, 64],
           indices=[ACCESS, BASE], flags=[CAN_ELIMINATE])
@@ -2049,6 +2138,15 @@ intrinsic("bar_set_nv", dest_comp=1, bit_sizes=[32], flags=[CAN_ELIMINATE])
 intrinsic("bar_break_nv", dest_comp=1, bit_sizes=[32], src_comp=[1])
 # src[] = { bar, bar_set }
 intrinsic("bar_sync_nv", src_comp=[1, 1])
+
+# Stall until the given SSA value is available
+intrinsic("ssa_bar_nv", src_comp=[1])
+
+# NVIDIA-specific system values
+system_value("warps_per_sm_nv", 1, bit_sizes=[32])
+system_value("sm_count_nv", 1, bit_sizes=[32])
+system_value("warp_id_nv", 1, bit_sizes=[32])
+system_value("sm_id_nv", 1, bit_sizes=[32])
 
 # In order to deal with flipped render targets, gl_PointCoord may be flipped
 # in the shader requiring a shader key or extra instructions or it may be

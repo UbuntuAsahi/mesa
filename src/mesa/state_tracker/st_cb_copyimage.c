@@ -50,8 +50,8 @@
  * component size always return the same component type.
  *
  * X returns A.
- * intensity, depth, stencil, and 8-bit and 16-bit packed formats are not
- * supported. (same as ARB_copy_image)
+ * Luminance, intensity, alpha, depth, stencil, and 8-bit and 16-bit packed
+ * formats are not supported. (same as ARB_copy_image)
  */
 static enum pipe_format
 get_canonical_format(struct pipe_screen *screen,
@@ -115,8 +115,6 @@ get_canonical_format(struct pipe_screen *screen,
          switch (desc->channel[0].size) {
          case 8:
             RETURN_FOR_SWIZZLE1(X, PIPE_FORMAT_R8_UINT);
-            /* e.g. PIPE_FORMAT_A8_UNORM */
-            RETURN_FOR_SWIZZLE1(0, PIPE_FORMAT_R8_UNORM);
             break;
 
          case 16:
@@ -137,8 +135,6 @@ get_canonical_format(struct pipe_screen *screen,
              */
             RETURN_FOR_SWIZZLE2(X, Y, PIPE_FORMAT_R8G8_UNORM);
             RETURN_FOR_SWIZZLE2(Y, X, PIPE_FORMAT_G8R8_UNORM);
-            /* e.g. PIPE_FORMAT_L8A8_UNORM */
-            RETURN_FOR_SWIZZLE2(X, X, PIPE_FORMAT_R16_UNORM);
             break;
 
          case 16:
@@ -510,12 +506,17 @@ copy_image(struct pipe_context *pipe,
            unsigned src_level,
            const struct pipe_box *src_box)
 {
-   if ((src->nr_samples <= 1 && dst->nr_samples <= 1) &&
-       (src->format == dst->format ||
-        util_format_is_compressed(src->format) ||
-        util_format_is_compressed(dst->format))) {
-      pipe->resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
-                                 src, src_level, src_box);
+   if (src->format == dst->format ||
+       util_format_is_compressed(src->format) ||
+       util_format_is_compressed(dst->format)) {
+
+      if (src->nr_samples <= 1 && dst->nr_samples <= 1) {
+         pipe->resource_copy_region(pipe, dst, dst_level, dstx, dsty, dstz,
+                                    src, src_level, src_box);
+      } else {
+         blit(pipe, dst, dst->format, dst_level, dstx, dsty, dstz,
+              src, src->format, src_level, src_box);
+      }
       return;
    }
 

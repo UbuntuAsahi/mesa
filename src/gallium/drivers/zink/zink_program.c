@@ -2512,6 +2512,7 @@ zink_set_primitive_emulation_keys(struct zink_context *ctx)
             zink_lower_system_values_to_inlined_uniforms(nir);
 
             zink_add_inline_uniform(nir, ZINK_INLINE_VAL_FLAT_MASK);
+            zink_add_inline_uniform(nir, ZINK_INLINE_VAL_FLAT_MASK+1);
             zink_add_inline_uniform(nir, ZINK_INLINE_VAL_PV_LAST_VERT);
             ralloc_free(prev_stage);
             struct zink_shader *shader = zink_shader_create(screen, nir);

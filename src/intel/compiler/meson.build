@@ -57,6 +57,7 @@ libintel_compiler_files = files(
   'brw_fs.h',
   'brw_fs_live_variables.cpp',
   'brw_fs_live_variables.h',
+  'brw_fs_lower_dpas.cpp',
   'brw_fs_lower_pack.cpp',
   'brw_fs_lower_regioning.cpp',
   'brw_fs_nir.cpp',
@@ -88,6 +89,7 @@ libintel_compiler_files = files(
   'brw_nir_blockify_uniform_loads.c',
   'brw_nir_clamp_per_vertex_loads.c',
   'brw_nir_lower_conversions.c',
+  'brw_nir_lower_cooperative_matrix.c',
   'brw_nir_lower_cs_intrinsics.c',
   'brw_nir_lower_alpha_to_coverage.c',
   'brw_nir_lower_intersection_shader.c',
@@ -99,6 +101,7 @@ libintel_compiler_files = files(
   'brw_nir_lower_shading_rate_output.c',
   'brw_nir_lower_sparse.c',
   'brw_nir_lower_storage_image.c',
+  'brw_nir_lower_texture.c',
   'brw_nir_opt_peephole_ffma.c',
   'brw_nir_opt_peephole_imul32x16.c',
   'brw_nir_rt.h',
@@ -184,6 +187,7 @@ elif with_intel_clc
     link_args : [ld_args_build_id],
     dependencies : [idep_nir, idep_vtn, idep_mesaclc, idep_mesautil, idep_intel_dev],
     native : true,
+    install : get_option('install-intel-clc'),
   )
   dep_prog_intel_clc = [prog_intel_clc]
 endif
@@ -198,6 +202,7 @@ if with_tests
         'test_eu_compact.cpp',
         'test_eu_validate.cpp',
         'test_fs_cmod_propagation.cpp',
+        'test_fs_combine_constants.cpp',
         'test_fs_copy_propagation.cpp',
         'test_fs_saturate_propagation.cpp',
         'test_fs_scoreboard.cpp',

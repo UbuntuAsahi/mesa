@@ -121,10 +121,13 @@ vulkan_runtime_files = files(
 vulkan_runtime_deps = [
   vulkan_wsi_deps,
   idep_mesautil,
-  idep_nir,
-  idep_vtn,
+  idep_nir_headers,
   idep_vulkan_util,
 ]
+
+if with_vk_compiler
+  vulkan_runtime_deps += [idep_nir, idep_vtn]
+endif
 
 if dep_libdrm.found()
   vulkan_runtime_files += files('vk_drm_syncobj.c', 'vk_drm_syncobj.h')
@@ -222,7 +225,7 @@ vk_physical_device_properties = custom_target(
 vk_synchronization_helpers = custom_target(
   'vk_synchronization_helpers',
   input : [vk_synchronization_helpers_gen, vk_api_xml],
-  output : ['vk_synchronization_helpers.c', 'vk_synchronization_helpers.h'],
+  output : 'vk_synchronization_helpers.c',
   command : [
     prog_python, '@INPUT0@', '--xml', '@INPUT1@',
     '--out-c', '@OUTPUT0@',

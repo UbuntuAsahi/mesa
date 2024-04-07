@@ -766,15 +766,12 @@ struct gl_texture_image
    mesa_format TexFormat;         /**< The actual texture memory format */
 
    GLuint Border;		/**< 0 or 1 */
-   GLuint Width;		/**< = 2^WidthLog2 + 2*Border */
-   GLuint Height;		/**< = 2^HeightLog2 + 2*Border */
-   GLuint Depth;		/**< = 2^DepthLog2 + 2*Border */
+   GLuint Width;
+   GLuint Height;
+   GLuint Depth;
    GLuint Width2;		/**< = Width - 2*Border */
    GLuint Height2;		/**< = Height - 2*Border */
    GLuint Depth2;		/**< = Depth - 2*Border */
-   GLuint WidthLog2;		/**< = log2(Width2) */
-   GLuint HeightLog2;		/**< = log2(Height2) */
-   GLuint DepthLog2;		/**< = log2(Depth2) */
    GLuint MaxNumLevels;		/**< = maximum possible number of mipmap
                                        levels, computed from the dimensions */
 
@@ -1671,6 +1668,12 @@ struct gl_vertex_array_object
    GLbitfield Enabled;
 
    /**
+    * Mask of vertex attributes that have:
+    *    VertexAttrib[i].BufferBindingIndex != i.
+    */
+   GLbitfield NonIdentityBufferAttribMapping;
+
+   /**
     * Mask indicating which VertexAttrib and BufferBinding structures have
     * been changed since the VAO creation. No bit is ever cleared to 0 by
     * state updates. Setting to the default state doesn't update this.
@@ -2531,7 +2534,6 @@ struct gl_shared_state
  */
 struct gl_renderbuffer
 {
-   GLuint ClassID;        /**< Useful for drivers */
    GLuint Name;
    GLchar *Label;         /**< GL_KHR_debug */
    GLint RefCount;

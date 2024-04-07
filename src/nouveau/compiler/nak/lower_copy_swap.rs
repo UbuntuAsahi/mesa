@@ -155,9 +155,8 @@ impl LowerCopySwap {
         assert!(*swap.srcs[1].src_ref.as_reg().unwrap() == x);
 
         if x == y {
-            /* Nothing to do */
-        } else if x.is_predicate() {
-            // TODO: Transform this in PLOP2 for SM5x-SM6x
+            // Nothing to do
+        } else if x.is_predicate() && b.sm() >= 70 {
             b.push_op(OpPLop3 {
                 dsts: [x.into(), y.into()],
                 srcs: [x.into(), y.into(), Src::new_imm_bool(true)],

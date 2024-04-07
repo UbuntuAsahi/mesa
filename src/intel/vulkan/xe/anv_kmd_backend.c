@@ -22,7 +22,6 @@
  */
 
 #include <sys/mman.h>
-#include <xf86drm.h>
 
 #include "common/xe/intel_engine.h"
 
@@ -116,13 +115,19 @@ static inline int
 xe_vm_bind_op(struct anv_device *device,
               struct anv_sparse_submission *submit)
 {
-   int ret;
-
+   struct drm_xe_sync xe_sync = {
+      .handle = intel_bind_timeline_get_syncobj(&device->bind_timeline),
+      .type = DRM_XE_SYNC_TYPE_TIMELINE_SYNCOBJ,
+      .flags = DRM_XE_SYNC_FLAG_SIGNAL,
+   };
    struct drm_xe_vm_bind args = {
       .vm_id = device->vm_id,
       .num_binds = submit->binds_len,
       .bind = {},
+      .num_syncs = 1,
+      .syncs = (uintptr_t)&xe_sync,
    };
+   int ret;
 
    STACK_ARRAY(struct drm_xe_vm_bind_op, xe_binds_stackarray,
                submit->binds_len);
@@ -173,7 +178,16 @@ xe_vm_bind_op(struct anv_device *device,
          xe_bind->userptr = (uintptr_t)bo->map;
    }
 
+   xe_sync.timeline_value = intel_bind_timeline_bind_begin(&device->bind_timeline);
    ret = intel_ioctl(device->fd, DRM_IOCTL_XE_VM_BIND, &args);
+   intel_bind_timeline_bind_end(&device->bind_timeline);
+
+   if (ret)
+      goto out_stackarray;
+
+   ANV_RMV(vm_binds, device, submit->binds, submit->binds_len);
+
+out_stackarray:
    STACK_ARRAY_FINISH(xe_binds_stackarray);
 
    return ret;

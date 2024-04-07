@@ -75,9 +75,8 @@ error2aub = executable(
 error2hangdump = executable(
   'intel_error2hangdump',
   files('error2hangdump.c'),
-  dependencies : [dep_zlib, dep_dl, dep_thread, dep_m],
+  dependencies : [dep_zlib, dep_dl, dep_thread, dep_m, idep_intel_dev],
   include_directories : [inc_include, inc_src, inc_intel],
-  link_with : [libintel_dev],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
   install : true
@@ -88,7 +87,7 @@ intel_hang_replay = executable(
   files('intel_hang_replay.c'),
   dependencies : [idep_intel_dev, idep_libintel_common, dep_libdrm, dep_dl, dep_thread, dep_m],
   include_directories : [inc_include, inc_src, inc_intel],
-  link_with : [libintel_dev, libintel_compiler],
+  link_with : [libintel_compiler],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',
   install : true
@@ -114,7 +113,7 @@ configure_file(
 libintel_sanitize_gpu = shared_library(
   'intel_sanitize_gpu',
   files('intel_sanitize_gpu.c'),
-  dependencies : [idep_mesautil, dep_dl, dep_thread],
+  dependencies : [idep_mesautil, dep_dl, dep_thread, idep_intel_dev],
   include_directories : [inc_include, inc_src, inc_intel],
   link_with : libintel_common,
   c_args : [no_override_init_args, sse2_args],
@@ -157,9 +156,9 @@ if with_tools.contains('drm-shim')
 
   libintel_stub_gpu = shared_library(
     'intel_noop_drm_shim',
-    'intel_noop_drm_shim.c',
+    ['intel_noop_drm_shim.c', intel_dev_serialize_src],
     include_directories: [inc_include, inc_src, inc_intel],
-    dependencies: [dep_libdrm, dep_drm_shim, idep_mesautil, idep_libintel_common, idep_intel_dev],
+    dependencies: [dep_libdrm, dep_drm_shim, idep_mesautil, idep_libintel_common, idep_intel_dev, idep_parson],
     gnu_symbol_visibility : 'hidden',
     install : true,
   )
@@ -183,9 +182,9 @@ if with_tools.contains('intel-ui')
   intel_hang_viewer = executable(
     'intel_hang_viewer',
     files('intel_hang_viewer.cpp', 'aubinator_viewer_decoder.cpp'),
-    dependencies : [idep_mesautil, dep_zlib, dep_dl, dep_thread, dep_m, libintel_imgui_gtk_dep],
+    dependencies : [idep_mesautil, dep_zlib, dep_dl, dep_thread, dep_m, libintel_imgui_gtk_dep, idep_intel_dev],
     include_directories : [inc_include, inc_src, inc_intel],
-    link_with : [libintel_common, libintel_compiler, libintel_dev],
+    link_with : [libintel_common, libintel_compiler],
     c_args : [no_override_init_args],
     gnu_symbol_visibility : 'hidden',
     cpp_args : ['-fpermissive', '-Wno-parentheses'],
@@ -241,13 +240,16 @@ asm_testcases = [
   ['bdw', 'gfx8'],
   ['skl', 'gfx9'],
   ['icl', 'gfx11'],
+  ['tgl', 'gfx12'],
+  ['dg2', 'gfx12.5'],
 ]
 
 test_runner = find_program('tests/run-test.py')
 foreach testcase : asm_testcases
   _gen_name = testcase[0]
   _gen_num = testcase[1]
-  _gen_folder = join_paths(meson.current_source_dir(), 'tests', _gen_num)
+  _gen_folder = join_paths(meson.current_source_dir(), 'tests',
+                           _gen_num.replace('gfx', 'gen'))
   test(
     'i965_asm_' + _gen_num, test_runner,
     args : [

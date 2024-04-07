@@ -1168,7 +1168,7 @@ dgc_emit_draw_mesh_tasks(nir_builder *b, struct dgc_cmdbuf *cs, nir_def *stream_
    nir_def *vtx_base_sgpr = load_param16(b, vtx_base_sgpr);
    nir_def *stream_offset = nir_iadd(b, draw_params_offset, stream_base);
 
-   nir_def *draw_data = nir_load_ssbo(b, 4, 32, stream_buf, stream_offset);
+   nir_def *draw_data = nir_load_ssbo(b, 3, 32, stream_buf, stream_offset);
    nir_def *x = nir_channel(b, draw_data, 0);
    nir_def *y = nir_channel(b, draw_data, 1);
    nir_def *z = nir_channel(b, draw_data, 2);
@@ -1468,7 +1468,7 @@ radv_CreateIndirectCommandsLayoutNV(VkDevice _device, const VkIndirectCommandsLa
    typed_memcpy(layout->tokens, pCreateInfo->pTokens, pCreateInfo->tokenCount);
 
    layout->ibo_type_32 = VK_INDEX_TYPE_UINT32;
-   layout->ibo_type_8 = VK_INDEX_TYPE_UINT8_EXT;
+   layout->ibo_type_8 = VK_INDEX_TYPE_UINT8_KHR;
 
    for (unsigned i = 0; i < pCreateInfo->tokenCount; ++i) {
       switch (pCreateInfo->pTokens[i].tokenType) {
@@ -1489,7 +1489,7 @@ radv_CreateIndirectCommandsLayoutNV(VkDevice _device, const VkIndirectCommandsLa
          for (unsigned j = 0; j < pCreateInfo->pTokens[i].indexTypeCount; j++) {
             if (pCreateInfo->pTokens[i].pIndexTypes[j] == VK_INDEX_TYPE_UINT32)
                layout->ibo_type_32 = pCreateInfo->pTokens[i].pIndexTypeValues[j];
-            else if (pCreateInfo->pTokens[i].pIndexTypes[j] == VK_INDEX_TYPE_UINT8_EXT)
+            else if (pCreateInfo->pTokens[i].pIndexTypes[j] == VK_INDEX_TYPE_UINT8_KHR)
                layout->ibo_type_8 = pCreateInfo->pTokens[i].pIndexTypeValues[j];
          }
          break;
@@ -1915,8 +1915,9 @@ radv_prepare_dgc(struct radv_cmd_buffer *cmd_buffer, const VkGeneratedCommandsIn
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE,
                         cmd_buffer->device->meta_state.dgc_prepare.pipeline);
 
-   radv_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), cmd_buffer->device->meta_state.dgc_prepare.p_layout,
-                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer),
+                              cmd_buffer->device->meta_state.dgc_prepare.p_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                              sizeof(params), &params);
 
    radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                  cmd_buffer->device->meta_state.dgc_prepare.p_layout, 0, ds_cnt, ds_writes);

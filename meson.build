@@ -251,6 +251,20 @@ with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_nouveau_vk = _vulkan_drivers.contains('nouveau-experimental')
 with_any_vk = _vulkan_drivers.length() != 0
 
+with_vk_compiler = [
+  with_intel_vk,
+  with_intel_hasvk,
+  with_amd_vk,
+  with_freedreno_vk,
+  with_panfrost_vk,
+  with_swrast_vk,
+  with_broadcom_vk,
+  with_imagination_vk,
+  with_microsoft_vk,
+  with_nouveau_vk,
+].contains(true)
+pre_args += '-DUSE_VK_COMPILER=@0@'.format(with_vk_compiler ? '1' : '0')
+
 freedreno_kmds = get_option('freedreno-kmds')
 if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedreno_vk
   if freedreno_kmds.contains('msm')
@@ -281,13 +295,16 @@ with_any_broadcom = [
   with_broadcom_vk,
 ].contains(true)
 
-if ['x86_64'].contains(host_machine.cpu_family())
-  with_intel_clc = get_option('intel-clc') == 'enabled'
-  with_intel_vk_rt = with_intel_vk and get_option('intel-clc') != 'disabled'
+if get_option('intel-clc') != 'system'
+  # Require intel-clc with Anv & Iris (for internal shaders)
+  with_intel_clc = get_option('intel-clc') == 'enabled' or \
+                   with_intel_vk or with_gallium_iris
 else
   with_intel_clc = false
-  with_intel_vk_rt = false
 endif
+
+with_intel_vk_rt = ['x86_64'].contains(host_machine.cpu_family()) and \
+  with_intel_vk and get_option('intel-rt') != 'disabled'
 
 with_any_intel = [
   with_gallium_crocus,
@@ -562,7 +579,7 @@ if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk
   dep_dxheaders = dependency('directx-headers', required : false)
   if not dep_dxheaders.found()
     dep_dxheaders = dependency('DirectX-Headers',
-      version : '>= 1.610.0',
+      version : '>= 1.611.0',
       fallback : ['DirectX-Headers', 'dep_dxheaders'],
       required : with_gallium_d3d12 or with_microsoft_vk
     )
@@ -587,7 +604,7 @@ _vdpau_drivers = [
 vdpau = get_option('gallium-vdpau') \
   .require(system_has_kms_drm, error_message : 'VDPAU state tracker can only be build on unix-like OSes.') \
   .require(with_platform_x11, error_message : 'VDPAU state tracker requires X11 support.') \
-  .require(_vdpau_drivers.contains(true), error_message : 'VDPAU state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video, virgl).') 
+  .require(_vdpau_drivers.contains(true), error_message : 'VDPAU state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau, d3d12 (with option gallium-d3d12-video, virgl).')
 
 dep_vdpau = dependency('vdpau', version : '>= 1.1', required : vdpau)
 if dep_vdpau.found()
@@ -813,11 +830,12 @@ if with_gallium_rusticl
     error('rusticl requires at least one gallium driver.')
   endif
 
-  if meson.version().version_compare('< 1.2')
-    error('rusticl requires meson 1.2.0 or newer')
+  if meson.version().version_compare('< 1.3.1')
+    error('rusticl requires meson 1.3.1 or newer')
   endif
 
   add_languages('rust', required: true)
+  rustc = meson.get_compiler('rust')
 
   with_clc = true
 endif
@@ -887,10 +905,10 @@ if with_platform_android
       dep_android_mapper4 = dependency('android.hardware.graphics.mapper', version : '>= 4.0', required : false)
     endif
   endif
-  pre_args += [
-    '-DANDROID',
-    '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
-  ]
+  pre_args += '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
+  if get_option('android-strict')
+    pre_args += '-DANDROID_STRICT'
+  endif
 endif
 
 # On Android, seccomp kills the process on kernels without
@@ -907,9 +925,12 @@ prog_python = import('python').find_installation('python3')
 has_mako = run_command(
   prog_python, '-c',
   '''
-from distutils.version import StrictVersion
+try:
+  from packaging.version import Version
+except:
+  from distutils.version import StrictVersion as Version
 import mako
-assert StrictVersion(mako.__version__) >= StrictVersion("0.8.0")
+assert Version(mako.__version__) >= Version("0.8.0")
   ''', check: false)
 if has_mako.returncode() != 0
   error('Python (3.x) mako module >= 0.8.0 required to build mesa.')
@@ -931,7 +952,7 @@ endif
 
 with_shader_cache = get_option('shader-cache') \
   .require(host_machine.system() != 'windows', error_message : 'Shader Cache does not currently work on Windows') \
-  .allowed() 
+  .allowed()
 
 if with_shader_cache
   pre_args += '-DENABLE_SHADER_CACHE'
@@ -1357,6 +1378,7 @@ functions_to_detect = {
   'getrandom': '',
   'qsort_s': '',
   'posix_fallocate': '',
+  'secure_getenv': '',
 }
 
 foreach f, prefix: functions_to_detect
@@ -1448,8 +1470,8 @@ if cc.links('''
       locale_t loc = newlocale(LC_CTYPE_MASK, "C", NULL);
       const char *s = "1.0";
       char *end;
-      double d = strtod_l(s, end, loc);
-      float f = strtof_l(s, end, loc);
+      double d = strtod_l(s, &end, loc);
+      float f = strtof_l(s, &end, loc);
       freelocale(loc);
       return 0;
     }''',
@@ -1518,8 +1540,8 @@ else
   dep_clock = cc.find_library('rt')
 endif
 
-dep_zlib = dependency('zlib', version : '>= 1.2.3',
-                      fallback : ['zlib', 'zlib_dep'],
+dep_zlib = dependency('zlib', version : '>= 1.2.9',
+                      allow_fallback: true,
                       required : get_option('zlib'))
 if dep_zlib.found()
   pre_args += '-DHAVE_ZLIB'
@@ -1562,7 +1584,7 @@ with_expat = get_option('expat') \
 if host_machine.system() == 'darwin'
   dep_expat = meson.get_compiler('c').find_library('expat', required : with_expat)
 else
-  dep_expat = dependency('expat', fallback : ['expat', 'expat_dep'],
+  dep_expat = dependency('expat', allow_fallback: true,
                          required : with_expat)
 endif
 
@@ -1578,7 +1600,7 @@ use_xmlconfig = get_option('xmlconfig') \
   .require(dep_expat.found(),
            error_message : 'requires expat') \
   .allowed()
-  
+
 # Predefined macros for windows
 if host_machine.system() == 'windows'
   pre_args += '-DWIN32_LEAN_AND_MEAN' # http://msdn2.microsoft.com/en-us/library/6dwk3a1z.aspx
@@ -1618,7 +1640,7 @@ dep_libdrm_radeon = null_dep
 dep_libdrm_nouveau = null_dep
 dep_libdrm_intel = null_dep
 
-_drm_amdgpu_ver = '2.4.110'
+_drm_amdgpu_ver = '2.4.119'
 _drm_radeon_ver = '2.4.71'
 _drm_nouveau_ver = '2.4.102'
 _drm_intel_ver = '2.4.75'
@@ -1710,14 +1732,10 @@ if draw_with_llvm
   llvm_optional_modules += ['lto']
 endif
 
-if with_amd_vk or with_gallium_radeonsi
+if with_amd_vk or with_gallium_radeonsi or with_clc
   _llvm_version = '>= 15.0.0'
-elif with_intel_clc
-  _llvm_version = '>= 13.0.0'
 elif with_gallium_opencl
   _llvm_version = '>= 11.0.0'
-elif with_clc
-  _llvm_version = '>= 10.0.0'
 else
   _llvm_version = '>= 5.0.0'
 endif
@@ -1747,13 +1765,10 @@ if _llvm.allowed()
   with_llvm = dep_llvm.found()
 endif
 if with_llvm
-  pre_args += '-DLLVM_AVAILABLE'
   pre_args += '-DMESA_LLVM_VERSION_STRING="@0@"'.format(dep_llvm.version())
   pre_args += '-DLLVM_IS_SHARED=@0@'.format(_shared_llvm.to_int())
 
-  if draw_with_llvm
-    pre_args += '-DDRAW_LLVM_AVAILABLE'
-  elif with_swrast_vk
+  if with_swrast_vk and not draw_with_llvm
     error('Lavapipe requires LLVM draw support.')
   endif
 
@@ -1795,6 +1810,8 @@ elif with_clc
 else
   draw_with_llvm = false
 endif
+pre_args += '-DLLVM_AVAILABLE=' + (with_llvm ? '1' : '0')
+pre_args += '-DDRAW_LLVM_AVAILABLE=' + (with_llvm and draw_with_llvm ? '1' : '0')
 
 with_opencl_spirv = (_opencl != 'disabled' and get_option('opencl-spirv')) or with_clc
 if with_opencl_spirv
@@ -1810,8 +1827,8 @@ if with_opencl_spirv
   # does not have the required API and those are only available starting from
   # 8.0.1.3.
   _llvmspirvlib_min_version = '>= 8.0.1.3'
-  if with_intel_clc
-    _llvmspirvlib_min_version = '>= 13.0.0.0'
+  if with_clc
+    _llvmspirvlib_min_version = '>= 15.0.0.0'
   endif
 
   _llvmspirvlib_version = [
@@ -1867,6 +1884,8 @@ if not with_platform_windows and not dep_elf.found()
 endif
 if dep_elf.found()
   pre_args += '-DUSE_LIBELF'
+elif with_gallium_radeonsi
+  error('Gallium driver radeonsi requires libelf')
 endif
 
 dep_glvnd = null_dep
@@ -2128,6 +2147,13 @@ if with_perfetto
   pre_args += '-DHAVE_PERFETTO'
 endif
 
+with_teflon = get_option('teflon')
+if with_teflon and with_tests
+  dep_xtensor = dependency('xtensor')
+  dep_flatbuffers = dependency('flatbuffers')
+  prog_flatc = find_program('flatc')
+endif
+
 with_gpuvis = get_option('gpuvis')
 if with_gpuvis
   pre_args += '-DHAVE_GPUVIS'
@@ -2346,3 +2372,6 @@ if with_perfetto and with_any_datasource
   perfetto_summary += {'Data source': with_datasources}
 endif
 summary(perfetto_summary, section: 'Perfetto', bool_yn: true, list_sep: ' ')
+
+teflon_summary = {'Enabled': with_teflon}
+summary(teflon_summary, section: 'Teflon (TensorFlow Lite delegate)', bool_yn: true, list_sep: ' ')

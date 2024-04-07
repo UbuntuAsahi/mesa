@@ -65,7 +65,9 @@
 #define VG(x) ((void)0)
 #endif
 
-#ifdef ANDROID
+#include "util/detect_os.h"
+
+#if DETECT_OS_ANDROID
 #include <vndk/hardware_buffer.h>
 #include "util/u_gralloc/u_gralloc.h"
 #endif
@@ -200,6 +202,7 @@ struct v3dv_physical_device {
    } options;
 
    struct {
+      bool cpu_queue;
       bool multisync;
       bool perfmon;
    } caps;
@@ -249,6 +252,7 @@ enum v3dv_queue_type {
    V3DV_QUEUE_CL = 0,
    V3DV_QUEUE_CSD,
    V3DV_QUEUE_TFU,
+   V3DV_QUEUE_CPU,
    V3DV_QUEUE_ANY,
    V3DV_QUEUE_COUNT,
 };
@@ -595,7 +599,7 @@ struct v3dv_device {
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
 
-#ifdef ANDROID
+#if DETECT_OS_ANDROID
    struct u_gralloc *gralloc;
 #endif
 };
@@ -736,7 +740,7 @@ struct v3dv_image {
     */
    struct v3dv_image *shadow;
 
-#ifdef ANDROID
+#if DETECT_OS_ANDROID
    /* Image is backed by VK_ANDROID_native_buffer, */
    bool is_native_buffer_memory;
    /* Image is backed by VK_ANDROID_external_memory_android_hardware_buffer */
@@ -1439,10 +1443,12 @@ enum {
    V3DV_BARRIER_GRAPHICS_BIT = (1 << 0),
    V3DV_BARRIER_COMPUTE_BIT  = (1 << 1),
    V3DV_BARRIER_TRANSFER_BIT = (1 << 2),
+   V3DV_BARRIER_CPU_BIT      = (1 << 3),
 };
 #define V3DV_BARRIER_ALL (V3DV_BARRIER_GRAPHICS_BIT | \
                           V3DV_BARRIER_TRANSFER_BIT | \
-                          V3DV_BARRIER_COMPUTE_BIT);
+                          V3DV_BARRIER_COMPUTE_BIT | \
+                          V3DV_BARRIER_CPU_BIT);
 
 struct v3dv_barrier_state {
    /* Mask of V3DV_BARRIER_* indicating where we consume a barrier. */
@@ -1646,8 +1652,14 @@ struct v3dv_query {
          uint32_t offset;
       } occlusion;
 
-      /* Used by CPU queries (timestamp) */
-      uint64_t value;
+      /* Used by timestamp queries */
+      struct {
+         /* Offset of this query in the timestamp BO for its value */
+         uint32_t offset;
+
+         /* Syncobj to signal timestamp query availability */
+         struct vk_sync *sync;
+      } timestamp;
 
       /* Used by performance queries */
       struct v3dv_perf_query perf;
@@ -1679,6 +1691,12 @@ struct v3dv_query_pool {
       /* Offset of the availability info in the BO */
       uint32_t avail_offset;
    } occlusion;
+
+   /* Only used with timestamp queries */
+   struct {
+      /* BO with the query timestamp values */
+      struct v3dv_bo *bo;
+   } timestamp;
 
    /* Only used with performance queries */
    struct {
@@ -2662,7 +2680,7 @@ v3dv_update_image_layout(struct v3dv_device *device,
                          bool disjoint,
                          const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_mod_info);
 
-#ifdef ANDROID
+#if DETECT_OS_ANDROID
 VkResult
 v3dv_gralloc_to_drm_explicit_layout(struct u_gralloc *gralloc,
                                     struct u_gralloc_buffer_handle *in_hnd,
@@ -2675,6 +2693,6 @@ v3dv_import_native_buffer_fd(VkDevice device_h,
                              int dma_buf,
                              const VkAllocationCallbacks *alloc,
                              VkImage image_h);
-#endif /* ANDROID */
+#endif /* DETECT_OS_ANDROID */
 
 #endif /* V3DV_PRIVATE_H */

@@ -92,7 +92,7 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    /* If we use s_sendmsg to set tess factors to all 0 or all 1 instead of writing to the tess
     * factor buffer, we need this at the end of command buffers:
     */
-   if (ctx->gfx_level == GFX11 && ctx->tess_rings) {
+   if ((ctx->gfx_level == GFX11 || ctx->gfx_level == GFX11_5) && ctx->tess_rings) {
       radeon_begin(cs);
       radeon_emit(PKT3(PKT3_EVENT_WRITE, 0, 0));
       radeon_emit(EVENT_TYPE(V_028A90_SQ_NON_EVENT) | EVENT_INDEX(0));
@@ -141,7 +141,7 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
 
    tc_driver_internal_flush_notify(ctx->tc);
    if (fence)
-      ws->fence_reference(fence, ctx->last_gfx_fence);
+      ws->fence_reference(ws, fence, ctx->last_gfx_fence);
 
    ctx->num_gfx_cs_flushes++;
 
@@ -304,7 +304,7 @@ void si_set_tracked_regs_to_clear_state(struct si_context *ctx)
    BITSET_SET_RANGE(ctx->tracked_regs.reg_saved_mask, 0, SI_NUM_TRACKED_CONTEXT_REGS - 1);
 }
 
-void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_vbo_func wrapper,
+void si_install_draw_wrapper(struct si_context *sctx, pipe_draw_func wrapper,
                              pipe_draw_vertex_state_func vstate_wrapper)
 {
    if (wrapper) {

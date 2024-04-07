@@ -33,8 +33,14 @@ static void si_get_small_prim_cull_info(struct si_context *sctx, struct si_small
       line_width = roundf(line_width);
    line_width = MAX2(line_width, 1);
 
-   info.clip_half_line_width[0] = line_width * 0.5 / fabs(info.scale[0]);
-   info.clip_half_line_width[1] = line_width * 0.5 / fabs(info.scale[1]);
+   float half_line_width = line_width * 0.5;
+   if (info.scale[0] == 0 || info.scale[1] == 0) {
+     info.clip_half_line_width[0] = 0;
+     info.clip_half_line_width[1] = 0;
+   } else {
+     info.clip_half_line_width[0] = half_line_width / fabs(info.scale[0]);
+     info.clip_half_line_width[1] = half_line_width / fabs(info.scale[1]);
+   }
 
    /* If the Y axis is inverted (OpenGL default framebuffer), reverse it.
     * This is because the viewport transformation inverts the clip space
@@ -471,8 +477,7 @@ static void si_set_viewport_states(struct pipe_context *pctx, unsigned start_slo
    }
 
    if (start_slot == 0) {
-      ctx->viewport0_y_inverted =
-         -state->scale[1] + state->translate[1] > state->scale[1] + state->translate[1];
+      ctx->viewport0_y_inverted = state->scale[1] < 0;
 
       /* NGG cull state uses the viewport and quant mode. */
       if (ctx->screen->use_ngg_culling)

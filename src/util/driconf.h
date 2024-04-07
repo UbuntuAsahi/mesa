@@ -422,6 +422,10 @@
    DRI_CONF_OPT_B(vk_x11_ensure_min_image_count, def, \
                   "Force the X11 WSI to create at least the number of image specified by the driver in VkSurfaceCapabilitiesKHR::minImageCount")
 
+#define DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(def) \
+   DRI_CONF_OPT_B(vk_x11_ignore_suboptimal, def, \
+                  "Force the X11 WSI to never report VK_SUBOPTIMAL_KHR")
+
 #define DRI_CONF_VK_KHR_PRESENT_WAIT(def) \
    DRI_CONF_OPT_B(vk_khr_present_wait, def, \
                   "Expose VK_KHR_present_wait and id extensions despite them not being implemented for all supported surface types")
@@ -678,6 +682,10 @@
    DRI_CONF_OPT_B(radv_tex_non_uniform, def, \
                   "Always mark texture sample operations as non-uniform.")
 
+#define DRI_CONF_RADV_SSBO_NON_UNIFORM(def) \
+   DRI_CONF_OPT_B(radv_ssbo_non_uniform, def, \
+                  "Always mark SSBO operations as non-uniform.")
+
 #define DRI_CONF_RADV_FLUSH_BEFORE_TIMESTAMP_WRITE(def) \
    DRI_CONF_OPT_B(radv_flush_before_timestamp_write, def, \
                   "Wait for previous commands to finish before writing timestamps")
@@ -709,17 +717,31 @@
 
 #define DRI_CONF_RADV_APP_LAYER() DRI_CONF_OPT_S_NODEF(radv_app_layer, "Select an application layer.")
 
+#define DRI_CONF_RADV_CLEAR_LDS(def) \
+   DRI_CONF_OPT_B(radv_clear_lds, def, "Clear LDS at the end of shaders. Might decrease performance.")
+
+#define DRI_CONF_RADV_FORCE_ACTIVE_ACCEL_STRUCT_LEAVES(def) \
+   DRI_CONF_OPT_B(radv_force_active_accel_struct_leaves, def, \
+                  "Force leaf nodes of acceleration structures to be marked active.")
+
+#define DRI_CONF_RADV_DISABLE_NGG_GS(def) \
+   DRI_CONF_OPT_B(radv_disable_ngg_gs, def, "Disable NGG GS on GFX10/GFX10.3.")
+
 /**
  * \brief ANV specific configuration options
  */
 
 #define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(def) \
-   DRI_CONF_OPT_B(anv_assume_full_subgroups, def, \
-                  "Allow assuming full subgroups requirement even when it's not specified explicitly")
+   DRI_CONF_OPT_I(anv_assume_full_subgroups, def, 0, 32, \
+                  "Allow assuming full subgroups requirement even when it's not specified explicitly and set the given size")
 
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
                   "Ignore sample mask out when having single sampled target")
+
+#define DRI_CONF_ANV_FORCE_FILTER_ADDR_ROUNDING(def) \
+   DRI_CONF_OPT_B(anv_force_filter_addr_rounding, def, \
+                  "Force min/mag filter address rounding to be enabled even for NEAREST sampling")
 
 #define DRI_CONF_ANV_MESH_CONV_PRIM_ATTRS_TO_VERT_ATTRS(def) \
    DRI_CONF_OPT_E(anv_mesh_conv_prim_attrs_to_vert_attrs, def, -2, 2, \
@@ -771,5 +793,8 @@
 
 #define DRI_CONF_DZN_ENABLE_8BIT_LOADS_STORES(def) \
    DRI_CONF_OPT_B(dzn_enable_8bit_loads_stores, def, "Enable VK_KHR_8bit_loads_stores")
+
+#define DRI_CONF_DZN_DISABLE(def) \
+   DRI_CONF_OPT_B(dzn_disable, def, "Fail instance creation")
 
 #endif

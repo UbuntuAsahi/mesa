@@ -159,13 +159,10 @@ nvk_cmd_buffer_new_push(struct nvk_cmd_buffer *cmd)
 }
 
 void
-nvk_cmd_buffer_push_indirect_buffer(struct nvk_cmd_buffer *cmd,
-                                    struct nvk_buffer *buffer,
-                                    uint64_t offset, uint64_t range)
+nvk_cmd_buffer_push_indirect(struct nvk_cmd_buffer *cmd,
+                             uint64_t addr, uint32_t range)
 {
    nvk_cmd_buffer_flush_push(cmd);
-
-   uint64_t addr = nvk_buffer_address(buffer, offset);
 
    struct nvk_cmd_push push = {
       .addr = addr,
@@ -310,6 +307,9 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
+   if (commandBufferCount == 0)
+      return;
+
    nvk_cmd_buffer_flush_push(cmd);
 
    for (uint32_t i = 0; i < commandBufferCount; i++) {
@@ -330,6 +330,27 @@ nvk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
        */
       util_dynarray_append_dynarray(&cmd->pushes, &other->pushes);
    }
+
+   /* From the Vulkan 1.3.275 spec:
+    *
+    *    "When secondary command buffer(s) are recorded to execute on a
+    *    primary command buffer, the secondary command buffer inherits no
+    *    state from the primary command buffer, and all state of the primary
+    *    command buffer is undefined after an execute secondary command buffer
+    *    command is recorded. There is one exception to this rule - if the
+    *    primary command buffer is inside a render pass instance, then the
+    *    render pass and subpass state is not disturbed by executing secondary
+    *    command buffers. For state dependent commands (such as draws and
+    *    dispatches), any state consumed by those commands must not be
+    *    undefined."
+    *
+    * Therefore, it's the client's job to reset all the state in the primary
+    * after the secondary executes.  However, if we're doing any internal
+    * dirty tracking, we may miss the fact that a secondary has messed with
+    * GPU state if we don't invalidate all our internal tracking.
+    */
+   nvk_cmd_invalidate_graphics_state(cmd);
+   nvk_cmd_invalidate_compute_state(cmd);
 }
 
 enum nvk_barrier {
@@ -540,8 +561,10 @@ nvk_CmdBindPipeline(VkCommandBuffer commandBuffer,
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
 
    for (unsigned s = 0; s < ARRAY_SIZE(pipeline->shaders); s++) {
-      if (pipeline->shaders[s].info.slm_size)
-         nvk_device_ensure_slm(dev, pipeline->shaders[s].info.slm_size);
+      if(!pipeline->shaders[s])
+         continue;
+      if (pipeline->shaders[s]->info.slm_size)
+         nvk_device_ensure_slm(dev, pipeline->shaders[s]->info.slm_size);
    }
 
    switch (pipelineBindPoint) {
@@ -573,35 +596,65 @@ nvk_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
    struct nvk_descriptor_state *desc =
       nvk_get_descriptors_state(cmd, pipelineBindPoint);
 
+   /* Fro the Vulkan 1.3.275 spec:
+    *
+    *    "When binding a descriptor set (see Descriptor Set Binding) to
+    *    set number N...
+    *
+    *    If, additionally, the previously bound descriptor set for set
+    *    N was bound using a pipeline layout not compatible for set N,
+    *    then all bindings in sets numbered greater than N are
+    *    disturbed."
+    *
+    * This means that, if some earlier set gets bound in such a way that
+    * it changes set_dynamic_buffer_start[s], this binding is implicitly
+    * invalidated.  Therefore, we can always look at the current value
+    * of set_dynamic_buffer_start[s] as the base of our dynamic buffer
+    * range and it's only our responsibility to adjust all
+    * set_dynamic_buffer_start[p] for p > s as needed.
+    */
+   uint8_t dyn_buffer_start = desc->root.set_dynamic_buffer_start[firstSet];
+
    uint32_t next_dyn_offset = 0;
    for (uint32_t i = 0; i < descriptorSetCount; ++i) {
-      unsigned set_idx = i + firstSet;
+      unsigned s = i + firstSet;
       VK_FROM_HANDLE(nvk_descriptor_set, set, pDescriptorSets[i]);
-      const struct nvk_descriptor_set_layout *set_layout =
-         vk_to_nvk_descriptor_set_layout(pipeline_layout->set_layouts[set_idx]);
 
-      if (desc->sets[set_idx] != set) {
-         desc->root.sets[set_idx] = nvk_descriptor_set_addr(set);
-         desc->sets[set_idx] = set;
-         desc->sets_dirty |= BITFIELD_BIT(set_idx);
+      if (desc->sets[s] != set) {
+         desc->root.sets[s] = nvk_descriptor_set_addr(set);
+         desc->set_sizes[s] = set->size;
+         desc->sets[s] = set;
+         desc->sets_dirty |= BITFIELD_BIT(s);
 
          /* Binding descriptors invalidates push descriptors */
-         desc->push_dirty &= ~BITFIELD_BIT(set_idx);
+         desc->push_dirty &= ~BITFIELD_BIT(s);
       }
 
-      if (set_layout->dynamic_buffer_count > 0) {
-         const uint32_t dynamic_buffer_start =
-            nvk_descriptor_set_layout_dynbuf_start(pipeline_layout, set_idx);
+      desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
 
-         for (uint32_t j = 0; j < set_layout->dynamic_buffer_count; j++) {
-            struct nvk_buffer_address addr = set->dynamic_buffers[j];
-            addr.base_addr += pDynamicOffsets[next_dyn_offset + j];
-            desc->root.dynamic_buffers[dynamic_buffer_start + j] = addr;
+      if (pipeline_layout->set_layouts[s] != NULL) {
+         const struct nvk_descriptor_set_layout *set_layout =
+            vk_to_nvk_descriptor_set_layout(pipeline_layout->set_layouts[s]);
+
+         if (set != NULL && set_layout->dynamic_buffer_count > 0) {
+            for (uint32_t j = 0; j < set_layout->dynamic_buffer_count; j++) {
+               struct nvk_buffer_address addr = set->dynamic_buffers[j];
+               addr.base_addr += pDynamicOffsets[next_dyn_offset + j];
+               desc->root.dynamic_buffers[dyn_buffer_start + j] = addr;
+            }
+            next_dyn_offset += set->layout->dynamic_buffer_count;
          }
-         next_dyn_offset += set->layout->dynamic_buffer_count;
+
+         dyn_buffer_start += set_layout->dynamic_buffer_count;
+      } else {
+         assert(set == NULL);
       }
    }
+   assert(dyn_buffer_start <= NVK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= dynamicOffsetCount);
+
+   for (uint32_t s = firstSet + descriptorSetCount; s < NVK_MAX_SETS; s++)
+      desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -682,6 +735,9 @@ void
 nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
                                       struct nvk_descriptor_state *desc)
 {
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
    VkResult result;
 
    if (!desc->push_dirty)
@@ -692,7 +748,7 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
       uint64_t push_set_addr;
       result = nvk_cmd_buffer_upload_data(cmd, push_set->data,
                                           sizeof(push_set->data),
-                                          NVK_MIN_UBO_ALIGNMENT,
+                                          min_cbuf_alignment,
                                           &push_set_addr);
       if (unlikely(result != VK_SUCCESS)) {
          vk_command_buffer_set_error(&cmd->vk, result);
@@ -700,7 +756,75 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
       }
 
       desc->root.sets[set_idx] = push_set_addr;
+      desc->set_sizes[set_idx] = sizeof(push_set->data);
    }
+}
+
+bool
+nvk_cmd_buffer_get_cbuf_descriptor(struct nvk_cmd_buffer *cmd,
+                                   const struct nvk_descriptor_state *desc,
+                                   const struct nvk_shader *shader,
+                                   const struct nvk_cbuf *cbuf,
+                                   struct nvk_buffer_address *desc_out)
+{
+   switch (cbuf->type) {
+   case NVK_CBUF_TYPE_INVALID:
+      *desc_out = (struct nvk_buffer_address) { .size = 0 };
+      return true;
+
+   case NVK_CBUF_TYPE_ROOT_DESC:
+      unreachable("The caller should handle root descriptors");
+      return false;
+
+   case NVK_CBUF_TYPE_SHADER_DATA:
+      *desc_out = (struct nvk_buffer_address) {
+         .base_addr = shader->data_addr,
+         .size = shader->data_size,
+      };
+      return true;
+
+   case NVK_CBUF_TYPE_DESC_SET:
+      *desc_out = (struct nvk_buffer_address) {
+         .base_addr = desc->root.sets[cbuf->desc_set],
+         .size = desc->set_sizes[cbuf->desc_set],
+      };
+      return true;
+
+   case NVK_CBUF_TYPE_DYNAMIC_UBO: {
+      const uint32_t dyn_start =
+         desc->root.set_dynamic_buffer_start[cbuf->desc_set];
+      *desc_out = desc->root.dynamic_buffers[dyn_start + cbuf->dynamic_idx];
+      return true;
+   }
+
+   case NVK_CBUF_TYPE_UBO_DESC: {
+      if (desc->sets[cbuf->desc_set] != NULL)
+         return false;
+
+      struct nvk_push_descriptor_set *push = desc->push[cbuf->desc_set];
+      if (push == NULL)
+         return false;
+
+      assert(cbuf->desc_offset < NVK_PUSH_DESCRIPTOR_SET_SIZE);
+      void *desc = &push->data[cbuf->desc_offset];
+      *desc_out = *(struct nvk_buffer_address *)desc;
+      return true;
+   }
+
+   default:
+      unreachable("Invalid cbuf type");
+   }
+}
+
+uint64_t
+nvk_cmd_buffer_get_cbuf_descriptor_addr(struct nvk_cmd_buffer *cmd,
+                                        const struct nvk_descriptor_state *desc,
+                                        const struct nvk_cbuf *cbuf)
+{
+   assert(cbuf->type == NVK_CBUF_TYPE_UBO_DESC);
+
+   assert(cbuf->desc_offset < desc->set_sizes[cbuf->desc_set]);
+   return desc->root.sets[cbuf->desc_set] + cbuf->desc_offset;
 }
 
 void

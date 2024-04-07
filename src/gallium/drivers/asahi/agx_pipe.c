@@ -49,6 +49,7 @@
 #include "agx_public.h"
 #include "agx_state.h"
 #include "agx_tilebuffer.h"
+#include "shader_enums.h"
 
 /* Fake values, pending UAPI upstreaming */
 #ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED
@@ -66,6 +67,7 @@ static const struct debug_named_value agx_debug_options[] = {
 #ifndef NDEBUG
    {"dirty",     AGX_DBG_DIRTY,    "Disable dirty tracking"},
 #endif
+   {"compblit",  AGX_DBG_COMPBLIT, "Enable compute blitter"},
    {"precompile",AGX_DBG_PRECOMPILE,"Precompile shaders for shader-db"},
    {"nocompress",AGX_DBG_NOCOMPRESS,"Disable lossless compression"},
    {"nocluster", AGX_DBG_NOCLUSTER,"Disable vertex clustering"},
@@ -76,10 +78,11 @@ static const struct debug_named_value agx_debug_options[] = {
    {"nowc",      AGX_DBG_NOWC,     "Disable write-combining"},
    {"synctvb",   AGX_DBG_SYNCTVB,  "Synchronous TVB growth"},
    {"smalltile", AGX_DBG_SMALLTILE,"Force 16x16 tiles"},
+   {"feedback",  AGX_DBG_FEEDBACK, "Debug feedback loops"},
    {"nomsaa",    AGX_DBG_NOMSAA,   "Force disable MSAA"},
    {"noshadow",  AGX_DBG_NOSHADOW, "Force disable resource shadowing"},
-   {"noclipctrl",AGX_DBG_NOCLIPCTRL,"Disable ARB_clip_control"},
    {"varyings",  AGX_DBG_VARYINGS,  "Validate varying linkage"},
+   {"scratch",   AGX_DBG_SCRATCH,  "Debug scratch memory usage"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -460,7 +463,7 @@ agx_compression_allowed(const struct agx_resource *pres)
     * renderable formats. As framebuffer compression, other formats don't make a
     * ton of sense to compress anyway.
     */
-   if (!agx_pixel_format[pres->base.format].renderable &&
+   if (agx_pixel_format[pres->base.format].renderable == PIPE_FORMAT_NONE &&
        !util_format_is_depth_or_stencil(pres->base.format)) {
       rsrc_debug(pres, "No compression: format not renderable\n");
       return false;
@@ -673,14 +676,13 @@ agx_batch_track_image(struct agx_batch *batch, struct pipe_image_view *image)
    struct agx_resource *rsrc = agx_resource(image->resource);
 
    if (image->shader_access & PIPE_IMAGE_ACCESS_WRITE) {
-      bool is_buffer = rsrc->base.target == PIPE_BUFFER;
-      unsigned level = is_buffer ? 0 : image->u.tex.level;
+      batch->incoherent_writes = true;
 
-      agx_batch_writes(batch, rsrc, level);
-
-      if (is_buffer) {
-         util_range_add(&rsrc->base, &rsrc->valid_buffer_range, 0,
-                        rsrc->base.width0);
+      if (rsrc->base.target == PIPE_BUFFER) {
+         agx_batch_writes_range(batch, rsrc, image->u.buf.offset,
+                                image->u.buf.size);
+      } else {
+         agx_batch_writes(batch, rsrc, image->u.tex.level);
       }
    } else {
       agx_batch_reads(batch, rsrc);
@@ -717,11 +719,11 @@ agx_shadow(struct agx_context *ctx, struct agx_resource *rsrc, bool needs_copy)
       return false;
 
    /* Do not shadow resources that are too large */
-   if (size > MAX_SHADOW_BYTES)
+   if (size > MAX_SHADOW_BYTES && needs_copy)
       return false;
 
    /* Do not shadow resources too much */
-   if (rsrc->shadowed_bytes >= MAX_TOTAL_SHADOW_BYTES)
+   if (rsrc->shadowed_bytes >= MAX_TOTAL_SHADOW_BYTES && needs_copy)
       return false;
 
    rsrc->shadowed_bytes += size;
@@ -801,6 +803,12 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
    if (usage & PIPE_MAP_UNSYNCHRONIZED)
       return;
 
+   /* If the range being accessed is uninitialized, we do not need to sync. */
+   if (rsrc->base.target == PIPE_BUFFER && !(rsrc->bo->flags & AGX_BO_SHARED) &&
+       !util_ranges_intersect(&rsrc->valid_buffer_range, box->x,
+                              box->x + box->width))
+      return;
+
    /* Everything after this needs the context, which is not safe for
     * unsynchronized transfers when we claim
     * PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE.
@@ -814,12 +822,6 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
    if (!(usage & PIPE_MAP_WRITE))
       return;
 
-   /* If the range being written is uninitialized, we do not need to sync. */
-   if (rsrc->base.target == PIPE_BUFFER && !(rsrc->bo->flags & AGX_BO_SHARED) &&
-       !util_ranges_intersect(&rsrc->valid_buffer_range, box->x,
-                              box->x + box->width))
-      return;
-
    /* If there are no readers, we're done. We check at the start to
     * avoid expensive shadowing paths or duplicated checks in this hapyp path.
     */
@@ -828,9 +830,14 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
       return;
    }
 
-   /* There are readers. Try to shadow the resource to avoid a sync */
+   /* There are readers. Try to invalidate the resource to avoid a sync */
+   if ((usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+       agx_shadow(ctx, rsrc, false))
+      return;
+
+   /* Or try to shadow it */
    if (!(rsrc->base.flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
-       agx_shadow(ctx, rsrc, !(usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE)))
+       agx_shadow(ctx, rsrc, true))
       return;
 
    /* Otherwise, we need to sync */
@@ -1302,13 +1309,10 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->cmd_3d_id = cmd_3d_id;
    c->cmd_ta_id = cmd_ta_id;
 
-   c->ppp_ctrl = 0x202;
-
-   /* bit 0 specifies OpenGL clip behaviour. If ARB_clip_control is advertised,
-    * we don't set it and lower in the vertex shader.
+   /* bit 0 specifies OpenGL clip behaviour. Since ARB_clip_control is
+    * advertised, we don't set it and lower in the vertex shader.
     */
-   if (dev->debug & AGX_DBG_NOCLIPCTRL)
-      c->ppp_ctrl |= 0x1;
+   c->ppp_ctrl = 0x202;
 
    c->fb_width = framebuffer->width;
    c->fb_height = framebuffer->height;
@@ -1554,11 +1558,17 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->fragment_sampler_count = c->vertex_sampler_count;
    c->fragment_sampler_max = c->vertex_sampler_max;
 
-   // TODO: optimize
-   c->flags |= ASAHI_RENDER_PROCESS_EMPTY_TILES;
-
-   if (dev->debug & AGX_DBG_SYNCTVB)
-      c->flags |= ASAHI_RENDER_SYNC_TVB_GROWTH;
+   /* If a tile is empty, we do not want to process it, as the redundant
+    * roundtrip of memory-->tilebuffer-->memory wastes a tremendous amount of
+    * memory bandwidth. Any draw marks a tile as non-empty, so we only need to
+    * process empty tiles if the background+EOT programs have a side effect.
+    * This is the case exactly when there is an attachment we are clearing (some
+    * attachment A in clear and in resolve <==> non-empty intersection).
+    *
+    * This case matters a LOT for performance in workloads that split batches.
+    */
+   if (batch->clear & batch->resolve)
+      c->flags |= ASAHI_RENDER_PROCESS_EMPTY_TILES;
 
    for (unsigned i = 0; i < framebuffer->nr_cbufs; ++i) {
       if (!framebuffer->cbufs[i])
@@ -1580,6 +1590,18 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
    c->fragment_attachments = (uint64_t)(uintptr_t)&att->list[0];
    c->fragment_attachment_count = att->count;
+
+   if (batch->vs_scratch) {
+      c->flags |= ASAHI_RENDER_VERTEX_SPILLS;
+      c->vertex_helper_arg = batch->ctx->scratch_vs.buf->ptr.gpu;
+      c->vertex_helper_cfg = batch->vs_preamble_scratch << 16;
+      c->vertex_helper_program = dev->helper->ptr.gpu | 1;
+   }
+   if (batch->fs_scratch) {
+      c->fragment_helper_arg = batch->ctx->scratch_fs.buf->ptr.gpu;
+      c->fragment_helper_cfg = batch->fs_preamble_scratch << 16;
+      c->fragment_helper_program = dev->helper->ptr.gpu | 1;
+   }
 }
 
 /*
@@ -1623,6 +1645,9 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
 
    agx_batch_add_bo(batch, batch->cdm.bo);
 
+   if (batch->cs_scratch)
+      agx_batch_add_bo(batch, ctx->scratch_cs.buf);
+
    unsigned cmdbuf_id = agx_get_global_id(dev);
    unsigned encoder_id = agx_get_global_id(dev);
 
@@ -1632,17 +1657,29 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
       .encoder_end = batch->cdm.bo->ptr.gpu +
                      (batch->cdm.current - (uint8_t *)batch->cdm.bo->ptr.cpu),
       .helper_arg = 0,
-      .helper_unk = 0,
+      .helper_cfg = 0,
       .helper_program = 0,
+      .iogpu_unk_40 = 0,
       .sampler_array =
          batch->sampler_heap.bo ? batch->sampler_heap.bo->ptr.gpu : 0,
       .sampler_count = batch->sampler_heap.count,
       .sampler_max = batch->sampler_heap.count + 1,
       .encoder_id = encoder_id,
       .cmd_id = cmdbuf_id,
-      .iogpu_unk_40 = 0x1c,
       .unk_mask = 0xffffffff,
    };
+
+   if (batch->cs_scratch) {
+      // The commented out lines *may* be related to subgroup-level preemption,
+      // which we can't support without implementing threadgroup memory in the
+      // helper. Disable them for now.
+
+      // cmdbuf->iogpu_unk_40 = 0x1c;
+      cmdbuf->helper_arg = ctx->scratch_cs.buf->ptr.gpu;
+      cmdbuf->helper_cfg = batch->cs_preamble_scratch << 16;
+      // cmdbuf->helper_cfg |= 0x40;
+      cmdbuf->helper_program = dev->helper->ptr.gpu | 1;
+   }
 }
 
 static void
@@ -1650,6 +1687,11 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
                  struct drm_asahi_cmd_render *cmdbuf, struct attachments *att)
 {
    struct agx_device *dev = agx_device(ctx->base.screen);
+
+   if (batch->vs_scratch)
+      agx_batch_add_bo(batch, ctx->scratch_vs.buf);
+   if (batch->fs_scratch)
+      agx_batch_add_bo(batch, ctx->scratch_fs.buf);
 
    assert(batch->initialized);
 
@@ -1688,26 +1730,13 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
     */
    agx_batch_add_bo(batch, batch->vdm.bo);
 
-   /* Occlusion queries are allocated as a contiguous pool */
-   unsigned oq_count =
-      util_dynarray_num_elements(&batch->occlusion_queries, struct agx_query *);
-   size_t oq_size = oq_count * sizeof(uint64_t);
-
-   if (oq_size) {
-      batch->occlusion_buffer =
-         agx_pool_alloc_aligned(&batch->pool, oq_size, 64);
-      memset(batch->occlusion_buffer.cpu, 0, oq_size);
-   } else {
-      batch->occlusion_buffer.gpu = 0;
-   }
-
    unsigned cmd_ta_id = agx_get_global_id(dev);
    unsigned cmd_3d_id = agx_get_global_id(dev);
    unsigned encoder_id = agx_get_global_id(dev);
 
    agx_cmdbuf(dev, cmdbuf, att, &batch->pool, batch, &batch->key,
               batch->vdm.bo->ptr.gpu, encoder_id, cmd_ta_id, cmd_3d_id, scissor,
-              zbias, batch->occlusion_buffer.gpu, pipeline_background,
+              zbias, agx_get_occlusion_heap(batch), pipeline_background,
               pipeline_background_partial, pipeline_store,
               clear_pipeline_textures, batch->clear_depth, batch->clear_stencil,
               &batch->tilebuffer_layout);
@@ -1725,12 +1754,11 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
    bool has_vdm = false, has_cdm = false;
 
    if (batch->cdm.bo) {
-      assert(batch->any_draws && "Compute batches must be nonempty");
       agx_flush_compute(ctx, batch, &compute);
       has_cdm = true;
    }
 
-   if (batch->vdm.bo && (batch->clear || batch->any_draws)) {
+   if (batch->vdm.bo && (batch->clear || batch->initialized)) {
       agx_flush_render(ctx, batch, &render, &att);
       has_vdm = true;
    }
@@ -1766,6 +1794,7 @@ agx_destroy_context(struct pipe_context *pctx)
    util_unreference_framebuffer_state(&ctx->framebuffer);
 
    agx_meta_cleanup(&ctx->meta);
+   agx_destroy_meta_shaders(ctx);
 
    agx_bo_unreference(ctx->result_buf);
 
@@ -1778,6 +1807,12 @@ agx_destroy_context(struct pipe_context *pctx)
       if (ctx->batches.slots[i].syncobj)
          drmSyncobjDestroy(dev->fd, ctx->batches.slots[i].syncobj);
    }
+
+   pipe_resource_reference(&ctx->heap, NULL);
+
+   agx_scratch_fini(&ctx->scratch_vs);
+   agx_scratch_fini(&ctx->scratch_fs);
+   agx_scratch_fini(&ctx->scratch_cs);
 
    ralloc_free(ctx);
 }
@@ -1801,11 +1836,12 @@ agx_invalidate_resource(struct pipe_context *pctx,
    }
 }
 
-static void
-agx_memory_barrier(struct pipe_context *pctx, unsigned flags)
+static enum pipe_reset_status
+asahi_get_device_reset_status(struct pipe_context *pipe)
 {
-   /* Be conservative for now, we can try to optimize this more later */
-   agx_flush_all(agx_context(pctx), "Memory barrier");
+   struct agx_context *ctx = agx_context(pipe);
+
+   return ctx->any_faults ? PIPE_GUILTY_CONTEXT_RESET : PIPE_NO_RESET;
 }
 
 static struct pipe_context *
@@ -1855,11 +1891,14 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->create_fence_fd = agx_create_fence_fd;
    pctx->fence_server_sync = agx_fence_server_sync;
 
+   pctx->get_device_reset_status = asahi_get_device_reset_status;
+
    agx_init_state_functions(pctx);
    agx_init_query_functions(pctx);
    agx_init_streamout_functions(pctx);
 
    agx_meta_init(&ctx->meta, agx_device(screen));
+   agx_init_meta_shaders(ctx);
 
    ctx->blitter = util_blitter_create(pctx);
 
@@ -1884,6 +1923,11 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ctx->sample_mask = ~0;
 
    ctx->support_lod_bias = !(flags & PIPE_CONTEXT_NO_LOD_BIAS);
+   ctx->robust = (flags & PIPE_CONTEXT_ROBUST_BUFFER_ACCESS);
+
+   agx_scratch_init(agx_device(screen), &ctx->scratch_vs);
+   agx_scratch_init(agx_device(screen), &ctx->scratch_fs);
+   agx_scratch_init(agx_device(screen), &ctx->scratch_cs);
 
    return pctx;
 }
@@ -1914,6 +1958,7 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    struct agx_device *dev = agx_device(pscreen);
 
    switch (param) {
+   case PIPE_CAP_CLIP_HALFZ:
    case PIPE_CAP_NPOT_TEXTURES:
    case PIPE_CAP_SHADER_STENCIL_EXPORT:
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
@@ -1927,10 +1972,9 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FS_FINE_DERIVATIVE:
    case PIPE_CAP_CULL_DISTANCE_NOCOMBINE:
    case PIPE_CAP_NIR_COMPACT_ARRAYS:
+   case PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS:
+   case PIPE_CAP_DOUBLES:
       return 1;
-
-   case PIPE_CAP_CLIP_HALFZ:
-      return !(agx_device(pscreen)->debug & AGX_DBG_NOCLIPCTRL);
 
    case PIPE_CAP_MAX_RENDER_TARGETS:
    case PIPE_CAP_FBFETCH:
@@ -1942,10 +1986,12 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_OCCLUSION_QUERY:
    case PIPE_CAP_QUERY_TIMESTAMP:
    case PIPE_CAP_QUERY_TIME_ELAPSED:
+   case PIPE_CAP_QUERY_SO_OVERFLOW:
    case PIPE_CAP_PRIMITIVE_RESTART:
    case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
    case PIPE_CAP_ANISOTROPIC_FILTER:
    case PIPE_CAP_NATIVE_FENCE_FD:
+   case PIPE_CAP_TEXTURE_BARRIER:
       return true;
 
    case PIPE_CAP_TIMER_RESOLUTION:
@@ -1985,6 +2031,8 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_MULTI_DRAW_INDIRECT:
    case PIPE_CAP_MULTI_DRAW_INDIRECT_PARAMS:
    case PIPE_CAP_CULL_DISTANCE:
+   case PIPE_CAP_GL_SPIRV:
+   case PIPE_CAP_POLYGON_OFFSET_CLAMP:
       return 1;
    case PIPE_CAP_SURFACE_SAMPLE_COUNT:
       /* TODO: MSRTT */
@@ -1994,7 +2042,7 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 1;
 
    case PIPE_CAP_COPY_BETWEEN_COMPRESSED_AND_PLAIN_FORMATS:
-      return 0;
+      return 1;
 
    case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
       return PIPE_MAX_SO_BUFFERS;
@@ -2012,7 +2060,7 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    case PIPE_CAP_GLSL_FEATURE_LEVEL:
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
-      return 410;
+      return 460;
    case PIPE_CAP_ESSL_FEATURE_LEVEL:
       return 320;
 
@@ -2036,6 +2084,9 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    case PIPE_CAP_VERTEX_ATTRIB_ELEMENT_ALIGNED_ONLY:
       return 1;
+
+   case PIPE_CAP_QUERY_PIPELINE_STATISTICS_SINGLE:
+      return true;
 
    case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
       return 16384;
@@ -2066,6 +2117,10 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_ENDIANNESS:
       return PIPE_ENDIAN_LITTLE;
 
+   case PIPE_CAP_SHADER_GROUP_VOTE:
+   case PIPE_CAP_SHADER_BALLOT:
+      return true;
+
    case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
       return 4;
    case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
@@ -2074,6 +2129,8 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 7;
    case PIPE_CAP_DRAW_INDIRECT:
    case PIPE_CAP_TEXTURE_QUERY_SAMPLES:
+   case PIPE_CAP_TEXTURE_QUERY_LOD:
+   case PIPE_CAP_TEXTURE_SHADOW_LOD:
       return true;
 
    case PIPE_CAP_MAX_VIEWPORTS:
@@ -2088,10 +2145,17 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return (int)(system_memory >> 20);
    }
 
+   case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
+   case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
+      return true;
+
    case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
       return 4;
 
+   case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
+      return 32;
    case PIPE_CAP_MAX_VARYINGS:
+      /* TODO: Probably should bump to 32? */
       return 16;
 
    case PIPE_CAP_FLATSHADE:
@@ -2100,6 +2164,9 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CLIP_PLANES:
    case PIPE_CAP_NIR_IMAGES_AS_DEREF:
       return 0;
+
+   case PIPE_CAP_QUERY_BUFFER_OBJECT:
+      return true;
 
    case PIPE_CAP_TEXTURE_BORDER_COLOR_QUIRK:
       return PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO;
@@ -2115,12 +2182,14 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
              BITFIELD_BIT(MESA_PRIM_LINES_ADJACENCY) |
              BITFIELD_BIT(MESA_PRIM_LINE_STRIP_ADJACENCY) |
              BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
-             BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY);
+             BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
+             BITFIELD_BIT(MESA_PRIM_PATCHES);
 
    case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
       return 1;
 
    case PIPE_CAP_VS_LAYER_VIEWPORT:
+   case PIPE_CAP_TES_LAYER_VIEWPORT:
       return true;
 
    default:
@@ -2178,16 +2247,12 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
    case PIPE_SHADER_FRAGMENT:
    case PIPE_SHADER_COMPUTE:
    case PIPE_SHADER_GEOMETRY:
+   case PIPE_SHADER_TESS_CTRL:
+   case PIPE_SHADER_TESS_EVAL:
       break;
    default:
       return false;
    }
-
-   /* Don't allow side effects with vertex processing. The APIs don't require it
-    * and it may be problematic on our hardware.
-    */
-   bool allow_side_effects =
-      (shader == PIPE_SHADER_FRAGMENT) || (shader == PIPE_SHADER_COMPUTE);
 
    /* this is probably not totally correct.. but it's a start: */
    switch (param) {
@@ -2204,8 +2269,12 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
       return shader == PIPE_SHADER_VERTEX ? 16 : 32;
 
    case PIPE_SHADER_CAP_MAX_OUTPUTS:
+      /* For vertex, the spec min/max is 16. We need more to handle dmat3
+       * correctly, though. The full 32 is undesirable since it would require
+       * shenanigans to handle.
+       */
       return shader == PIPE_SHADER_FRAGMENT ? 8
-             : shader == PIPE_SHADER_VERTEX ? 16
+             : shader == PIPE_SHADER_VERTEX ? 24
                                             : 32;
 
    case PIPE_SHADER_CAP_MAX_TEMPS:
@@ -2221,12 +2290,16 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
       return 1;
 
    case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
+      return shader == PIPE_SHADER_TESS_CTRL || shader == PIPE_SHADER_TESS_EVAL;
+
    case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
+      return shader == PIPE_SHADER_TESS_CTRL;
+
    case PIPE_SHADER_CAP_SUBROUTINES:
    case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
       return 0;
 
+   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
    case PIPE_SHADER_CAP_INTEGERS:
       return true;
@@ -2234,10 +2307,13 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
    case PIPE_SHADER_CAP_FP16:
    case PIPE_SHADER_CAP_GLSL_16BIT_CONSTS:
    case PIPE_SHADER_CAP_FP16_DERIVATIVES:
-   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
       return !is_no16;
    case PIPE_SHADER_CAP_INT16:
       /* GLSL compiler is broken. Flip this on when Panfrost does. */
+      return false;
+   case PIPE_SHADER_CAP_FP16_CONST_BUFFERS:
+      /* This cap is broken, see 9a38dab2d18 ("zink: disable
+       * PIPE_SHADER_CAP_FP16_CONST_BUFFERS") */
       return false;
 
    case PIPE_SHADER_CAP_INT64_ATOMICS:
@@ -2245,7 +2321,13 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
       return 0;
 
    case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-      return 16;
+      /* TODO: Enable when fully baked */
+      if (strcmp(util_get_process_name(), "blender") == 0)
+         return PIPE_MAX_SAMPLERS;
+      else if (strcasestr(util_get_process_name(), "ryujinx") != NULL)
+         return PIPE_MAX_SAMPLERS;
+      else
+         return 16;
 
    case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
       return PIPE_MAX_SHADER_SAMPLER_VIEWS;
@@ -2254,10 +2336,10 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
       return (1 << PIPE_SHADER_IR_NIR);
 
    case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return allow_side_effects ? PIPE_MAX_SHADER_BUFFERS : 0;
+      return PIPE_MAX_SHADER_BUFFERS;
 
    case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return allow_side_effects ? PIPE_MAX_SHADER_IMAGES : 0;
+      return PIPE_MAX_SHADER_IMAGES;
 
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
    case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
@@ -2298,10 +2380,10 @@ agx_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
       RET(((uint64_t[]){65535, 65535, 65535}));
 
    case PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE:
-      RET(((uint64_t[]){256, 256, 256}));
+      RET(((uint64_t[]){1024, 1024, 1024}));
 
    case PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK:
-      RET((uint64_t[]){256});
+      RET((uint64_t[]){1024});
 
    case PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE:
    case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE: {
@@ -2572,6 +2654,10 @@ agx_screen_create(int fd, struct renderonly *ro,
       ralloc_free(agx_screen);
       return NULL;
    }
+
+   agx_screen->queue_id = agx_create_command_queue(
+      &agx_screen->dev, DRM_ASAHI_QUEUE_CAP_RENDER | DRM_ASAHI_QUEUE_CAP_BLIT |
+                           DRM_ASAHI_QUEUE_CAP_COMPUTE);
 
    screen->destroy = agx_destroy_screen;
    screen->get_screen_fd = agx_screen_get_fd;

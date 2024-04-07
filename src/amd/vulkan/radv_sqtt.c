@@ -88,7 +88,7 @@ radv_emit_wait_for_idle(const struct radv_device *device, struct radeon_cmdbuf *
 {
    const enum radv_queue_family qf = radv_ip_to_queue_family(family);
    enum rgp_flush_bits sqtt_flush_bits = 0;
-   si_cs_emit_cache_flush(
+   radv_cs_emit_cache_flush(
       device->ws, cs, device->physical_device->rad_info.gfx_level, NULL, 0, qf,
       (family == RADV_QUEUE_COMPUTE ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
                                     : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
@@ -997,17 +997,17 @@ radv_get_calibrated_timestamps(struct radv_device *device, uint64_t *cpu_timesta
    uint64_t max_deviation;
    VkResult result;
 
-   const VkCalibratedTimestampInfoEXT timestamp_infos[2] = {{
-                                                               .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
-                                                               .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT,
+   const VkCalibratedTimestampInfoKHR timestamp_infos[2] = {{
+                                                               .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR,
+                                                               .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR,
                                                             },
                                                             {
-                                                               .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
-                                                               .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT,
+                                                               .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR,
+                                                               .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR,
                                                             }};
 
    result =
-      radv_GetCalibratedTimestampsEXT(radv_device_to_handle(device), 2, timestamp_infos, timestamps, &max_deviation);
+      radv_GetCalibratedTimestampsKHR(radv_device_to_handle(device), 2, timestamp_infos, timestamps, &max_deviation);
    if (result != VK_SUCCESS)
       return result;
 

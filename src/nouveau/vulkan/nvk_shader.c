@@ -66,7 +66,7 @@ nvk_nak_stages(const struct nv_device_info *info)
 
    const char *env_str = getenv("NVK_USE_NAK");
    if (env_str == NULL)
-      return info->cls_eng3d >= TURING_A ? all : 0;
+      return info->cls_eng3d >= VOLTA_A ? all : 0;
    else
       return parse_debug_string(env_str, flags);
 }
@@ -80,18 +80,20 @@ use_nak(const struct nvk_physical_device *pdev, gl_shader_stage stage)
 uint64_t
 nvk_physical_device_compiler_flags(const struct nvk_physical_device *pdev)
 {
+   bool no_cbufs = pdev->debug_flags & NVK_DEBUG_NO_CBUF;
    uint64_t prog_debug = nvk_cg_get_prog_debug();
    uint64_t prog_optimize = nvk_cg_get_prog_optimize();
    uint64_t nak_stages = nvk_nak_stages(&pdev->info);
    uint64_t nak_flags = nak_debug_flags(pdev->nak);
 
    assert(prog_debug <= UINT8_MAX);
-   assert(prog_optimize <= UINT8_MAX);
+   assert(prog_optimize < 16);
    assert(nak_stages <= UINT32_MAX);
    assert(nak_flags <= UINT16_MAX);
 
    return prog_debug
       | (prog_optimize << 8)
+      | ((uint64_t)no_cbufs << 12)
       | (nak_stages << 16)
       | (nak_flags << 48);
 }
@@ -119,6 +121,7 @@ nvk_physical_device_spirv_options(const struct nvk_physical_device *pdev,
          .device_group = true,
          .draw_parameters = true,
          .float_controls = true,
+         .float64 = true,
          .fragment_barycentric = true,
          .geometry_streams = true,
          .image_atomic_int64 = true,
@@ -133,6 +136,7 @@ nvk_physical_device_spirv_options(const struct nvk_physical_device *pdev,
          .physical_storage_buffer_address = true,
          .runtime_descriptor_array = true,
          .shader_clock = true,
+         .shader_sm_builtins_nv = true,
          .shader_viewport_index_layer = true,
          .storage_8bit = true,
          .storage_16bit = true,
@@ -145,6 +149,8 @@ nvk_physical_device_spirv_options(const struct nvk_physical_device *pdev,
          .tessellation = true,
          .transform_feedback = true,
          .variable_pointers = true,
+         .vk_memory_model_device_scope = true,
+         .vk_memory_model = true,
          .workgroup_memory_explicit_layout = true,
       },
       .ssbo_addr_format = nvk_buffer_addr_format(rs->storage_buffers),
@@ -152,7 +158,7 @@ nvk_physical_device_spirv_options(const struct nvk_physical_device *pdev,
       .ubo_addr_format = nvk_buffer_addr_format(rs->uniform_buffers),
       .shared_addr_format = nir_address_format_32bit_offset,
       .min_ssbo_alignment = NVK_MIN_SSBO_ALIGNMENT,
-      .min_ubo_alignment = NVK_MIN_UBO_ALIGNMENT,
+      .min_ubo_alignment = nvk_min_cbuf_alignment(&pdev->info),
    };
 }
 
@@ -297,7 +303,8 @@ void
 nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
               const struct vk_pipeline_robustness_state *rs,
               bool is_multiview,
-              const struct vk_pipeline_layout *layout)
+              const struct vk_pipeline_layout *layout,
+              struct nvk_cbuf_map *cbuf_map_out)
 {
    struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
@@ -348,7 +355,29 @@ nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
     */
    assert(dev->pdev->info.cls_eng3d >= MAXWELL_A || !nir_has_image_var(nir));
 
-   NIR_PASS(_, nir, nvk_nir_lower_descriptors, rs, layout);
+   struct nvk_cbuf_map *cbuf_map = NULL;
+   if (use_nak(pdev, nir->info.stage) &&
+       !(pdev->debug_flags & NVK_DEBUG_NO_CBUF)) {
+      cbuf_map = cbuf_map_out;
+
+      /* Large constant support assumes cbufs */
+      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   } else {
+      /* Codegen sometimes puts stuff in cbuf 1 and adds 1 to our cbuf indices
+       * so we can't really rely on it for lowering to cbufs and instead place
+       * the root descriptors in both cbuf 0 and cbuf 1.
+       */
+      *cbuf_map_out = (struct nvk_cbuf_map) {
+         .cbuf_count = 2,
+         .cbufs = {
+            { .type = NVK_CBUF_TYPE_ROOT_DESC },
+            { .type = NVK_CBUF_TYPE_ROOT_DESC },
+         }
+      };
+   }
+
+   NIR_PASS(_, nir, nvk_nir_lower_descriptors, rs,
+            layout->set_count, layout->set_layouts, cbuf_map);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
@@ -364,6 +393,21 @@ nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
    }
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared,
             nir_address_format_32bit_offset);
+
+   if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+      /* QMD::SHARED_MEMORY_SIZE requires an alignment of 256B so it's safe to
+       * align everything up to 16B so we can write whole vec4s.
+       */
+      nir->info.shared_size = align(nir->info.shared_size, 16);
+      NIR_PASS(_, nir, nir_zero_initialize_shared_memory,
+               nir->info.shared_size, 16);
+
+      /* We need to call lower_compute_system_values again because
+       * nir_zero_initialize_shared_memory generates load_invocation_id which
+       * has to be lowered to load_invocation_index.
+       */
+      NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+   }
 }
 
 #ifndef NDEBUG
@@ -414,19 +458,64 @@ nvk_compile_nir_with_nak(struct nvk_physical_device *pdev,
    return VK_SUCCESS;
 }
 
+struct nvk_shader *
+nvk_shader_init(struct nvk_device *dev, const void *key_data, size_t key_size)
+{
+   VK_MULTIALLOC(ma);
+   VK_MULTIALLOC_DECL(&ma, struct nvk_shader, shader, 1);
+   VK_MULTIALLOC_DECL_SIZE(&ma, char, obj_key_data, key_size);
+
+   if (!vk_multialloc_zalloc(&ma, &dev->vk.alloc,
+                             VK_SYSTEM_ALLOCATION_SCOPE_DEVICE))
+      return NULL;
+
+   memcpy(obj_key_data, key_data, key_size);
+
+   vk_pipeline_cache_object_init(&dev->vk, &shader->base,
+                                 &nvk_shader_ops, obj_key_data, key_size);
+
+   return shader;
+}
+
 VkResult
-nvk_compile_nir(struct nvk_physical_device *pdev, nir_shader *nir,
+nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
                 VkPipelineCreateFlagBits2KHR pipeline_flags,
                 const struct vk_pipeline_robustness_state *rs,
                 const struct nak_fs_key *fs_key,
+                struct vk_pipeline_cache *cache,
                 struct nvk_shader *shader)
 {
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   VkResult result;
+
    if (use_nak(pdev, nir->info.stage)) {
-      return nvk_compile_nir_with_nak(pdev, nir, pipeline_flags, rs,
-                                      fs_key, shader);
+      result = nvk_compile_nir_with_nak(pdev, nir, pipeline_flags, rs,
+                                       fs_key, shader);
    } else {
-      return nvk_cg_compile_nir(pdev, nir, fs_key, shader);
+      result = nvk_cg_compile_nir(pdev, nir, fs_key, shader);
    }
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (nir->constant_data_size > 0) {
+      uint32_t data_align = nvk_min_cbuf_alignment(&dev->pdev->info);
+      uint32_t data_size = align(nir->constant_data_size, data_align);
+
+      void *data = malloc(data_size);
+      if (data == NULL)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+      memcpy(data, nir->constant_data, nir->constant_data_size);
+
+      assert(nir->constant_data_size <= data_size);
+      memset(data + nir->constant_data_size, 0,
+             data_size - nir->constant_data_size);
+
+      shader->data_ptr = data;
+      shader->data_size = data_size;
+   }
+
+   return VK_SUCCESS;
 }
 
 VkResult
@@ -444,23 +533,40 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
     * Kepler+ needs the first instruction to be 0x80 aligned, so we waste 0x30 bytes
     */
    int alignment = dev->pdev->info.cls_eng3d >= KEPLER_A ? 0x80 : 0x40;
-   int offset = 0;
 
+   uint32_t total_size = 0;
    if (dev->pdev->info.cls_eng3d >= KEPLER_A &&
        dev->pdev->info.cls_eng3d < TURING_A &&
        hdr_size > 0) {
-      /* offset will be 0x30 */
-      offset = alignment - hdr_size;
+      /* The instructions are what has to be aligned so we need to start at a
+       * small offset (0x30 B) into the upload area.
+       */
+      total_size = alignment - hdr_size;
    }
 
-   uint32_t total_size = shader->code_size + hdr_size + offset;
+   const uint32_t hdr_offset = total_size;
+   total_size += hdr_size;
+
+   const uint32_t code_offset = total_size;
+   assert(code_offset % alignment == 0);
+   total_size += shader->code_size;
+
+   uint32_t data_offset = 0;
+   if (shader->data_size > 0) {
+      total_size = align(total_size, nvk_min_cbuf_alignment(&dev->pdev->info));
+      data_offset = total_size;
+      total_size += shader->data_size;
+   }
+
    char *data = malloc(total_size);
    if (data == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    assert(hdr_size <= sizeof(shader->info.hdr));
-   memcpy(data + offset, shader->info.hdr, hdr_size);
-   memcpy(data + offset + hdr_size, shader->code_ptr, shader->code_size);
+   memcpy(data + hdr_offset, shader->info.hdr, hdr_size);
+   memcpy(data + code_offset, shader->code_ptr, shader->code_size);
+   if (shader->data_size > 0)
+      memcpy(data + data_offset, shader->data_ptr, shader->data_size);
 
 #ifndef NDEBUG
    if (debug_get_bool_option("NV50_PROG_DEBUG", false))
@@ -468,10 +574,19 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
 #endif
 
    VkResult result = nvk_heap_upload(dev, &dev->shader_heap, data,
-                                     total_size, alignment, &shader->upload_addr);
+                                     total_size, alignment,
+                                     &shader->upload_addr);
    if (result == VK_SUCCESS) {
       shader->upload_size = total_size;
-      shader->upload_padding = offset;
+
+      shader->hdr_addr = shader->upload_addr + hdr_offset;
+      if (dev->pdev->info.cls_eng3d < VOLTA_A) {
+         const uint64_t heap_base_addr =
+            nvk_heap_contiguous_base_address(&dev->shader_heap);
+         assert(shader->upload_addr - heap_base_addr < UINT32_MAX);
+         shader->hdr_addr -= heap_base_addr;
+      }
+      shader->data_addr = shader->upload_addr + data_offset;
    }
    free(data);
 
@@ -481,12 +596,145 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
 void
 nvk_shader_finish(struct nvk_device *dev, struct nvk_shader *shader)
 {
+   if (shader == NULL)
+      return;
+
    if (shader->upload_size > 0) {
       nvk_heap_free(dev, &dev->shader_heap,
                     shader->upload_addr,
                     shader->upload_size);
    }
 
-   if (shader->nak)
+   if (shader->nak) {
       nak_shader_bin_destroy(shader->nak);
+   } else {
+      /* This came from codegen or deserialize, just free it */
+      free((void *)shader->code_ptr);
+   }
+
+   free((void *)shader->data_ptr);
+
+   vk_free(&dev->vk.alloc, shader);
+}
+
+void
+nvk_hash_shader(unsigned char *hash,
+                const VkPipelineShaderStageCreateInfo *sinfo,
+                const struct vk_pipeline_robustness_state *rs,
+                bool is_multiview,
+                const struct vk_pipeline_layout *layout,
+                const struct nak_fs_key *fs_key)
+{
+   struct mesa_sha1 ctx;
+
+   _mesa_sha1_init(&ctx);
+
+   unsigned char stage_sha1[SHA1_DIGEST_LENGTH];
+   vk_pipeline_hash_shader_stage(sinfo, rs, stage_sha1);
+
+   _mesa_sha1_update(&ctx, stage_sha1, sizeof(stage_sha1));
+
+   _mesa_sha1_update(&ctx, &is_multiview, sizeof(is_multiview));
+
+   if (layout) {
+      _mesa_sha1_update(&ctx, &layout->create_flags,
+                        sizeof(layout->create_flags));
+      _mesa_sha1_update(&ctx, &layout->set_count, sizeof(layout->set_count));
+      for (int i = 0; i < layout->set_count; i++) {
+         struct nvk_descriptor_set_layout *set =
+            vk_to_nvk_descriptor_set_layout(layout->set_layouts[i]);
+         _mesa_sha1_update(&ctx, &set->sha1, sizeof(set->sha1));
+      }
+   }
+
+   if(fs_key)
+      _mesa_sha1_update(&ctx, fs_key, sizeof(*fs_key));
+
+   _mesa_sha1_final(&ctx, hash);
+}
+
+static bool
+nvk_shader_serialize(struct vk_pipeline_cache_object *object,
+                     struct blob *blob);
+
+static struct vk_pipeline_cache_object *
+nvk_shader_deserialize(struct vk_pipeline_cache *cache,
+                       const void *key_data,
+                       size_t key_size,
+                       struct blob_reader *blob);
+
+void
+nvk_shader_destroy(struct vk_device *_dev,
+                   struct vk_pipeline_cache_object *object)
+{
+   struct nvk_device *dev =
+      container_of(_dev, struct nvk_device, vk);
+   struct nvk_shader *shader =
+      container_of(object, struct nvk_shader, base);
+
+   nvk_shader_finish(dev, shader);
+}
+
+const struct vk_pipeline_cache_object_ops nvk_shader_ops = {
+   .serialize = nvk_shader_serialize,
+   .deserialize = nvk_shader_deserialize,
+   .destroy = nvk_shader_destroy,
+};
+
+static bool
+nvk_shader_serialize(struct vk_pipeline_cache_object *object,
+                     struct blob *blob)
+{
+   struct nvk_shader *shader =
+      container_of(object, struct nvk_shader, base);
+
+   blob_write_bytes(blob, &shader->info, sizeof(shader->info));
+   blob_write_bytes(blob, &shader->cbuf_map, sizeof(shader->cbuf_map));
+   blob_write_uint32(blob, shader->code_size);
+   blob_write_bytes(blob, shader->code_ptr, shader->code_size);
+   blob_write_uint32(blob, shader->data_size);
+   blob_write_bytes(blob, shader->data_ptr, shader->data_size);
+
+   return true;
+}
+
+static struct vk_pipeline_cache_object *
+nvk_shader_deserialize(struct vk_pipeline_cache *cache,
+                       const void *key_data,
+                       size_t key_size,
+                       struct blob_reader *blob)
+{
+   struct nvk_device *dev =
+      container_of(cache->base.device, struct nvk_device, vk);
+   struct nvk_shader *shader =
+      nvk_shader_init(dev, key_data, key_size);
+
+   if (!shader)
+      return NULL;
+
+   blob_copy_bytes(blob, &shader->info, sizeof(shader->info));
+   blob_copy_bytes(blob, &shader->cbuf_map, sizeof(shader->cbuf_map));
+
+   shader->code_size = blob_read_uint32(blob);
+   void *code_ptr = malloc(shader->code_size);
+   if (!code_ptr)
+      goto fail;
+
+   blob_copy_bytes(blob, code_ptr, shader->code_size);
+   shader->code_ptr = code_ptr;
+
+   shader->data_size = blob_read_uint32(blob);
+   void *data_ptr = malloc(shader->data_size);
+   if (!data_ptr)
+      goto fail;
+
+   blob_copy_bytes(blob, data_ptr, shader->data_size);
+   shader->data_ptr = data_ptr;
+
+   return &shader->base;
+
+fail:
+   /* nvk_shader_destroy frees both shader and shader->xfb */
+   nvk_shader_destroy(cache->base.device, &shader->base);
+   return NULL;
 }

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define DRM_ASAHI_UNSTABLE_UABI_VERSION		10009
+#define DRM_ASAHI_UNSTABLE_UABI_VERSION		10010
 
 #define DRM_ASAHI_GET_PARAMS			0x00
 #define DRM_ASAHI_VM_CREATE			0x01
@@ -330,7 +330,7 @@ struct drm_asahi_attachment {
 
 #define ASAHI_RENDER_NO_CLEAR_PIPELINE_TEXTURES (1UL << 0)
 #define ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S (1UL << 1)
-#define ASAHI_RENDER_SYNC_TVB_GROWTH (1UL << 2)
+#define ASAHI_RENDER_VERTEX_SPILLS (1UL << 2)
 #define ASAHI_RENDER_PROCESS_EMPTY_TILES (1UL << 3)
 #define ASAHI_RENDER_NO_VERTEX_CLUSTERING (1UL << 4)
 #define ASAHI_RENDER_MSAA_ZS (1UL << 5)
@@ -352,6 +352,8 @@ struct drm_asahi_cmd_render {
 
 	__u32 vertex_helper_program;
 	__u32 fragment_helper_program;
+	__u32 vertex_helper_cfg;
+	__u32 fragment_helper_cfg;
 	__u64 vertex_helper_arg;
 	__u64 fragment_helper_arg;
 
@@ -446,7 +448,7 @@ struct drm_asahi_cmd_render {
 #define ASAHI_RENDER_UNK_SET_LOAD_BGOBJVALS	(1UL << 23)
 #define ASAHI_RENDER_UNK_SET_FRG_UNK_38		(1UL << 24)
 #define ASAHI_RENDER_UNK_SET_FRG_UNK_3C		(1UL << 25)
-#define ASAHI_RENDER_UNK_SET_FRG_UNK_40		(1UL << 26)
+
 #define ASAHI_RENDER_UNK_SET_RELOAD_ZLSCTRL	(1UL << 27)
 #define ASAHI_RENDER_UNK_SET_UNK_BUF_10		(1UL << 28)
 #define ASAHI_RENDER_UNK_SET_FRG_UNK_MASK	(1UL << 29)
@@ -483,7 +485,6 @@ struct drm_asahi_cmd_render_unknowns {
 	__u64 load_bgobjvals;
 	__u64 frg_unk_38;
 	__u64 frg_unk_3c;
-	__u64 frg_unk_40;
 	__u64 reload_zlsctrl;
 	__u64 unk_buf_10;
 	__u64 frg_unk_mask;
@@ -512,7 +513,7 @@ struct drm_asahi_cmd_compute {
 	__u32 pad;
 
 	__u32 helper_program;
-	__u32 helper_unk; /* ? */
+	__u32 helper_cfg;
 	__u64 helper_arg;
 
 	__u32 encoder_id;
