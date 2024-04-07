@@ -1,3 +1,12 @@
+mesa (24.1.0~git20240228.eebfe84-1asahi1) unstable; urgency=medium
+
+  * Change VCS URLs
+  * Build with rust-linux and LLVM 16
+  * Build with meson >= 1.4.0
+  * Build the Asahi driver on i386, amd64 and arm64
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sun, 07 Apr 2024 21:00:18 +0200
+
 mesa (24.1.0~git20240301-1) UNRELEASED; urgency=medium
 
   * New upstream snapshot.
