@@ -30,6 +30,14 @@ mesa (24.0.0-2) experimental; urgency=medium
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 08 Feb 2024 17:20:59 +0200
 
+mesa (24.0.0~git20231210.bc4fa49-1asahi1) testing; urgency=medium
+
+  * Build the Asahi driver on i386, amd64 and arm64
+  * Build using LLVM 16, rustc 1.68.2 and bindgen 0.62
+  * Change VCS URLs
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Tue, 06 Feb 2024 14:45:25 +0100
+
 mesa (24.0.0-1) experimental; urgency=medium
 
   * New upstream release. (Closes: #1059782)
