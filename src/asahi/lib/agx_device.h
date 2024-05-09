@@ -141,7 +141,8 @@ agx_lookup_bo(struct agx_device *dev, uint32_t handle)
 
 uint64_t agx_get_global_id(struct agx_device *dev);
 
-uint32_t agx_create_command_queue(struct agx_device *dev, uint32_t caps);
+uint32_t agx_create_command_queue(struct agx_device *dev, uint32_t caps,
+                                  uint32_t priority);
 int agx_destroy_command_queue(struct agx_device *dev, uint32_t queue_id);
 
 int agx_import_sync_file(struct agx_device *dev, struct agx_bo *bo, int fd);

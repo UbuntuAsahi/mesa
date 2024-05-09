@@ -1815,10 +1815,19 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    }
    pctx->const_uploader = pctx->stream_uploader;
 
+   uint32_t priority = 2;
+   if (flags & PIPE_CONTEXT_PRIORITY_LOW)
+      priority = 3;
+   else if (flags & PIPE_CONTEXT_PRIORITY_MEDIUM)
+      priority = 2;
+   else if (flags & PIPE_CONTEXT_PRIORITY_HIGH)
+      priority = 1;
+
    ctx->queue_id = agx_create_command_queue(agx_device(screen),
                                             DRM_ASAHI_QUEUE_CAP_RENDER |
                                                DRM_ASAHI_QUEUE_CAP_BLIT |
-                                               DRM_ASAHI_QUEUE_CAP_COMPUTE);
+                                               DRM_ASAHI_QUEUE_CAP_COMPUTE,
+                                            priority);
 
    pctx->destroy = agx_destroy_context;
    pctx->flush = agx_flush;
@@ -2158,6 +2167,10 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_VS_LAYER_VIEWPORT:
    case PIPE_CAP_TES_LAYER_VIEWPORT:
       return true;
+
+   case PIPE_CAP_CONTEXT_PRIORITY_MASK:
+      return PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
+             PIPE_CONTEXT_PRIORITY_HIGH;
 
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);

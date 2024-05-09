@@ -585,12 +585,13 @@ agx_close_device(struct agx_device *dev)
 }
 
 uint32_t
-agx_create_command_queue(struct agx_device *dev, uint32_t caps)
+agx_create_command_queue(struct agx_device *dev, uint32_t caps,
+                         uint32_t priority)
 {
    struct drm_asahi_queue_create queue_create = {
       .vm_id = dev->vm_id,
       .queue_caps = caps,
-      .priority = 1,
+      .priority = priority,
       .flags = 0,
    };
 
