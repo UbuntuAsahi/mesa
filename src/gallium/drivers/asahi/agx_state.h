@@ -636,6 +636,9 @@ struct agx_context {
       uint64_t generation[AGX_MAX_BATCHES];
    } batches;
 
+   /* Queue handle */
+   uint32_t queue_id;
+
    struct agx_batch *batch;
    struct agx_bo *result_buf;
 
@@ -876,8 +879,6 @@ struct agx_screen {
    struct pipe_screen pscreen;
    struct agx_device dev;
    struct disk_cache *disk_cache;
-   /* Queue handle */
-   uint32_t queue_id;
 };
 
 static inline struct agx_screen *

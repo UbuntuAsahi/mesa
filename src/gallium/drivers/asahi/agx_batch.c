@@ -735,7 +735,6 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                  struct drm_asahi_cmd_render *render)
 {
    struct agx_device *dev = agx_device(ctx->base.screen);
-   struct agx_screen *screen = agx_screen(ctx->base.screen);
 
    bool feedback = dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC | AGX_DBG_STATS);
 
@@ -840,7 +839,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    struct drm_asahi_submit submit = {
       .flags = 0,
-      .queue_id = screen->queue_id,
+      .queue_id = ctx->queue_id,
       .result_handle = feedback ? ctx->result_buf->handle : 0,
       .in_sync_count = in_sync_count,
       .out_sync_count = 1,

@@ -1760,6 +1760,8 @@ agx_destroy_context(struct pipe_context *pctx)
    agx_scratch_fini(&ctx->scratch_fs);
    agx_scratch_fini(&ctx->scratch_cs);
 
+   agx_destroy_command_queue(dev, ctx->queue_id);
+
    ralloc_free(ctx);
 }
 
@@ -1812,6 +1814,11 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
       return NULL;
    }
    pctx->const_uploader = pctx->stream_uploader;
+
+   ctx->queue_id = agx_create_command_queue(agx_device(screen),
+                                            DRM_ASAHI_QUEUE_CAP_RENDER |
+                                               DRM_ASAHI_QUEUE_CAP_BLIT |
+                                               DRM_ASAHI_QUEUE_CAP_COMPUTE);
 
    pctx->destroy = agx_destroy_context;
    pctx->flush = agx_flush;
@@ -2608,10 +2615,6 @@ agx_screen_create(int fd, struct renderonly *ro,
       ralloc_free(agx_screen);
       return NULL;
    }
-
-   agx_screen->queue_id = agx_create_command_queue(
-      &agx_screen->dev, DRM_ASAHI_QUEUE_CAP_RENDER | DRM_ASAHI_QUEUE_CAP_BLIT |
-                           DRM_ASAHI_QUEUE_CAP_COMPUTE);
 
    screen->destroy = agx_destroy_screen;
    screen->get_screen_fd = agx_screen_get_fd;
