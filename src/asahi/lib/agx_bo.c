@@ -189,7 +189,7 @@ agx_bo_unreference(struct agx_bo *bo)
     * lock, let's make sure it's still not referenced before freeing it.
     */
    if (p_atomic_read(&bo->refcnt) == 0) {
-      assert(!p_atomic_read_relaxed(&bo->writer_syncobj));
+      assert(!p_atomic_read_relaxed(&bo->writer));
 
       if (dev->debug & AGX_DBG_TRACE)
          agxdecode_track_free(dev->agxdecode, bo);

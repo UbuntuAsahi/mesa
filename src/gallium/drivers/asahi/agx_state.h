@@ -30,6 +30,7 @@
 #include "util/bitset.h"
 #include "util/disk_cache.h"
 #include "util/hash_table.h"
+#include "util/rwlock.h"
 #include "util/u_range.h"
 #include "agx_bg_eot.h"
 #include "agx_helpers.h"
@@ -879,6 +880,9 @@ struct agx_screen {
    struct pipe_screen pscreen;
    struct agx_device dev;
    struct disk_cache *disk_cache;
+
+   /* Lock to protect syncobj usage vs. destruction in context destroy */
+   struct u_rwlock destroy_lock;
 };
 
 static inline struct agx_screen *

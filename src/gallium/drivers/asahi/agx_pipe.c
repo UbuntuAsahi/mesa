@@ -1723,6 +1723,7 @@ agx_destroy_context(struct pipe_context *pctx)
 {
    struct agx_device *dev = agx_device(pctx->screen);
    struct agx_context *ctx = agx_context(pctx);
+   struct agx_screen *screen = agx_screen(pctx->screen);
 
    /* Batch state needs to be freed on completion, and we don't want to yank
     * buffers out from in-progress GPU jobs to avoid faults, so just wait until
@@ -1744,6 +1745,11 @@ agx_destroy_context(struct pipe_context *pctx)
 
    agx_bo_unreference(ctx->result_buf);
 
+   /* Lock around the syncobj destruction, to avoid racing
+    * command submission in another context.
+    **/
+   u_rwlock_wrlock(&screen->destroy_lock);
+
    drmSyncobjDestroy(dev->fd, ctx->in_sync_obj);
    drmSyncobjDestroy(dev->fd, ctx->dummy_syncobj);
    if (ctx->in_sync_fd != -1)
@@ -1753,6 +1759,8 @@ agx_destroy_context(struct pipe_context *pctx)
       if (ctx->batches.slots[i].syncobj)
          drmSyncobjDestroy(dev->fd, ctx->batches.slots[i].syncobj);
    }
+
+   u_rwlock_wrunlock(&screen->destroy_lock);
 
    pipe_resource_reference(&ctx->heap, NULL);
 
@@ -2622,6 +2630,7 @@ agx_screen_create(int fd, struct renderonly *ro,
 
    agx_screen->dev.fd = fd;
    agx_screen->dev.ro = ro;
+   u_rwlock_init(&agx_screen->destroy_lock);
 
    /* Try to open an AGX device */
    if (!agx_open_device(agx_screen, &agx_screen->dev)) {
