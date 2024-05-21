@@ -87,12 +87,14 @@ agxdecode_find_mapped_gpu_mem_containing(struct agxdecode_ctx *ctx,
       util_dynarray_append(&ctx->ro_mappings, struct agx_bo *, mem);
    }
 
+#ifdef __APPLE__
    if (mem && !mem->mapped) {
       fprintf(stderr,
               "[ERROR] access to memory not mapped (GPU %" PRIx64
               ", handle %u)\n",
               mem->ptr.gpu, mem->handle);
    }
+#endif
 
    return mem;
 }
