@@ -1,3 +1,10 @@
+mesa (24.2.0~git20240527.878b415-1asahi1) UNRELEASED; urgency=medium
+
+  * New upstream version.
+  * d/control: add python3-pycparser to Build-Depends
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sat, 01 Jun 2024 11:48:32 +0200
+
 mesa (24.1.0~git20240228.eebfe84-1asahi1) unstable; urgency=medium
 
   * Change VCS URLs
