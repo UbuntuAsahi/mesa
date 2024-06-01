@@ -3,6 +3,7 @@ mesa (24.2.0~git20240527.878b415-1asahi1) UNRELEASED; urgency=medium
   * New upstream version.
   * d/control: add python3-pycparser to Build-Depends
   * Switch to LLVM 17
+  * d/control: update dependency versions
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 01 Jun 2024 11:48:32 +0200
 
