@@ -1,24 +1,7 @@
 /*
  * Copyright 2023 Pavel Ondračka <pavel.ondracka@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * on the rights to use, copy, modify, merge, publish, distribute, sub
- * license, and/or sell copies of the Software, and to permit persons to whom
- * the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHOR(S) AND/OR THEIR SUPPLIERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
- * USE OR OTHER DEALINGS IN THE SOFTWARE. */
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "r300_nir.h"
 
@@ -78,7 +61,7 @@ r300_should_vectorize_io(unsigned align, unsigned bit_size,
    if (bit_size != 32)
       return false;
 
-   /* Our offset alignment should aways be at least 4 bytes */
+   /* Our offset alignment should always be at least 4 bytes */
    if (align < 4)
       return false;
 
@@ -109,12 +92,35 @@ r300_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
    bool is_r500 = r300_screen(screen)->caps.is_r500;
 
    bool progress;
+   if (s->info.stage == MESA_SHADER_FRAGMENT) {
+      if (is_r500) {
+         NIR_PASS_V(s, r300_transform_fs_trig_input);
+      }
+   } else {
+      if (r300_screen(screen)->caps.has_tcl) {
+         if (r300_screen(screen)->caps.is_r500) {
+            /* Only nine should set both NTT shader name and
+             * use_legacy_math_rules and D3D9 already mandates
+             * the proper range for the trigonometric inputs.
+             */
+            if (!s->info.use_legacy_math_rules || !(s->info.name && !strcmp("TTN", s->info.name))) {
+               NIR_PASS_V(s, r300_transform_vs_trig_input);
+            }
+         } else {
+            if (r300_screen(screen)->caps.is_r400) {
+               NIR_PASS_V(s, r300_transform_vs_trig_input);
+            }
+         }
+      }
+   }
+
    do {
       progress = false;
 
       NIR_PASS_V(s, nir_lower_vars_to_ssa);
 
       NIR_PASS(progress, s, nir_copy_prop);
+      NIR_PASS(progress, s, r300_nir_lower_flrp);
       NIR_PASS(progress, s, nir_opt_algebraic);
       if (s->info.stage == MESA_SHADER_VERTEX) {
          if (!is_r500)
@@ -149,7 +155,7 @@ r300_optimize_nir(struct nir_shader *s, struct pipe_screen *screen)
       };
       NIR_PASS(progress, s, nir_opt_load_store_vectorize, &vectorize_opts);
       NIR_PASS(progress, s, nir_opt_shrink_stores, true);
-      NIR_PASS(progress, s, nir_opt_shrink_vectors);
+      NIR_PASS(progress, s, nir_opt_shrink_vectors, false);
       NIR_PASS(progress, s, nir_opt_loop);
       NIR_PASS(progress, s, nir_opt_vectorize, r300_should_vectorize_instr, NULL);
       NIR_PASS(progress, s, nir_opt_undef);

@@ -177,6 +177,12 @@ agx_calc_register_demand(agx_context *ctx)
       if (ctx->any_cf)
          demand++;
 
+      if (ctx->any_quad_divergent_shuffle)
+         demand++;
+
+      if (ctx->has_spill_pcopy_reserved)
+         demand = 8;
+
       /* Everything live-in */
       {
          int i;
@@ -200,6 +206,14 @@ agx_calc_register_demand(agx_context *ctx)
           */
          if (I->op == AGX_OPCODE_PHI)
             continue;
+
+         if (I->op == AGX_OPCODE_PRELOAD) {
+            unsigned size = agx_size_align_16(I->src[0].size);
+            max_demand = MAX2(max_demand, I->src[0].value + size);
+         } else if (I->op == AGX_OPCODE_EXPORT) {
+            unsigned size = agx_size_align_16(I->src[0].size);
+            max_demand = MAX2(max_demand, I->imm + size);
+         }
 
          /* Handle late-kill registers from last instruction */
          demand -= late_kill_count;
@@ -291,18 +305,28 @@ find_best_region_to_evict(struct ra_ctx *rctx, enum ra_class cls, unsigned size,
    unsigned best_base = ~0;
    unsigned best_moves = ~0;
 
+   /* Beginning region evictability condition */
+   bool r0_evictable =
+      !rctx->shader->any_cf && !rctx->shader->has_spill_pcopy_reserved;
+
+   assert(!(r0_evictable && rctx->shader->any_quad_divergent_shuffle));
+
    for (unsigned base = 0; base + size <= rctx->bound[cls]; base += size) {
-      /* r0l is unevictable, skip it. By itself, this does not pose a problem.
-       * We are allocating n registers, but the region containing r0l has at
-       * most n-1 free. Since there are at least n free registers total, there
-       * is at least 1 free register outside this region. Thus the region
-       * containing that free register contains at most n-1 occupied registers.
-       * In the worst case, those n-1 occupied registers are moved to the region
-       * with r0l and then the n free registers are used for the destination.
-       * Thus, we do not need extra registers to handle "single point"
-       * unevictability.
+      /* The first k registers are preallocated and unevictable, so must be
+       * skipped. By itself, this does not pose a problem. We are allocating n
+       * registers, but this region has at most n-k free.  Since there are at
+       * least n free registers total, there is at least k free registers
+       * outside this region. Choose any such free register. The region
+       * containing it has at most n-1 occupied registers. In the worst case,
+       * n-k of those registers are are moved to the beginning region and the
+       * remaining (n-1)-(n-k) = k-1 registers are moved to the k-1 free
+       * registers in other regions, given there are k free registers total.
+       * These recursive shuffles work out because everything is power-of-two
+       * sized and naturally aligned, so the sizes shuffled are strictly
+       * descending. So, we do not need extra registers to handle "single
+       * region" unevictability.
        */
-      if (base == 0 && rctx->shader->any_cf)
+      if (base == 0 && !r0_evictable)
          continue;
 
       /* Do not evict the same register multiple times. It's not necessary since
@@ -501,6 +525,8 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
     * have to move it.  find_best_region_to_evict knows better than to try.
     */
    assert(!(reg == 0 && rctx->shader->any_cf) && "r0l is never moved");
+   assert(!(reg == 1 && rctx->shader->any_quad_divergent_shuffle) &&
+          "r0h is never moved");
 
    /* Consider the destination clobbered for the purpose of source collection.
     * This way, killed sources already in the destination will be preserved
@@ -921,8 +947,32 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
       }
    }
 
-   /* Try to allocate sources of collects contiguously */
+   /* Try to coalesce scalar exports */
    agx_instr *collect_phi = rctx->src_to_collect_phi[idx.value];
+   if (collect_phi && collect_phi->op == AGX_OPCODE_EXPORT) {
+      unsigned reg = collect_phi->imm;
+
+      if (!BITSET_TEST_RANGE(rctx->used_regs[cls], reg, reg + align - 1) &&
+          (reg % align) == 0)
+         return reg;
+   }
+
+   /* Try to coalesce vector exports */
+   if (collect_phi && collect_phi->op == AGX_OPCODE_SPLIT) {
+      if (collect_phi->dest[0].type == AGX_INDEX_NORMAL) {
+         agx_instr *exp = rctx->src_to_collect_phi[collect_phi->dest[0].value];
+         if (exp && exp->op == AGX_OPCODE_EXPORT) {
+            unsigned reg = exp->imm;
+
+            if (!BITSET_TEST_RANGE(rctx->used_regs[cls], reg,
+                                   reg + align - 1) &&
+                (reg % align) == 0)
+               return reg;
+         }
+      }
+   }
+
+   /* Try to allocate sources of collects contiguously */
    if (collect_phi && collect_phi->op == AGX_OPCODE_COLLECT) {
       agx_instr *collect = collect_phi;
 
@@ -1036,6 +1086,17 @@ agx_ra_assign_local(struct ra_ctx *rctx)
     */
    if (rctx->shader->any_cf)
       BITSET_SET(used_regs_gpr, 0);
+
+   /* Force the zero r0h live throughout shaders using divergent shuffles. */
+   if (rctx->shader->any_quad_divergent_shuffle) {
+      assert(rctx->shader->any_cf);
+      BITSET_SET(used_regs_gpr, 1);
+   }
+
+   /* Reserve bottom registers as temporaries for parallel copy lowering */
+   if (rctx->shader->has_spill_pcopy_reserved) {
+      BITSET_SET_RANGE(used_regs_gpr, 0, 7);
+   }
 
    agx_foreach_instr_in_block(block, I) {
       rctx->instr = I;
@@ -1224,6 +1285,34 @@ agx_insert_parallel_copies(agx_context *ctx, agx_block *block)
    }
 }
 
+static void
+lower_exports(agx_context *ctx)
+{
+   struct agx_copy copies[AGX_NUM_REGS];
+   unsigned nr = 0;
+   agx_block *block = agx_exit_block(ctx);
+
+   agx_foreach_instr_in_block_safe(block, I) {
+      if (I->op != AGX_OPCODE_EXPORT)
+         continue;
+
+      assert(agx_channels(I->src[0]) == 1 && "scalarized in frontend");
+      assert(nr < ARRAY_SIZE(copies));
+
+      copies[nr++] = (struct agx_copy){
+         .dest = I->imm,
+         .src = I->src[0],
+      };
+
+      /* We cannot use fewer registers than we export */
+      ctx->max_reg =
+         MAX2(ctx->max_reg, I->imm + agx_size_align_16(I->src[0].size));
+   }
+
+   agx_builder b = agx_init_builder(ctx, agx_after_block_logical(block));
+   agx_emit_parallel_copies(&b, copies, nr);
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -1305,7 +1394,8 @@ agx_ra(agx_context *ctx)
 
    agx_foreach_instr_global(ctx, I) {
       /* Record collects/phis so we can coalesce when assigning */
-      if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI) {
+      if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
+          I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
          agx_foreach_ssa_src(I, s) {
             src_to_collect_phi[I->src[s].value] = I;
          }
@@ -1456,10 +1546,12 @@ agx_ra(agx_context *ctx)
       }
    }
 
-   /* Insert parallel copies lowering phi nodes */
+   /* Insert parallel copies lowering phi nodes and exports */
    agx_foreach_block(ctx, block) {
       agx_insert_parallel_copies(ctx, block);
    }
+
+   lower_exports(ctx);
 
    agx_foreach_instr_global_safe(ctx, I) {
       switch (I->op) {

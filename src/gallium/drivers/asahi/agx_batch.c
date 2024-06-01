@@ -5,11 +5,13 @@
  */
 
 #include <xf86drm.h>
+#include "asahi/lib/agx_device_virtio.h"
 #include "asahi/lib/decode.h"
 #include "util/bitset.h"
 #include "util/u_dynarray.h"
 #include "util/u_range.h"
 #include "agx_state.h"
+#include "vdrm.h"
 
 #define foreach_active(ctx, idx)                                               \
    BITSET_FOREACH_SET(idx, ctx->batches.active, AGX_MAX_BATCHES)
@@ -142,6 +144,11 @@ agx_batch_init(struct agx_context *ctx,
    batch->vs_preamble_scratch = 0;
    batch->fs_preamble_scratch = 0;
    batch->cs_preamble_scratch = 0;
+
+   /* May get read before write, need to initialize to 0 to avoid GPU-side UAF
+    * conditions.
+    */
+   batch->uniforms.tables[AGX_SYSVAL_TABLE_PARAMS] = 0;
 
    /* We need to emit prim state at the start. Max collides with all. */
    batch->reduced_prim = MESA_PRIM_COUNT;
@@ -352,7 +359,8 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
          if (writer == batch)
             agx_writer_remove(ctx, handle);
 
-         p_atomic_cmpxchg(&bo->writer_syncobj, batch->syncobj, 0);
+         p_atomic_cmpxchg(&bo->writer,
+                          agx_bo_writer(ctx->queue_id, batch->syncobj), 0);
 
          agx_bo_unreference(agx_lookup_bo(dev, handle));
       }
@@ -758,6 +766,29 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .handle = batch->syncobj,
    };
 
+   /* This lock protects against a subtle race scenario:
+    * - Context 1 submits and registers itself as writer for a BO
+    * - Context 2 runs the below loop, and finds the writer syncobj
+    * - Context 1 is destroyed,
+    *     - flushing all batches, unregistering itself as a writer, and
+    *     - Destroying syncobjs for all batches
+    * - Context 2 submits, with a now invalid syncobj ID
+    *
+    * Since batch syncobjs are only destroyed on context destruction, we can
+    * protect against this scenario with a screen-wide rwlock to ensure that
+    * the syncobj destroy code cannot run concurrently with any other
+    * submission. If a submit runs before the wrlock is taken, the syncobjs
+    * must still exist (even if the batch was flushed and no longer a writer).
+    * If it runs after the wrlock is released, then by definition the
+    * just-destroyed syncobjs cannot be writers for any BO at that point.
+    *
+    * A screen-wide (not device-wide) rwlock is sufficient because by definition
+    * resources can only be implicitly shared within a screen. Any shared
+    * resources across screens must have been imported and will go through the
+    * AGX_BO_SHARED path instead, which has no race (but is slower).
+    */
+   u_rwlock_rdlock(&screen->destroy_lock);
+
    int handle;
    AGX_BATCH_FOREACH_BO_HANDLE(batch, handle) {
       struct agx_bo *bo = agx_lookup_bo(dev, handle);
@@ -785,6 +816,20 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
          /* And keep track of the BO for cloning the out_sync */
          shared_bos[shared_bo_count++] = bo;
+      } else {
+         /* Deal with BOs which are not externally shared, but which have been
+          * written from another context within the same screen. We also need to
+          * wait on these using their syncobj.
+          */
+         uint64_t writer = p_atomic_read_relaxed(&bo->writer);
+         if (writer && agx_bo_writer_queue(writer) != ctx->queue_id) {
+            batch_debug(batch, "Waits on inter-context BO @ 0x%" PRIx64,
+                        bo->ptr.gpu);
+
+            agx_add_sync(in_syncs, &in_sync_count,
+                         agx_bo_writer_syncobj(writer));
+            shared_bos[shared_bo_count++] = NULL;
+         }
       }
    }
 
@@ -833,7 +878,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    struct drm_asahi_submit submit = {
       .flags = 0,
-      .queue_id = screen->queue_id,
+      .queue_id = ctx->queue_id,
       .result_handle = feedback ? ctx->result_buf->handle : 0,
       .in_sync_count = in_sync_count,
       .out_sync_count = 1,
@@ -843,7 +888,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .commands = (uint64_t)(uintptr_t)(&commands[0]),
    };
 
-   int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_SUBMIT, &submit);
+   int ret = dev->ops.submit(dev, &submit, ctx->result_buf->vbo_res_id);
+
+   u_rwlock_rdunlock(&screen->destroy_lock);
+
    if (ret) {
       if (compute) {
          fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %m\n");
@@ -873,6 +921,9 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       assert(out_sync_fd >= 0);
 
       for (unsigned i = 0; i < shared_bo_count; i++) {
+         if (!shared_bos[i])
+            continue;
+
          batch_debug(batch, "Signals shared BO @ 0x%" PRIx64,
                      shared_bos[i]->ptr.gpu);
 
@@ -903,7 +954,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
       /* But any BOs written by active batches are ours */
       assert(writer == batch && "exclusive writer");
-      p_atomic_set(&bo->writer_syncobj, batch->syncobj);
+      p_atomic_set(&bo->writer, agx_bo_writer(ctx->queue_id, batch->syncobj));
    }
 
    free(in_syncs);
@@ -911,11 +962,15 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    if (dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC | AGX_DBG_SCRATCH)) {
       if (dev->debug & AGX_DBG_TRACE) {
-         if (compute)
-            agxdecode_drm_cmd_compute(&dev->params, compute, true);
+         if (compute) {
+            agxdecode_drm_cmd_compute(dev->agxdecode, &dev->params, compute,
+                                      true);
+         }
 
-         if (render)
-            agxdecode_drm_cmd_render(&dev->params, render, true);
+         if (render) {
+            agxdecode_drm_cmd_render(dev->agxdecode, &dev->params, render,
+                                     true);
+         }
 
          agxdecode_next_frame();
       }

@@ -81,7 +81,7 @@
  *
  */
 
-#ifdef USE_LIBGLVND
+#if USE_LIBGLVND
 #define EGLAPI
 #undef PUBLIC
 #define PUBLIC
@@ -415,7 +415,7 @@ eglGetDisplay(EGLNativeDisplayType nativeDisplay)
    util_cpu_trace_init();
    _EGL_FUNC_START(NULL, EGL_OBJECT_THREAD_KHR, NULL);
 
-   STATIC_ASSERT(sizeof(void *) == sizeof(nativeDisplay));
+   STATIC_ASSERT(sizeof(void *) >= sizeof(nativeDisplay));
    native_display_ptr = (void *)nativeDisplay;
 
    plat = _eglGetNativePlatform(native_display_ptr);
@@ -547,6 +547,7 @@ _eglCreateExtensionsString(_EGLDisplay *disp)
    _EGL_CHECK_EXTENSION(ANGLE_sync_control_rate);
 
    _EGL_CHECK_EXTENSION(EXT_buffer_age);
+   _EGL_CHECK_EXTENSION(EXT_config_select_group);
    _EGL_CHECK_EXTENSION(EXT_create_context_robustness);
    _EGL_CHECK_EXTENSION(EXT_image_dma_buf_import);
    _EGL_CHECK_EXTENSION(EXT_image_dma_buf_import_modifiers);
@@ -593,6 +594,7 @@ _eglCreateExtensionsString(_EGLDisplay *disp)
    _EGL_CHECK_EXTENSION(MESA_gl_interop);
    _EGL_CHECK_EXTENSION(MESA_image_dma_buf_export);
    _EGL_CHECK_EXTENSION(MESA_query_driver);
+   _EGL_CHECK_EXTENSION(MESA_x11_native_visual_id);
 
    _EGL_CHECK_EXTENSION(NOK_swap_region);
    _EGL_CHECK_EXTENSION(NOK_texture_from_pixmap);
@@ -682,7 +684,7 @@ eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
          _eglLog(_EGL_DEBUG,
                  "Found 'LIBGL_ALWAYS_SOFTWARE' set, will use a CPU renderer");
 
-      const char *env = getenv("MESA_LOADER_DRIVER_OVERRIDE");
+      const char *env = os_get_option("MESA_LOADER_DRIVER_OVERRIDE");
       disp->Options.Zink = env && !strcmp(env, "zink");
 
       const char *gallium_hud_env = getenv("GALLIUM_HUD");
@@ -700,7 +702,9 @@ eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor)
             bool success = false;
             if (!disp->Options.Zink && !getenv("GALLIUM_DRIVER")) {
                disp->Options.Zink = EGL_TRUE;
+               disp->Options.FallbackZink = EGL_TRUE;
                success = _eglDriver.Initialize(disp);
+               disp->Options.FallbackZink = EGL_FALSE;
             }
             if (!success) {
                disp->Options.Zink = EGL_FALSE;

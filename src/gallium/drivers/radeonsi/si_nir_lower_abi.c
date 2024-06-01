@@ -54,7 +54,9 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
                   S_008F0C_DST_SEL_Y(V_008F0C_SQ_SEL_Y) |
                   S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) |
                   S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W) |
-                  S_008F0C_FORMAT(V_008F0C_GFX11_FORMAT_32_32_32_32_FLOAT) |
+                  (sel->screen->info.gfx_level >= GFX12 ?
+                     S_008F0C_FORMAT_GFX12(V_008F0C_GFX11_FORMAT_32_32_32_32_FLOAT) :
+                     S_008F0C_FORMAT_GFX10(V_008F0C_GFX11_FORMAT_32_32_32_32_FLOAT)) |
                   S_008F0C_INDEX_STRIDE(2) /* 32 elements */),
    };
 
@@ -138,11 +140,14 @@ static nir_def *build_tess_ring_desc(nir_builder *b, struct si_screen *screen,
       S_008F0C_DST_SEL_Z(V_008F0C_SQ_SEL_Z) |
       S_008F0C_DST_SEL_W(V_008F0C_SQ_SEL_W);
 
-   if (screen->info.gfx_level >= GFX11) {
-      rsrc3 |= S_008F0C_FORMAT(V_008F0C_GFX11_FORMAT_32_FLOAT) |
+   if (screen->info.gfx_level >= GFX12) {
+      rsrc3 |= S_008F0C_FORMAT_GFX12(V_008F0C_GFX11_FORMAT_32_FLOAT) |
+               S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW);
+   } else if (screen->info.gfx_level >= GFX11) {
+      rsrc3 |= S_008F0C_FORMAT_GFX10(V_008F0C_GFX11_FORMAT_32_FLOAT) |
                S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW);
    } else if (screen->info.gfx_level >= GFX10) {
-      rsrc3 |= S_008F0C_FORMAT(V_008F0C_GFX10_FORMAT_32_FLOAT) |
+      rsrc3 |= S_008F0C_FORMAT_GFX10(V_008F0C_GFX10_FORMAT_32_FLOAT) |
                S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_RAW) |
                S_008F0C_RESOURCE_LEVEL(1);
    } else {
@@ -234,7 +239,7 @@ static void build_gsvs_ring_desc(nir_builder *b, struct lower_abi_state *s)
 
          if (sel->screen->info.gfx_level >= GFX10) {
             rsrc3 |=
-               S_008F0C_FORMAT(V_008F0C_GFX10_FORMAT_32_FLOAT) |
+               S_008F0C_FORMAT_GFX10(V_008F0C_GFX10_FORMAT_32_FLOAT) |
                S_008F0C_OOB_SELECT(V_008F0C_OOB_SELECT_DISABLED) |
                S_008F0C_RESOURCE_LEVEL(1);
          } else {
@@ -338,9 +343,9 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    }
    case nir_intrinsic_load_patch_vertices_in:
       if (stage == MESA_SHADER_TESS_CTRL)
-         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 11, 5);
+         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 12, 5);
       else if (stage == MESA_SHADER_TESS_EVAL) {
-         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 6, 5);
+         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 7, 5);
       } else
          unreachable("no nir_load_patch_vertices_in");
       replacement = nir_iadd_imm(b, replacement, 1);
@@ -349,14 +354,18 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       replacement = ac_nir_load_arg(b, &args->ac, args->ac.sample_coverage);
       break;
    case nir_intrinsic_load_lshs_vertex_stride_amd:
-      if (stage == MESA_SHADER_VERTEX)
+      if (stage == MESA_SHADER_VERTEX) {
          replacement = nir_imm_int(b, sel->info.lshs_vertex_stride);
-      else if (stage == MESA_SHADER_TESS_CTRL)
-         replacement = sel->screen->info.gfx_level >= GFX9 && shader->is_monolithic ?
-            nir_imm_int(b, key->ge.part.tcs.ls->info.lshs_vertex_stride) :
-            nir_ishl_imm(b, GET_FIELD_NIR(VS_STATE_LS_OUT_VERTEX_SIZE), 2);
-      else
+      } else if (stage == MESA_SHADER_TESS_CTRL) {
+         if (sel->screen->info.gfx_level >= GFX9 && shader->is_monolithic) {
+            replacement = nir_imm_int(b, key->ge.part.tcs.ls->info.lshs_vertex_stride);
+         } else {
+            nir_def *num_ls_out = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 17, 6);
+            replacement = nir_iadd_imm_nuw(b, nir_ishl_imm(b, num_ls_out, 4), 4);
+         }
+      } else {
          unreachable("no nir_load_lshs_vertex_stride_amd");
+      }
       break;
    case nir_intrinsic_load_esgs_vertex_stride_amd:
       assert(sel->screen->info.gfx_level >= GFX9);
@@ -368,13 +377,31 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       }
       break;
    case nir_intrinsic_load_tcs_num_patches_amd: {
-      nir_def *tmp = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 0, 6);
+      nir_def *tmp = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 0, 7);
       replacement = nir_iadd_imm(b, tmp, 1);
       break;
    }
-   case nir_intrinsic_load_hs_out_patch_data_offset_amd:
-      replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 16, 16);
+   case nir_intrinsic_load_hs_out_patch_data_offset_amd: {
+      nir_def *per_vtx_out_patch_size = NULL;
+
+      if (stage == MESA_SHADER_TESS_CTRL) {
+         const unsigned num_hs_out = util_last_bit64(sel->info.outputs_written_before_tes_gs);
+         const unsigned out_vtx_size = num_hs_out * 16;
+         const unsigned out_vtx_per_patch = sel->info.base.tess.tcs_vertices_out;
+         per_vtx_out_patch_size = nir_imm_int(b, out_vtx_size * out_vtx_per_patch);
+      } else {
+         nir_def *num_hs_out = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 23, 6);
+         nir_def *out_vtx_size = nir_ishl_imm(b, num_hs_out, 4);
+         nir_def *o = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 7, 5);
+         nir_def *out_vtx_per_patch = nir_iadd_imm_nuw(b, o, 1);
+         per_vtx_out_patch_size = nir_imul(b, out_vtx_per_patch, out_vtx_size);
+      }
+
+      nir_def *p = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 0, 7);
+      nir_def *num_patches = nir_iadd_imm_nuw(b, p, 1);
+      replacement = nir_imul(b, per_vtx_out_patch_size, num_patches);
       break;
+   }
    case nir_intrinsic_load_ring_tess_offchip_offset_amd:
       replacement = ac_nir_load_arg(b, &args->ac, args->ac.tess_offchip_offset);
       break;
@@ -452,6 +479,12 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       replacement = si_nir_load_internal_binding(b, args, slot, 4);
       break;
    }
+   case nir_intrinsic_load_xfb_state_address_gfx12_amd: {
+      nir_def *address = si_nir_load_internal_binding(b, args, SI_STREAMOUT_STATE_BUF, 1);
+      nir_def *address32_hi = nir_imm_int(b, s->shader->selector->screen->info.address32_hi);
+      replacement = nir_pack_64_2x32_split(b, address, address32_hi);
+      break;
+   }
    case nir_intrinsic_atomic_add_gs_emit_prim_count_amd:
    case nir_intrinsic_atomic_add_shader_invocation_count_amd: {
       enum pipe_statistics_query_index index =
@@ -486,6 +519,9 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
                       .atomic_op = nir_atomic_op_iadd);
       break;
    }
+   case nir_intrinsic_load_debug_log_desc_amd:
+      replacement = si_nir_load_internal_binding(b, args, SI_RING_SHADER_LOG, 4);
+      break;
    case nir_intrinsic_load_ring_attr_amd:
       replacement = build_attr_ring_desc(b, shader, args);
       break;
@@ -588,7 +624,8 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       break;
    }
    case nir_intrinsic_load_layer_id:
-      replacement = ac_nir_unpack_arg(b, &args->ac, args->ac.ancillary, 16, 13);
+      replacement = ac_nir_unpack_arg(b, &args->ac, args->ac.ancillary,
+                                      16, sel->screen->info.gfx_level >= GFX12 ? 14 : 13);
       break;
    case nir_intrinsic_load_color0:
    case nir_intrinsic_load_color1: {
@@ -655,21 +692,26 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
          /* Line primitives and blits don't need edge flags. */
          replacement = nir_imm_int(b, 0);
       } else if (shader->selector->stage == MESA_SHADER_VERTEX) {
-         /* Use the following trick to extract the edge flags:
-          *   extracted = v_and_b32 gs_invocation_id, 0x700 ; get edge flags at bits 8, 9, 10
-          *   shifted = v_mul_u32_u24 extracted, 0x80402u   ; shift the bits: 8->9, 9->19, 10->29
-          *   result = v_and_b32 shifted, 0x20080200        ; remove garbage
-          */
-         nir_def *tmp = ac_nir_load_arg(b, &args->ac, args->ac.gs_invocation_id);
-         tmp = nir_iand_imm(b, tmp, 0x700);
-         tmp = nir_imul_imm(b, tmp, 0x80402);
-         replacement = nir_iand_imm(b, tmp, 0x20080200);
+         if (sel->screen->info.gfx_level >= GFX12) {
+            replacement = nir_iand_imm(b, ac_nir_load_arg(b, &args->ac, args->ac.gs_vtx_offset[0]),
+                                       ac_get_all_edge_flag_bits(sel->screen->info.gfx_level));
+         } else {
+            /* Use the following trick to extract the edge flags:
+             *   extracted = v_and_b32 gs_invocation_id, 0x700 ; get edge flags at bits 8, 9, 10
+             *   shifted = v_mul_u32_u24 extracted, 0x80402u   ; shift the bits: 8->9, 9->19, 10->29
+             *   result = v_and_b32 shifted, 0x20080200        ; remove garbage
+             */
+            nir_def *tmp = ac_nir_load_arg(b, &args->ac, args->ac.gs_invocation_id);
+            tmp = nir_iand_imm(b, tmp, 0x700);
+            tmp = nir_imul_imm(b, tmp, 0x80402);
+            replacement = nir_iand_imm(b, tmp, 0x20080200);
+         }
       } else {
          /* Edge flags are always enabled when polygon mode is enabled, so we always have to
           * return valid edge flags if the primitive type is not lines and if we are not blitting
           * because the shader doesn't know when polygon mode is enabled.
           */
-         replacement = nir_imm_int(b, ac_get_all_edge_flag_bits());
+         replacement = nir_imm_int(b, ac_get_all_edge_flag_bits(sel->screen->info.gfx_level));
       }
       break;
    case nir_intrinsic_load_packed_passthrough_primitive_amd:
@@ -698,6 +740,20 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       assert(s->tess_offchip_ring);
       replacement = s->tess_offchip_ring;
       break;
+   case nir_intrinsic_load_tcs_tess_levels_to_tes_amd:
+      if (shader->is_monolithic) {
+         replacement = nir_imm_bool(b, key->ge.opt.tes_reads_tess_factors);
+      } else {
+         replacement = nir_ine_imm(b, ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 31, 1), 0);
+      }
+      break;
+   case nir_intrinsic_load_tcs_primitive_mode_amd:
+      if (shader->is_monolithic) {
+         replacement = nir_imm_int(b, key->ge.opt.tes_prim_mode);
+      } else {
+         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 29, 2);
+      }
+      break;
    case nir_intrinsic_load_ring_gsvs_amd: {
       unsigned stream_id = nir_intrinsic_stream_id(intrin);
       /* Unused nir_load_ring_gsvs_amd may not be eliminated yet. */
@@ -705,10 +761,17 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
          s->gsvs_ring[stream_id] : nir_undef(b, 4, 32);
       break;
    }
-   case nir_intrinsic_load_user_data_amd:
-      replacement = ac_nir_load_arg(b, &args->ac, args->cs_user_data);
-      replacement = nir_pad_vec4(b, replacement);
+   case nir_intrinsic_load_user_data_amd: {
+      nir_def *low_vec4 = ac_nir_load_arg(b, &args->ac, args->cs_user_data[0]);
+      replacement = nir_pad_vector(b, low_vec4, 8);
+
+      if (args->cs_user_data[1].used && intrin->def.num_components > 4) {
+         nir_def *high_vec4 = ac_nir_load_arg(b, &args->ac, args->cs_user_data[1]);
+         for (unsigned i = 0; i < high_vec4->num_components; i++)
+            replacement = nir_vector_insert_imm(b, replacement, nir_channel(b, high_vec4, i), 4 + i);
+      }
       break;
+   }
    default:
       return false;
    }

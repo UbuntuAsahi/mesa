@@ -102,7 +102,7 @@ static void new_label(const char *name)
 
 static struct ir3_instruction * new_instr(opc_t opc)
 {
-	instr = ir3_instr_create(block, opc, 4, 6);
+	instr = ir3_instr_create_at_end(block, opc, 4, 6);
 	instr->flags = iflags.flags;
 	instr->repeat = iflags.repeat;
 	instr->nop = iflags.nop;
@@ -234,6 +234,21 @@ static void add_const(unsigned reg, unsigned c0, unsigned c1, unsigned c2, unsig
 	const_state->immediates[idx * 4 + 1] = c1;
 	const_state->immediates[idx * 4 + 2] = c2;
 	const_state->immediates[idx * 4 + 3] = c3;
+}
+
+static void add_buf_init_val(uint32_t val)
+{
+	assert(info->num_bufs > 0);
+	unsigned idx = info->num_bufs - 1;
+
+	if (!info->buf_init_data[idx]) {
+		unsigned sz = info->buf_sizes[idx] * 4;
+		info->buf_init_data[idx] = malloc(sz);
+		memset(info->buf_init_data[idx], 0, sz);
+	}
+
+	assert(info->buf_init_data_sizes[idx] < info->buf_sizes[idx]);
+	info->buf_init_data[idx][info->buf_init_data_sizes[idx]++] = val;
 }
 
 static void add_sysval(unsigned reg, unsigned compmask, gl_system_value sysval)
@@ -704,7 +719,7 @@ static void print_token(FILE *file, int type, YYSTYPE value)
 %type <num> integer offset
 %type <num> flut_immed
 %type <flt> float
-%type <reg> src dst const
+%type <reg> src dst const cat0_src1 cat0_src2
 %type <tok> cat1_opc
 %type <tok> cat2_opc_1src cat2_opc_2src_cnd cat2_opc_2src
 %type <tok> cat3_opc
@@ -752,6 +767,11 @@ const_header:      T_A_CONST '(' T_CONSTANT ')' const_val ',' const_val ',' cons
                        add_const($3, $5, $7, $9, $11);
 }
 
+buf_header_init_val:  const_val { add_buf_init_val($1); }
+buf_header_init_vals: buf_header_init_val
+|                     buf_header_init_val ',' buf_header_init_vals
+|
+
 buf_header_addr_reg:
                    '(' T_CONSTANT ')' {
                        assert(($2 & 0x1) == 0);  /* half-reg not allowed */
@@ -767,7 +787,7 @@ buf_header:        T_A_BUF const_val {
                        int idx = info->num_bufs++;
                        assert(idx < MAX_BUFS);
                        info->buf_sizes[idx] = $2;
-} buf_header_addr_reg
+} buf_header_addr_reg buf_header_init_vals
 
 invocationid_header: T_A_INVOCATIONID '(' T_REGISTER ')' {
                        assert(($3 & 0x1) == 0);  /* half-reg not allowed */
@@ -845,23 +865,23 @@ instr:             iflags cat0_instr
 
 label:             T_IDENTIFIER ':' { new_label($1); }
 
-cat0_src1:         '!' T_P0        { instr->cat0.inv1 = true; instr->cat0.comp1 = $2 >> 1; }
-|                  T_P0            { instr->cat0.comp1 = $1 >> 1; }
+cat0_src1:         '!' T_P0        { instr->cat0.inv1 = true; $$ = new_src((62 << 3) + $2, IR3_REG_PREDICATE); }
+|                  T_P0            { $$ = new_src((62 << 3) + $1, IR3_REG_PREDICATE); }
 
-cat0_src2:         '!' T_P0        { instr->cat0.inv2 = true; instr->cat0.comp2 = $2 >> 1; }
-|                  T_P0            { instr->cat0.comp2 = $1 >> 1; }
+cat0_src2:         '!' T_P0        { instr->cat0.inv2 = true; $$ = new_src((62 << 3) + $2, IR3_REG_PREDICATE); }
+|                  T_P0            { $$ = new_src((62 << 3) + $1, IR3_REG_PREDICATE); }
 
 cat0_immed:        '#' integer     { instr->cat0.immed = $2; }
 |                  '#' T_IDENTIFIER { ralloc_steal(instr, (void *)$2); instr->cat0.target_label = $2; }
 
 cat0_instr:        T_OP_NOP        { new_instr(OPC_NOP); }
-|                  T_OP_BR         { new_instr(OPC_B)->cat0.brtype = BRANCH_PLAIN; } cat0_src1 ',' cat0_immed
-|                  T_OP_BRAO       { new_instr(OPC_B)->cat0.brtype = BRANCH_OR;    } cat0_src1 ',' cat0_src2 ',' cat0_immed
-|                  T_OP_BRAA       { new_instr(OPC_B)->cat0.brtype = BRANCH_AND;    } cat0_src1 ',' cat0_src2 ',' cat0_immed
-|                  T_OP_BRAC '.' integer { new_instr(OPC_B)->cat0.brtype = BRANCH_CONST; instr->cat0.idx = $3; } cat0_immed
-|                  T_OP_BANY       { new_instr(OPC_B)->cat0.brtype = BRANCH_ANY; } cat0_src1 ',' cat0_immed
-|                  T_OP_BALL       { new_instr(OPC_B)->cat0.brtype = BRANCH_ALL; } cat0_src1 ',' cat0_immed
-|                  T_OP_BRAX       { new_instr(OPC_B)->cat0.brtype = BRANCH_X; } cat0_immed
+|                  T_OP_BR         { new_instr(OPC_BR);   } cat0_src1 ',' cat0_immed
+|                  T_OP_BRAO       { new_instr(OPC_BRAO); } cat0_src1 ',' cat0_src2 ',' cat0_immed
+|                  T_OP_BRAA       { new_instr(OPC_BRAA); } cat0_src1 ',' cat0_src2 ',' cat0_immed
+|                  T_OP_BRAC '.' integer { new_instr(OPC_BRAC)->cat0.idx = $3; } cat0_immed
+|                  T_OP_BANY       { new_instr(OPC_BANY); } cat0_src1 ',' cat0_immed
+|                  T_OP_BALL       { new_instr(OPC_BALL); } cat0_src1 ',' cat0_immed
+|                  T_OP_BRAX       { new_instr(OPC_BRAX); } cat0_immed
 |                  T_OP_JUMP       { new_instr(OPC_JUMP); }  cat0_immed
 |                  T_OP_CALL       { new_instr(OPC_CALL); }  cat0_immed
 |                  T_OP_RET        { new_instr(OPC_RET); }
@@ -881,8 +901,8 @@ cat0_instr:        T_OP_NOP        { new_instr(OPC_NOP); }
 |                  T_OP_DBG        { new_instr(OPC_DBG); }
 |                  T_OP_SHPS       { new_instr(OPC_SHPS); }     cat0_immed
 |                  T_OP_SHPE       { new_instr(OPC_SHPE); }
-|                  T_OP_PREDT      { new_instr(OPC_PREDT); }    cat0_src1
-|                  T_OP_PREDF      { new_instr(OPC_PREDF); }    cat0_src1
+|                  T_OP_PREDT      { new_instr(OPC_PREDT); }
+|                  T_OP_PREDF      { new_instr(OPC_PREDF); }
 |                  T_OP_PREDE      { new_instr(OPC_PREDE); }
 |                  T_OP_GETLAST '.' T_W { new_instr(OPC_GETLAST); }   cat0_immed
 
@@ -1288,6 +1308,7 @@ cat6_bindless_ldc_opc: T_OP_LDC  { new_instr(OPC_LDC); }
 /* This is separated from the opcode to avoid lookahead/shift-reduce conflicts */
 cat6_bindless_ldc_middle:
                         T_OFFSET '.' cat6_immed '.' cat6_bindless_mode dst_reg { instr->cat6.d = $1; }
+|                       'u' '.' T_OFFSET '.' cat6_immed '.' cat6_bindless_mode dst_reg { instr->flags |= IR3_INSTR_U; instr->cat6.d = $3; }
 |                       cat6_immed '.' 'k' '.' cat6_bindless_mode 'c' '[' T_A1 ']' { instr->opc = OPC_LDC_K; }
 
 cat6_bindless_ldc: cat6_bindless_ldc_opc '.' cat6_bindless_ldc_middle ',' cat6_reg_or_immed ',' cat6_reg_or_immed {
@@ -1434,12 +1455,12 @@ meta_print: meta_print_start meta_print_regs {
 src:               T_REGISTER     { $$ = new_src($1, 0); }
 |                  T_A0           { $$ = new_src((61 << 3), IR3_REG_HALF); }
 |                  T_A1           { $$ = new_src((61 << 3) + 1, IR3_REG_HALF); }
-|                  T_P0           { $$ = new_src((62 << 3) + $1, 0); }
+|                  T_P0           { $$ = new_src((62 << 3) + $1, IR3_REG_PREDICATE); }
 
 dst:               T_REGISTER     { $$ = new_dst($1, 0); }
 |                  T_A0           { $$ = new_dst((61 << 3), IR3_REG_HALF); }
 |                  T_A1           { $$ = new_dst((61 << 3) + 1, IR3_REG_HALF); }
-|                  T_P0           { $$ = new_dst((62 << 3) + $1, 0); }
+|                  T_P0           { $$ = new_dst((62 << 3) + $1, IR3_REG_PREDICATE); }
 
 const:             T_CONSTANT     { $$ = new_src($1, IR3_REG_CONST); }
 

@@ -56,7 +56,7 @@ struct FSCombineConstantsTest : public ::testing::Test {
          s->cfg->dump();
       }
 
-      bool ret = s->opt_combine_constants();
+      bool ret = brw_fs_opt_combine_constants(*s);
 
       if (print) {
          fprintf(stderr, "\n= After =\n");
@@ -125,6 +125,6 @@ TEST_F(FSCombineConstantsTest, DoContainingDo)
     * test is that the shader would be empty.
     */
    ASSERT_GE(shader->cfg->num_blocks, original_num_blocks);
-   shader->validate();
+   brw_fs_validate(*shader);
 }
 

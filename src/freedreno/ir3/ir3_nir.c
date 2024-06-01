@@ -85,6 +85,24 @@ ir3_load_driver_ubo_indirect(nir_builder *b, unsigned components,
 }
 
 static bool
+ir3_nir_should_scalarize_mem(const nir_instr *instr, const void *data)
+{
+   const struct ir3_compiler *compiler = data;
+   const nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+
+   /* Scalarize load_ssbo's that we could otherwise lower to isam,
+    * as the tex cache benefit outweighs the benefit of vectorizing
+    */
+   if ((intrin->intrinsic == nir_intrinsic_load_ssbo) &&
+       (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
+       compiler->has_isam_ssbo) {
+      return true;
+   }
+
+   return false;
+}
+
+static bool
 ir3_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
                              unsigned bit_size, unsigned num_components,
                              nir_intrinsic_instr *low,
@@ -707,7 +725,8 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
 
    bool progress = false;
 
-   NIR_PASS_V(s, nir_lower_io_to_scalar, nir_var_mem_ssbo, NULL, NULL);
+   NIR_PASS_V(s, nir_lower_io_to_scalar, nir_var_mem_ssbo,
+              ir3_nir_should_scalarize_mem, so->compiler);
 
    if (so->key.has_gs || so->key.tessellation) {
       switch (so->type) {
@@ -859,7 +878,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
           * coordinates that had been upconverted to 32-bits just for the
           * sampler to just be 16-bit texture sources.
           */
-         struct nir_fold_tex_srcs_options fold_srcs_options = {
+         struct nir_opt_tex_srcs_options opt_srcs_options = {
             .sampler_dims = ~0,
             .src_types = (1 << nir_tex_src_coord) |
                          (1 << nir_tex_src_lod) |
@@ -871,17 +890,17 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
                          (1 << nir_tex_src_ddx) |
                          (1 << nir_tex_src_ddy),
          };
-         struct nir_fold_16bit_tex_image_options fold_16bit_options = {
+         struct nir_opt_16bit_tex_image_options opt_16bit_options = {
             .rounding_mode = nir_rounding_mode_rtz,
-            .fold_tex_dest_types = nir_type_float,
+            .opt_tex_dest_types = nir_type_float,
             /* blob dumps have no half regs on pixel 2's ldib or stib, so only enable for a6xx+. */
-            .fold_image_dest_types = so->compiler->gen >= 6 ?
+            .opt_image_dest_types = so->compiler->gen >= 6 ?
                                         nir_type_float | nir_type_uint | nir_type_int : 0,
-            .fold_image_store_data = so->compiler->gen >= 6,
-            .fold_srcs_options_count = 1,
-            .fold_srcs_options = &fold_srcs_options,
+            .opt_image_store_data = so->compiler->gen >= 6,
+            .opt_srcs_options_count = 1,
+            .opt_srcs_options = &opt_srcs_options,
          };
-         OPT(s, nir_fold_16bit_tex_image, &fold_16bit_options);
+         OPT(s, nir_opt_16bit_tex_image, &opt_16bit_options);
       }
       OPT_V(s, nir_opt_constant_folding);
       OPT_V(s, nir_copy_prop);

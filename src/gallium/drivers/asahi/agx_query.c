@@ -46,8 +46,6 @@ is_timer(struct agx_query *query)
    }
 }
 
-#define AGX_MAX_OCCLUSION_QUERIES (65536)
-
 struct agx_oq_heap {
    /* The GPU allocation itself */
    struct agx_bo *bo;
@@ -556,7 +554,7 @@ agx_get_query_result_resource_gpu(struct agx_context *ctx,
                                  &cb);
 
    struct pipe_grid_info grid = {.block = {1, 1, 1}, .grid = {1, 1, 1}};
-   agx_launch(batch, &grid, cs, PIPE_SHADER_COMPUTE);
+   agx_launch(batch, &grid, cs, NULL, PIPE_SHADER_COMPUTE);
 
    /* take_ownership=true so do not unreference */
    ctx->base.set_constant_buffer(&ctx->base, PIPE_SHADER_COMPUTE, 0, true,

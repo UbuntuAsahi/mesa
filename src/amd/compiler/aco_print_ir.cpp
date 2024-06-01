@@ -1,25 +1,7 @@
 /*
  * Copyright © 2018 Valve Corporation
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
- * IN THE SOFTWARE.
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #include "aco_builder.h"
@@ -285,21 +267,40 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
 {
    switch (instr->format) {
    case Format::SOPK: {
-      const SOPK_instruction& sopk = instr->sopk();
+      const SALU_instruction& sopk = instr->salu();
       fprintf(output, " imm:%d", sopk.imm & 0x8000 ? (sopk.imm - 65536) : sopk.imm);
       break;
    }
    case Format::SOPP: {
-      uint16_t imm = instr->sopp().imm;
+      uint16_t imm = instr->salu().imm;
       switch (instr->opcode) {
-      case aco_opcode::s_waitcnt: {
-         wait_imm unpacked(gfx_level, imm);
-         if (unpacked.vm != wait_imm::unset_counter)
-            fprintf(output, " vmcnt(%d)", unpacked.vm);
-         if (unpacked.exp != wait_imm::unset_counter)
-            fprintf(output, " expcnt(%d)", unpacked.exp);
-         if (unpacked.lgkm != wait_imm::unset_counter)
-            fprintf(output, " lgkmcnt(%d)", unpacked.lgkm);
+      case aco_opcode::s_waitcnt:
+      case aco_opcode::s_wait_loadcnt_dscnt:
+      case aco_opcode::s_wait_storecnt_dscnt: {
+         wait_imm unpacked;
+         unpacked.unpack(gfx_level, instr);
+         const char* names[wait_type_num];
+         names[wait_type_exp] = "expcnt";
+         names[wait_type_vm] = gfx_level >= GFX12 ? "loadcnt" : "vmcnt";
+         names[wait_type_lgkm] = gfx_level >= GFX12 ? "dscnt" : "lgkmcnt";
+         names[wait_type_vs] = gfx_level >= GFX12 ? "storecnt" : "vscnt";
+         names[wait_type_sample] = "samplecnt";
+         names[wait_type_bvh] = "bvhcnt";
+         names[wait_type_km] = "kmcnt";
+         for (unsigned i = 0; i < wait_type_num; i++) {
+            if (unpacked[i] != wait_imm::unset_counter)
+               fprintf(output, " %s(%d)", names[i], unpacked[i]);
+         }
+         break;
+      }
+      case aco_opcode::s_wait_expcnt:
+      case aco_opcode::s_wait_dscnt:
+      case aco_opcode::s_wait_loadcnt:
+      case aco_opcode::s_wait_storecnt:
+      case aco_opcode::s_wait_samplecnt:
+      case aco_opcode::s_wait_bvhcnt:
+      case aco_opcode::s_wait_kmcnt: {
+         fprintf(output, " imm:%u", imm);
          break;
       }
       case aco_opcode::s_waitcnt_depctr: {
@@ -399,13 +400,13 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
          break;
       }
       default: {
-         if (imm)
+         if (instr_info.classes[(int)instr->opcode] == instr_class::branch)
+            fprintf(output, " block:BB%d", imm);
+         else if (imm)
             fprintf(output, " imm:%u", imm);
          break;
       }
       }
-      if (instr->sopp().block != -1)
-         fprintf(output, " block:BB%d", instr->sopp().block);
       break;
    }
    case Format::SOP1: {
@@ -445,6 +446,8 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
    case Format::VINTRP: {
       const VINTRP_instruction& vintrp = instr->vintrp();
       fprintf(output, " attr%d.%c", vintrp.attribute, "xyzw"[vintrp.component]);
+      if (vintrp.high_16bits)
+         fprintf(output, " high");
       break;
    }
    case Format::DS: {
@@ -464,6 +467,8 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
          fprintf(output, " attr%u.%c", ldsdir.attr, "xyzw"[ldsdir.attr_chan]);
       if (ldsdir.wait_vdst != 15)
          fprintf(output, " wait_vdst:%u", ldsdir.wait_vdst);
+      if (ldsdir.wait_vsrc != 1)
+         fprintf(output, " wait_vsrc:%u", ldsdir.wait_vsrc);
       print_sync(ldsdir.sync, output);
       break;
    }

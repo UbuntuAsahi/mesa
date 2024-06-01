@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <xf86drm.h>
 #include "drm-uapi/asahi_drm.h"
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
@@ -12,6 +13,7 @@
 #include "util/vma.h"
 #include "agx_bo.h"
 #include "agx_formats.h"
+#include "decode.h"
 
 // TODO: this is a lie right now
 static const uint64_t AGX_SUPPORTED_INCOMPAT_FEATURES =
@@ -35,7 +37,7 @@ enum agx_dbg {
    AGX_DBG_SMALLTILE = BITFIELD_BIT(14),
    AGX_DBG_NOMSAA = BITFIELD_BIT(15),
    AGX_DBG_NOSHADOW = BITFIELD_BIT(16),
-   AGX_DBG_VARYINGS = BITFIELD_BIT(17),
+   /* bit 17 unused */
    AGX_DBG_SCRATCH = BITFIELD_BIT(18),
    AGX_DBG_COMPBLIT = BITFIELD_BIT(19),
    AGX_DBG_FEEDBACK = BITFIELD_BIT(20),
@@ -56,6 +58,17 @@ struct nir_shader;
 #define BARRIER_RENDER  (1 << DRM_ASAHI_SUBQUEUE_RENDER)
 #define BARRIER_COMPUTE (1 << DRM_ASAHI_SUBQUEUE_COMPUTE)
 
+typedef struct {
+   struct agx_bo *(*bo_alloc)(struct agx_device *dev, size_t size, size_t align,
+                              enum agx_bo_flags flags);
+   int (*bo_bind)(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
+                  uint32_t flags);
+   void (*bo_mmap)(struct agx_bo *bo);
+   ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
+   int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
+                 uint32_t vbo_res_id);
+} agx_device_ops_t;
+
 struct agx_device {
    uint32_t debug;
 
@@ -65,6 +78,12 @@ struct agx_device {
    char name[64];
    struct drm_asahi_params_global params;
    uint64_t next_global_id, last_global_id;
+   bool is_virtio;
+   agx_device_ops_t ops;
+
+   /* vdrm device */
+   struct vdrm_device *vdrm;
+   uint32_t next_blob_id;
 
    /* Device handle */
    int fd;
@@ -106,6 +125,8 @@ struct agx_device {
    } bo_cache;
 
    struct agx_bo *helper;
+
+   struct agxdecode_ctx *agxdecode;
 };
 
 bool agx_open_device(void *memctx, struct agx_device *dev);
@@ -118,11 +139,11 @@ agx_lookup_bo(struct agx_device *dev, uint32_t handle)
    return util_sparse_array_get(&dev->bo_map, handle);
 }
 
-void agx_bo_mmap(struct agx_bo *bo);
-
 uint64_t agx_get_global_id(struct agx_device *dev);
 
-uint32_t agx_create_command_queue(struct agx_device *dev, uint32_t caps);
+uint32_t agx_create_command_queue(struct agx_device *dev, uint32_t caps,
+                                  uint32_t priority);
+int agx_destroy_command_queue(struct agx_device *dev, uint32_t queue_id);
 
 int agx_import_sync_file(struct agx_device *dev, struct agx_bo *bo, int fd);
 int agx_export_sync_file(struct agx_device *dev, struct agx_bo *bo);
@@ -136,8 +157,6 @@ agx_gpu_time_to_ns(struct agx_device *dev, uint64_t gpu_time)
 {
    return (gpu_time * NSEC_PER_SEC) / dev->params.timer_frequency_hz;
 }
-
-void agx_bo_mmap(struct agx_bo *bo);
 
 void agx_get_device_uuid(const struct agx_device *dev, void *uuid);
 void agx_get_driver_uuid(void *uuid);

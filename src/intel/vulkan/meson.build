@@ -94,6 +94,8 @@ _dev_icd = custom_target(
   build_by_default : true,
 )
 
+devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+# Deprecated: replaced by VK_DRIVER_FILES above
 devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
 
 libanv_per_hw_ver_libs = []
@@ -130,7 +132,7 @@ foreach _gfx_ver : ['90', '110', '120', '125', '200']
       dep_libdrm, dep_valgrind, idep_nir_headers, idep_genxml,
       idep_vulkan_util_headers, idep_vulkan_wsi_headers,
       idep_vulkan_runtime_headers, idep_intel_driver_ds_headers,
-      idep_grl, idep_intel_shaders,
+      idep_grl, idep_intel_shaders, idep_intel_blorp,
     ],
   )
 endforeach
@@ -207,6 +209,7 @@ anv_deps = [
   idep_vulkan_runtime_headers,
   idep_vulkan_wsi_headers,
   idep_intel_shaders,
+  idep_intel_blorp,
 ]
 
 if with_platform_x11
@@ -254,13 +257,14 @@ libvulkan_intel = shared_library(
   ],
   link_whole : [libanv_common, libanv_per_hw_ver_libs] + optional_libgrl,
   link_with : [
-    libintel_compiler, libisl, libblorp, libintel_perf,
+    libisl, libintel_perf,
   ],
   dependencies : [
     dep_thread, dep_dl, dep_m, anv_deps, idep_libintel_common,
     idep_nir, idep_genxml, idep_vulkan_util, idep_vulkan_wsi,
     idep_vulkan_runtime, idep_mesautil, idep_xmlconfig,
-    idep_intel_driver_ds, idep_intel_dev,
+    idep_intel_driver_ds, idep_intel_dev, idep_intel_blorp,
+    idep_intel_compiler_brw, idep_intel_decoder_brw,
   ],
   c_args : anv_flags,
   gnu_symbol_visibility : 'hidden',
@@ -291,13 +295,14 @@ if with_tests
     ],
     link_whole : libanv_common,
     link_with : [
-      libanv_per_hw_ver_libs, libintel_compiler, libintel_common,
-      libisl, libblorp, libintel_perf,
+      libanv_per_hw_ver_libs, libintel_common,
+      libisl, libintel_perf,
     ] + optional_libgrl,
     dependencies : [
       dep_thread, dep_dl, dep_m, anv_deps,
       idep_nir, idep_vulkan_util, idep_vulkan_wsi, idep_vulkan_runtime,
-      idep_mesautil, idep_intel_dev, idep_intel_shaders,
+      idep_mesautil, idep_intel_dev, idep_intel_shaders, idep_intel_blorp,
+      idep_intel_compiler_brw, idep_intel_decoder_brw,
     ],
     c_args : anv_flags,
     gnu_symbol_visibility : 'hidden',

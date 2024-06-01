@@ -82,7 +82,8 @@ foreach v : ['80', '90', '110', '120', '125', '200']
     ],
     gnu_symbol_visibility : 'hidden',
     dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_nir_headers,
-                    idep_intel_driver_ds_headers, idep_intel_shaders, ],
+                    idep_intel_driver_ds_headers, idep_intel_shaders,
+                    idep_intel_blorp],
   )
 endforeach
 
@@ -99,10 +100,13 @@ libiris = static_library(
   cpp_args : [sse2_args],
   gnu_symbol_visibility : 'hidden',
   dependencies : [dep_libdrm, dep_valgrind, idep_genxml, idep_nir_headers,
-                  idep_libintel_common, idep_intel_driver_ds, idep_intel_dev],
+                  idep_libintel_common, idep_intel_driver_ds, idep_intel_dev,
+                  idep_intel_blorp_elk, idep_intel_decoder_elk,
+                  idep_intel_blorp, idep_intel_decoder_brw,
+                  idep_intel_compiler_elk, idep_intel_compiler_brw],
   link_with : [
-    iris_per_hw_ver_libs, libintel_compiler, libisl,
-    libblorp, libintel_perf
+    iris_per_hw_ver_libs, libisl,
+    libintel_perf
   ],
 )
 

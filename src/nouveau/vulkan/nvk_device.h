@@ -32,7 +32,6 @@ nvk_slm_area_get_bo_ref(struct nvk_slm_area *area,
 
 struct nvk_device {
    struct vk_device vk;
-   struct nvk_physical_device *pdev;
 
    struct nouveau_ws_device *ws_dev;
 
@@ -47,8 +46,6 @@ struct nvk_device {
    struct nouveau_ws_bo *vab_memory;
 
    struct nvk_queue queue;
-
-   struct vk_pipeline_cache *mem_cache;
 
    struct vk_meta_device meta;
 };

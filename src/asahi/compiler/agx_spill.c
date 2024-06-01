@@ -272,6 +272,34 @@ reconstruct_index(struct spill_ctx *ctx, unsigned node)
    return agx_get_vec_index(node, ctx->size[node], ctx->channels[node]);
 }
 
+static bool
+can_remat(agx_instr *I)
+{
+   switch (I->op) {
+   case AGX_OPCODE_MOV_IMM:
+   case AGX_OPCODE_GET_SR:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static agx_instr *
+remat_to(agx_builder *b, agx_index dst, struct spill_ctx *ctx, unsigned node)
+{
+   agx_instr *I = ctx->remat[node];
+   assert(can_remat(I));
+
+   switch (I->op) {
+   case AGX_OPCODE_MOV_IMM:
+      return agx_mov_imm_to(b, dst, I->imm);
+   case AGX_OPCODE_GET_SR:
+      return agx_get_sr_to(b, dst, I->sr);
+   default:
+      unreachable("invalid remat");
+   }
+}
+
 static void
 insert_spill(agx_builder *b, struct spill_ctx *ctx, unsigned node)
 {
@@ -290,8 +318,7 @@ insert_reload(struct spill_ctx *ctx, agx_block *block, agx_cursor cursor,
 
    /* Reloading breaks SSA, but agx_repair_ssa will repair */
    if (ctx->remat[node]) {
-      assert(ctx->remat[node]->op == AGX_OPCODE_MOV_IMM);
-      agx_mov_imm_to(&b, idx, ctx->remat[node]->imm);
+      remat_to(&b, idx, ctx, node);
    } else {
       agx_mov_to(&b, idx, agx_index_as_mem(idx, ctx->spill_base));
    }
@@ -479,11 +506,10 @@ insert_coupling_code(struct spill_ctx *ctx, agx_block *pred, agx_block *succ)
       if (ctx->remat[I->src[s].value]) {
          unsigned node = I->src[s].value;
          agx_index idx = reconstruct_index(ctx, node);
+         agx_index tmp = agx_temp_like(ctx->shader, idx);
 
-         assert(ctx->remat[node]->op == AGX_OPCODE_MOV_IMM);
-         agx_mov_to(&b, agx_index_as_mem(idx, ctx->spill_base),
-                    agx_mov_imm(&b, agx_size_align_16(idx.size) * 16,
-                                ctx->remat[node]->imm));
+         remat_to(&b, tmp, ctx, node);
+         agx_mov_to(&b, agx_index_as_mem(idx, ctx->spill_base), tmp);
       }
 
       /* Use the spilled version */
@@ -1093,12 +1119,9 @@ agx_spill(agx_context *ctx, unsigned k)
 {
    void *memctx = ralloc_context(NULL);
 
-   /* If control flow is used, we force the nesting counter (r0l) live
-    * throughout the shader. Just subtract that from our limit so we can forget
-    * about it while spilling.
-    */
-   if (ctx->any_cf)
-      k--;
+   /* Reserve the bottom registers as temporaries for memory-memory swaps */
+   ctx->has_spill_pcopy_reserved = true;
+   k -= 8;
 
    uint8_t *channels = rzalloc_array(memctx, uint8_t, ctx->alloc);
    dist_t *next_uses = rzalloc_array(memctx, dist_t, ctx->alloc);
@@ -1106,7 +1129,7 @@ agx_spill(agx_context *ctx, unsigned k)
    agx_instr **remat = rzalloc_array(memctx, agx_instr *, ctx->alloc);
 
    agx_foreach_instr_global(ctx, I) {
-      if (I->op == AGX_OPCODE_MOV_IMM)
+      if (can_remat(I))
          remat[I->dest[0].value] = I;
 
       /* Measure vectors */

@@ -913,7 +913,7 @@ vtn_get_builtin_location(struct vtn_builder *b,
          *mode = nir_var_shader_in;
       else if (b->shader->info.stage == MESA_SHADER_GEOMETRY)
          *mode = nir_var_shader_out;
-      else if (b->options && b->options->caps.shader_viewport_index_layer &&
+      else if (b->supported_capabilities.ShaderViewportIndexLayerEXT &&
                (b->shader->info.stage == MESA_SHADER_VERTEX ||
                 b->shader->info.stage == MESA_SHADER_TESS_EVAL ||
                 b->shader->info.stage == MESA_SHADER_MESH))
@@ -925,7 +925,7 @@ vtn_get_builtin_location(struct vtn_builder *b,
       *location = VARYING_SLOT_VIEWPORT;
       if (b->shader->info.stage == MESA_SHADER_GEOMETRY)
          *mode = nir_var_shader_out;
-      else if (b->options && b->options->caps.shader_viewport_index_layer &&
+      else if (b->supported_capabilities.ShaderViewportIndexLayerEXT &&
                (b->shader->info.stage == MESA_SHADER_VERTEX ||
                 b->shader->info.stage == MESA_SHADER_TESS_EVAL ||
                 b->shader->info.stage == MESA_SHADER_MESH))
@@ -2044,7 +2044,9 @@ adjust_patch_locations(struct vtn_builder *b, struct vtn_variable *var)
 
    for (uint16_t i = 0; i < num_data; i++) {
       vtn_assert(data[i].location < VARYING_SLOT_PATCH0);
-      if (data[i].patch && data[i].location >= VARYING_SLOT_VAR0)
+      if (data[i].patch &&
+          (data[i].mode == nir_var_shader_in || data[i].mode == nir_var_shader_out) &&
+          data[i].location >= VARYING_SLOT_VAR0)
          data[i].location += VARYING_SLOT_PATCH0 - VARYING_SLOT_VAR0;
    }
 }
@@ -2090,7 +2092,8 @@ vtn_create_variable(struct vtn_builder *b, struct vtn_value *val,
    case vtn_variable_mode_ssbo:
       if (storage_class == SpvStorageClassStorageBuffer &&
           !without_array->block) {
-         if (b->variable_pointers) {
+         if (!b->enabled_capabilities.VariablePointers &&
+             !b->enabled_capabilities.VariablePointersStorageBuffer) {
             vtn_fail("Variables in the StorageBuffer storage class must "
                      "have a struct type with the Block decoration");
          } else {

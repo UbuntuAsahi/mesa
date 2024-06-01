@@ -41,6 +41,7 @@
 #include "util/u_screen.h"
 #include "util/u_upload_mgr.h"
 #include "util/xmlconfig.h"
+#include "agx_bg_eot.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
 #include "agx_fence.h"
@@ -58,34 +59,6 @@
 #ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED
 #define DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED (3)
 #endif
-
-/* clang-format off */
-static const struct debug_named_value agx_debug_options[] = {
-   {"trace",     AGX_DBG_TRACE,    "Trace the command stream"},
-   {"no16",      AGX_DBG_NO16,     "Disable 16-bit support"},
-   {"perf",      AGX_DBG_PERF,     "Print performance warnings"},
-#ifndef NDEBUG
-   {"dirty",     AGX_DBG_DIRTY,    "Disable dirty tracking"},
-#endif
-   {"compblit",  AGX_DBG_COMPBLIT, "Enable compute blitter"},
-   {"precompile",AGX_DBG_PRECOMPILE,"Precompile shaders for shader-db"},
-   {"nocompress",AGX_DBG_NOCOMPRESS,"Disable lossless compression"},
-   {"nocluster", AGX_DBG_NOCLUSTER,"Disable vertex clustering"},
-   {"sync",      AGX_DBG_SYNC,     "Synchronously wait for all submissions"},
-   {"stats",     AGX_DBG_STATS,    "Show command execution statistics"},
-   {"resource",  AGX_DBG_RESOURCE, "Log resource operations"},
-   {"batch",     AGX_DBG_BATCH,    "Log batches"},
-   {"nowc",      AGX_DBG_NOWC,     "Disable write-combining"},
-   {"synctvb",   AGX_DBG_SYNCTVB,  "Synchronous TVB growth"},
-   {"smalltile", AGX_DBG_SMALLTILE,"Force 16x16 tiles"},
-   {"feedback",  AGX_DBG_FEEDBACK, "Debug feedback loops"},
-   {"nomsaa",    AGX_DBG_NOMSAA,   "Force disable MSAA"},
-   {"noshadow",  AGX_DBG_NOSHADOW, "Force disable resource shadowing"},
-   {"varyings",  AGX_DBG_VARYINGS,  "Validate varying linkage"},
-   {"scratch",   AGX_DBG_SCRATCH,  "Debug scratch memory usage"},
-   DEBUG_NAMED_VALUE_END
-};
-/* clang-format on */
 
 uint64_t agx_best_modifiers[] = {
    DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED,
@@ -971,6 +944,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
 {
    struct agx_context *ctx = agx_context(pctx);
    struct agx_resource *rsrc = agx_resource(resource);
+   struct agx_device *dev = agx_device(ctx->base.screen);
 
    /* Can't map tiled/compressed directly */
    if ((usage & PIPE_MAP_DIRECTLY) && rsrc->modifier != DRM_FORMAT_MOD_LINEAR)
@@ -1034,11 +1008,11 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
          agx_sync_writer(ctx, staging, "GPU read staging blit");
       }
 
-      agx_bo_mmap(staging->bo);
+      dev->ops.bo_mmap(staging->bo);
       return staging->bo->ptr.cpu;
    }
 
-   agx_bo_mmap(rsrc->bo);
+   dev->ops.bo_mmap(rsrc->bo);
 
    if (ail_is_level_twiddled_uncompressed(&rsrc->layout, level)) {
       /* Should never happen for buffers, and it's not safe */
@@ -1297,10 +1271,11 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
            struct agx_batch *batch, struct pipe_framebuffer_state *framebuffer,
            uint64_t encoder_ptr, uint64_t encoder_id, uint64_t cmd_ta_id,
            uint64_t cmd_3d_id, uint64_t scissor_ptr, uint64_t depth_bias_ptr,
-           uint64_t visibility_result_ptr, uint32_t pipeline_clear,
-           uint32_t pipeline_load, uint32_t pipeline_store,
-           bool clear_pipeline_textures, double clear_depth,
-           unsigned clear_stencil, struct agx_tilebuffer_layout *tib)
+           uint64_t visibility_result_ptr, struct asahi_bg_eot pipeline_clear,
+           struct asahi_bg_eot pipeline_load,
+           struct asahi_bg_eot pipeline_store, bool clear_pipeline_textures,
+           double clear_depth, unsigned clear_stencil,
+           struct agx_tilebuffer_layout *tib)
 {
    memset(c, 0, sizeof(*c));
 
@@ -1486,33 +1461,23 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    if (tib->nr_samples > 1 && framebuffer->zsbuf)
       c->flags |= ASAHI_RENDER_MSAA_ZS;
 
-   agx_pack(&c->load_pipeline_bind, COUNTS, cfg) {
-      cfg.uniforms = 4 + (framebuffer->nr_cbufs * 8);
+   memcpy(&c->load_pipeline_bind, &pipeline_clear.counts,
+          sizeof(struct agx_counts_packed));
 
-      bool spills = agx_tilebuffer_spills(&batch->tilebuffer_layout);
-      unsigned nr_tex_per_rt = (spills || clear_pipeline_textures) ? 2 : 0;
-      cfg.texture_states = framebuffer->nr_cbufs * nr_tex_per_rt;
+   memcpy(&c->store_pipeline_bind, &pipeline_store.counts,
+          sizeof(struct agx_counts_packed));
 
-      cfg.sampler_states = clear_pipeline_textures
-                              ? AGX_SAMPLER_STATES_4_COMPACT
-                              : AGX_SAMPLER_STATES_0;
-      cfg.unknown = 0xFFFF;
+   memcpy(&c->partial_reload_pipeline_bind, &pipeline_load.counts,
+          sizeof(struct agx_counts_packed));
 
-      if (tib->nr_samples > 1 && spills) {
-         /* XXX: do this less silly */
-         cfg.uniforms = 256;
-         cfg.preshader_gprs = 128;
-      }
-   }
+   memcpy(&c->partial_store_pipeline_bind, &pipeline_store.counts,
+          sizeof(struct agx_counts_packed));
 
    /* XXX is this correct? */
-   c->load_pipeline = pipeline_clear | (framebuffer->nr_cbufs >= 4 ? 8 : 4);
-
-   agx_pack(&c->store_pipeline_bind, COUNTS, cfg) {
-      cfg.texture_states = framebuffer->nr_cbufs;
-   }
-
-   c->store_pipeline = pipeline_store | 4;
+   c->load_pipeline = pipeline_clear.usc | (framebuffer->nr_cbufs >= 4 ? 8 : 4);
+   c->store_pipeline = pipeline_store.usc | 4;
+   c->partial_reload_pipeline = pipeline_load.usc | 4;
+   c->partial_store_pipeline = pipeline_store.usc | 4;
 
    c->utile_width = tib->tile_size.width;
    c->utile_height = tib->tile_size.height;
@@ -1529,20 +1494,6 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    float tan_60 = 1.732051f;
    c->merge_upper_x = fui(tan_60 / framebuffer->width);
    c->merge_upper_y = fui(tan_60 / framebuffer->height);
-
-   agx_pack(&c->partial_reload_pipeline_bind, COUNTS, cfg) {
-      cfg.texture_states = framebuffer->nr_cbufs * 2;
-      cfg.sampler_states = AGX_SAMPLER_STATES_4_COMPACT;
-      cfg.unknown = 0xFFFF;
-   }
-
-   c->partial_reload_pipeline = pipeline_load | 4;
-
-   agx_pack(&c->partial_store_pipeline_bind, COUNTS, cfg) {
-      cfg.texture_states = framebuffer->nr_cbufs;
-   }
-
-   c->partial_store_pipeline = pipeline_store | 4;
 
    c->scissor_array = scissor_ptr;
    c->depth_bias_array = depth_bias_ptr;
@@ -1699,9 +1650,13 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
    uint8_t stop[5 + 64] = {0x00, 0x00, 0x00, 0xc0, 0x00};
    memcpy(batch->vdm.current, stop, sizeof(stop));
 
-   uint64_t pipeline_background = agx_build_meta(batch, false, false);
-   uint64_t pipeline_background_partial = agx_build_meta(batch, false, true);
-   uint64_t pipeline_store = agx_build_meta(batch, true, false);
+   struct asahi_bg_eot pipeline_background =
+      agx_build_bg_eot(batch, false, false);
+
+   struct asahi_bg_eot pipeline_background_partial =
+      agx_build_bg_eot(batch, false, true);
+
+   struct asahi_bg_eot pipeline_store = agx_build_bg_eot(batch, true, false);
 
    bool clear_pipeline_textures =
       agx_tilebuffer_spills(&batch->tilebuffer_layout);
@@ -1777,6 +1732,7 @@ agx_destroy_context(struct pipe_context *pctx)
 {
    struct agx_device *dev = agx_device(pctx->screen);
    struct agx_context *ctx = agx_context(pctx);
+   struct agx_screen *screen = agx_screen(pctx->screen);
 
    /* Batch state needs to be freed on completion, and we don't want to yank
     * buffers out from in-progress GPU jobs to avoid faults, so just wait until
@@ -1793,10 +1749,15 @@ agx_destroy_context(struct pipe_context *pctx)
 
    util_unreference_framebuffer_state(&ctx->framebuffer);
 
-   agx_meta_cleanup(&ctx->meta);
+   agx_bg_eot_cleanup(&ctx->bg_eot);
    agx_destroy_meta_shaders(ctx);
 
    agx_bo_unreference(ctx->result_buf);
+
+   /* Lock around the syncobj destruction, to avoid racing
+    * command submission in another context.
+    **/
+   u_rwlock_wrlock(&screen->destroy_lock);
 
    drmSyncobjDestroy(dev->fd, ctx->in_sync_obj);
    drmSyncobjDestroy(dev->fd, ctx->dummy_syncobj);
@@ -1808,11 +1769,15 @@ agx_destroy_context(struct pipe_context *pctx)
          drmSyncobjDestroy(dev->fd, ctx->batches.slots[i].syncobj);
    }
 
+   u_rwlock_wrunlock(&screen->destroy_lock);
+
    pipe_resource_reference(&ctx->heap, NULL);
 
    agx_scratch_fini(&ctx->scratch_vs);
    agx_scratch_fini(&ctx->scratch_fs);
    agx_scratch_fini(&ctx->scratch_cs);
+
+   agx_destroy_command_queue(dev, ctx->queue_id);
 
    ralloc_free(ctx);
 }
@@ -1867,6 +1832,20 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    }
    pctx->const_uploader = pctx->stream_uploader;
 
+   uint32_t priority = 2;
+   if (flags & PIPE_CONTEXT_PRIORITY_LOW)
+      priority = 3;
+   else if (flags & PIPE_CONTEXT_PRIORITY_MEDIUM)
+      priority = 2;
+   else if (flags & PIPE_CONTEXT_PRIORITY_HIGH)
+      priority = 1;
+
+   ctx->queue_id = agx_create_command_queue(agx_device(screen),
+                                            DRM_ASAHI_QUEUE_CAP_RENDER |
+                                               DRM_ASAHI_QUEUE_CAP_BLIT |
+                                               DRM_ASAHI_QUEUE_CAP_COMPUTE,
+                                            priority);
+
    pctx->destroy = agx_destroy_context;
    pctx->flush = agx_flush;
    pctx->clear = agx_clear;
@@ -1897,7 +1876,7 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    agx_init_query_functions(pctx);
    agx_init_streamout_functions(pctx);
 
-   agx_meta_init(&ctx->meta, agx_device(screen));
+   agx_bg_eot_init(&ctx->bg_eot, agx_device(screen));
    agx_init_meta_shaders(ctx);
 
    ctx->blitter = util_blitter_create(pctx);
@@ -1952,6 +1931,21 @@ agx_get_name(struct pipe_screen *pscreen)
    return dev->name;
 }
 
+static void
+agx_query_memory_info(struct pipe_screen *pscreen,
+                      struct pipe_memory_info *info)
+{
+   uint64_t mem_B = 0;
+   os_get_total_physical_memory(&mem_B);
+
+   uint64_t mem_kB = mem_B / 1024;
+
+   *info = (struct pipe_memory_info){
+      .total_device_memory = mem_kB,
+      .avail_device_memory = mem_kB,
+   };
+}
+
 static int
 agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 {
@@ -1970,8 +1964,6 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
    case PIPE_CAP_SHADER_PACK_HALF_FLOAT:
    case PIPE_CAP_FS_FINE_DERIVATIVE:
-   case PIPE_CAP_CULL_DISTANCE_NOCOMBINE:
-   case PIPE_CAP_NIR_COMPACT_ARRAYS:
    case PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS:
    case PIPE_CAP_DOUBLES:
       return 1;
@@ -1987,6 +1979,7 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_QUERY_TIMESTAMP:
    case PIPE_CAP_QUERY_TIME_ELAPSED:
    case PIPE_CAP_QUERY_SO_OVERFLOW:
+   case PIPE_CAP_QUERY_MEMORY_INFO:
    case PIPE_CAP_PRIMITIVE_RESTART:
    case PIPE_CAP_PRIMITIVE_RESTART_FIXED_INDEX:
    case PIPE_CAP_ANISOTROPIC_FILTER:
@@ -2192,6 +2185,10 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_TES_LAYER_VIEWPORT:
       return true;
 
+   case PIPE_CAP_CONTEXT_PRIORITY_MASK:
+      return PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
+             PIPE_CONTEXT_PRIORITY_HIGH;
+
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
    }
@@ -2289,16 +2286,12 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
    case PIPE_SHADER_CAP_CONT_SUPPORTED:
       return 1;
 
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-      return shader == PIPE_SHADER_TESS_CTRL || shader == PIPE_SHADER_TESS_EVAL;
-
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-      return shader == PIPE_SHADER_TESS_CTRL;
-
    case PIPE_SHADER_CAP_SUBROUTINES:
    case PIPE_SHADER_CAP_TGSI_SQRT_SUPPORTED:
       return 0;
 
+   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
+   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
    case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
    case PIPE_SHADER_CAP_INTEGERS:
@@ -2323,6 +2316,8 @@ agx_get_shader_param(struct pipe_screen *pscreen, enum pipe_shader_type shader,
    case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
       /* TODO: Enable when fully baked */
       if (strcmp(util_get_process_name(), "blender") == 0)
+         return PIPE_MAX_SAMPLERS;
+      else if (strcmp(util_get_process_name(), "run") == 0)
          return PIPE_MAX_SAMPLERS;
       else if (strcasestr(util_get_process_name(), "ryujinx") != NULL)
          return PIPE_MAX_SAMPLERS;
@@ -2634,10 +2629,6 @@ agx_screen_create(int fd, struct renderonly *ro,
 
    screen = &agx_screen->pscreen;
 
-   /* Set debug before opening */
-   agx_screen->dev.debug =
-      debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
-
    /* parse driconf configuration now for device specific overrides */
    driParseConfigFiles(config->options, config->options_info, 0, "asahi", NULL,
                        NULL, NULL, 0, NULL, 0);
@@ -2648,16 +2639,13 @@ agx_screen_create(int fd, struct renderonly *ro,
 
    agx_screen->dev.fd = fd;
    agx_screen->dev.ro = ro;
+   u_rwlock_init(&agx_screen->destroy_lock);
 
    /* Try to open an AGX device */
    if (!agx_open_device(agx_screen, &agx_screen->dev)) {
       ralloc_free(agx_screen);
       return NULL;
    }
-
-   agx_screen->queue_id = agx_create_command_queue(
-      &agx_screen->dev, DRM_ASAHI_QUEUE_CAP_RENDER | DRM_ASAHI_QUEUE_CAP_BLIT |
-                           DRM_ASAHI_QUEUE_CAP_COMPUTE);
 
    screen->destroy = agx_destroy_screen;
    screen->get_screen_fd = agx_screen_get_fd;
@@ -2672,6 +2660,7 @@ agx_screen_create(int fd, struct renderonly *ro,
    screen->get_driver_uuid = agx_screen_get_driver_uuid;
    screen->is_format_supported = agx_is_format_supported;
    screen->query_dmabuf_modifiers = agx_query_dmabuf_modifiers;
+   screen->query_memory_info = agx_query_memory_info;
    screen->is_dmabuf_modifier_supported = agx_is_dmabuf_modifier_supported;
    screen->context_create = agx_create_context;
    screen->resource_from_handle = agx_resource_from_handle;

@@ -172,6 +172,17 @@ struct fd_dev_info {
 
       bool broken_ds_ubwc_quirk;
 
+      /* See ir3_compiler::has_scalar_alu. */
+      bool has_scalar_alu;
+
+      /* Whether writing to UBWC attachment and reading the same image as input
+       * attachment or as a texture reads correct values from the image.
+       * If this is false, we may read stale values from the flag buffer,
+       * thus reading incorrect values from the image.
+       * Happens with VK_EXT_attachment_feedback_loop_layout.
+       */
+      bool has_coherent_ubwc_flag_caches;
+
       struct {
          uint32_t PC_POWER_CNTL;
          uint32_t TPL1_DBG_ECO_CNTL;
@@ -197,6 +208,9 @@ struct fd_dev_info {
 
       /* maximum number of descriptor sets */
       uint32_t max_sets;
+
+      float line_width_min;
+      float line_width_max;
    } a6xx;
 
    struct {
@@ -220,6 +234,26 @@ struct fd_dev_info {
       /* Size of buffer in gmem for VPC attributes */
       uint32_t sysmem_vpc_attr_buf_size;
       uint32_t gmem_vpc_attr_buf_size;
+
+      /* Whether UBWC is supported on all IBOs. Prior to this, only readonly
+       * or writeonly IBOs could use UBWC and mixing reads and writes was not
+       * permitted.
+       */
+      bool supports_ibo_ubwc;
+
+      /* Whether the UBWC fast-clear values for snorn, unorm, and int formats
+       * are the same. This is the case from a740 onwards. These formats were
+       * already otherwise UBWC-compatible, so this means that they are now
+       * fully compatible.
+       */
+      bool ubwc_unorm_snorm_int_compatible;
+
+      /* Blob doesn't use hw binning with GS on all a6xx and a7xx, however
+       * in Turnip it worked without issues until a750. On a750 there are CTS
+       * failures when e.g. dEQP-VK.subgroups.arithmetic.framebuffer.* in
+       * parallel with "forcebin". It is exacerbated by using "syncdraw".
+       */
+      bool no_gs_hw_binning_quirk;
    } a7xx;
 };
 
@@ -252,6 +286,8 @@ const struct fd_dev_info *fd_dev_info_raw(const struct fd_dev_id *id);
 
 /* Final dev info with dbg options and everything else applied.  */
 const struct fd_dev_info fd_dev_info(const struct fd_dev_id *id);
+
+const struct fd_dev_info *fd_dev_info_raw_by_name(const char *name);
 
 static uint8_t
 fd_dev_gen(const struct fd_dev_id *id)

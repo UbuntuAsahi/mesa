@@ -175,6 +175,8 @@ isl_device_setup_mocs(struct isl_device *dev)
          dev->mocs.external = 5 << 1;
          /* UC */
          dev->mocs.uncached = 1 << 1;
+         dev->mocs.blitter_dst = 1 << 1;
+         dev->mocs.blitter_src = 1 << 1;
       } else {
          /* TC=1/LLC Only, LeCC=1/UC, LRUM=0, L3CC=3/WB */
          dev->mocs.external = 61 << 1;
@@ -185,6 +187,10 @@ isl_device_setup_mocs(struct isl_device *dev)
 
          /* L1 - HDC:L1 + L3 + LLC */
          dev->mocs.l1_hdc_l3_llc = 48 << 1;
+
+         /* Uncached */
+         dev->mocs.blitter_dst = 3 << 1;
+         dev->mocs.blitter_src = 3 << 1;
       }
       /* Protected is just an additional flag. */
       dev->mocs.protected_mask = 1 << 0;
@@ -267,6 +273,12 @@ isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage,
    uint32_t mask = (usage & ISL_SURF_USAGE_PROTECTED_BIT) ?
       dev->mocs.protected_mask : 0;
 
+   if (usage & ISL_SURF_USAGE_BLITTER_SRC_BIT)
+      return dev->mocs.blitter_src | mask;
+
+   if (usage & ISL_SURF_USAGE_BLITTER_DST_BIT)
+      return dev->mocs.blitter_dst | mask;
+
    if (external)
       return dev->mocs.external | mask;
 
@@ -279,7 +291,7 @@ isl_mocs(const struct isl_device *dev, isl_surf_usage_flags_t usage,
          return dev->mocs.internal | mask;
 
       if (usage & ISL_SURF_USAGE_CPB_BIT)
-         return dev->mocs.internal;
+         return dev->mocs.internal | mask;
 
       /* Using L1:HDC for storage buffers breaks Vulkan memory model
        * tests that use shader atomics.  This isn't likely to work out,
@@ -1104,11 +1116,25 @@ isl_surf_choose_tiling(const struct isl_device *dev,
       CHOOSE(ISL_TILING_LINEAR);
    }
 
+   if (intel_needs_workaround(dev->info, 22015614752) &&
+       _isl_surf_info_supports_ccs(dev, info->format, info->usage) &&
+       (info->levels > 1 || info->depth > 1 || info->array_len > 1)) {
+      /* There are issues with multiple engines accessing the same CCS
+       * cacheline in parallel. This can happen if this image has multiple
+       * subresources. If possible, avoid such conflicts by picking a tiling
+       * that will increase the subresource alignment to 64k. If we can't use
+       * such a tiling, we'll prevent CCS from being enabled later on via
+       * isl_surf_supports_ccs.
+       */
+      CHOOSE(ISL_TILING_64);
+   }
+
    /* For sparse images, prefer the formats that use the standard block
     * shapes.
     */
    if (info->usage & ISL_SURF_USAGE_SPARSE_BIT) {
-      CHOOSE(ISL_GFX_VER(dev) >= 20 ? ISL_TILING_64_XE2 : ISL_TILING_64);
+      CHOOSE(ISL_TILING_64_XE2);
+      CHOOSE(ISL_TILING_64);
       CHOOSE(ISL_TILING_ICL_Ys);
       CHOOSE(ISL_TILING_SKL_Ys);
    }
@@ -1135,7 +1161,8 @@ isl_surf_choose_tiling(const struct isl_device *dev,
    CHOOSE(ISL_TILING_ICL_Yf);
    CHOOSE(ISL_TILING_SKL_Ys);
    CHOOSE(ISL_TILING_ICL_Ys);
-   CHOOSE(ISL_GFX_VER(dev) >= 20 ? ISL_TILING_64_XE2 : ISL_TILING_64);
+   CHOOSE(ISL_TILING_64);
+   CHOOSE(ISL_TILING_64_XE2);
 
    CHOOSE(ISL_TILING_X);
    CHOOSE(ISL_TILING_W);
@@ -1696,6 +1723,17 @@ isl_choose_miptail_start_level(const struct isl_device *dev,
    if (ISL_GFX_VER(dev) == 12 && isl_format_is_yuv(info->format))
       return 15;
 
+   if (intel_needs_workaround(dev->info, 22015614752) &&
+       _isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
+      /* There are issues with multiple engines accessing the same CCS
+       * cacheline in parallel. If we're here, Tile64 is use, providing enough
+       * spacing between each miplevel. We must disable miptails to maintain
+       * the necessary alignment between miplevels.
+       */
+      assert(tile_info->tiling == ISL_TILING_64);
+      return 15;
+   }
+
    assert(isl_tiling_is_64(tile_info->tiling) ||
           isl_tiling_is_std_y(tile_info->tiling));
    assert(info->samples == 1);
@@ -2220,9 +2258,9 @@ isl_calc_row_pitch_alignment(const struct isl_device *dev,
        * matches CCS expectations.
        */
       if (ISL_GFX_VER(dev) >= 12 &&
-          isl_format_supports_ccs_e(dev->info, surf_info->format) &&
+          _isl_surf_info_supports_ccs(dev, surf_info->format,
+                                      surf_info->usage) &&
           tile_info->tiling != ISL_TILING_X &&
-          !(surf_info->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT) &&
           surf_info->row_pitch_B == 0) {
          return isl_align(tile_info->phys_extent_B.width, 512);
       }
@@ -2338,8 +2376,8 @@ isl_calc_min_row_pitch(const struct isl_device *dev,
 }
 
 /**
- * Is `pitch` in the valid range for a hardware bitfield, if the bitfield's
- * size is `bits` bits?
+ * Is ``pitch`` in the valid range for a hardware bitfield, if the bitfield's
+ * size is ``bits`` bits?
  *
  * Hardware pitch fields are offset by 1. For example, if the size of
  * RENDER_SURFACE_STATE::SurfacePitch is B bits, then the range of valid
@@ -2654,11 +2692,7 @@ isl_calc_base_alignment(const struct isl_device *dev,
       if (tile_info->tiling == ISL_TILING_GFX12_CCS)
          base_alignment_B = MAX(base_alignment_B, 4096);
 
-      if (dev->info->has_aux_map &&
-          (isl_format_supports_ccs_d(dev->info, info->format) ||
-           isl_format_supports_ccs_e(dev->info, info->format)) &&
-          !INTEL_DEBUG(DEBUG_NO_CCS) &&
-          !(info->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT)) {
+      if (_isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
          /* Wa_22015614752:
           *
           * Due to L3 cache being tagged with (engineID, vaID) and the CCS
@@ -2691,7 +2725,8 @@ isl_calc_base_alignment(const struct isl_device *dev,
           * is that we haven't enable CCS on linear images yet so we can avoid
           * the extra alignment there.
           */
-         if (!(info->usage & ISL_SURF_USAGE_NO_AUX_TT_ALIGNMENT_BIT)) {
+         if (dev->info->has_aux_map &&
+             !(info->usage & ISL_SURF_USAGE_NO_AUX_TT_ALIGNMENT_BIT)) {
             base_alignment_B = MAX(base_alignment_B, dev->info->verx10 >= 125 ?
                                    1024 * 1024 : 64 * 1024);
          }
@@ -2942,18 +2977,39 @@ isl_surf_get_mcs_surf(const struct isl_device *dev,
 }
 
 bool
+_isl_surf_info_supports_ccs(const struct isl_device *dev,
+                            enum isl_format format,
+                            isl_surf_usage_flags_t usage)
+{
+   if (!isl_format_supports_ccs_d(dev->info, format) &&
+       !isl_format_supports_ccs_e(dev->info, format))
+      return false;
+
+   /* CCS is only for color images on Gfx7-11 */
+   if (ISL_GFX_VER(dev) <= 11 && isl_surf_usage_is_depth_or_stencil(usage))
+      return false;
+
+   if (usage & ISL_SURF_USAGE_DISABLE_AUX_BIT)
+      return false;
+
+   /* TODO: Disable for now, as we're not sure about the meaning of
+    * 3DSTATE_CPSIZE_CONTROL_BUFFER::CPCBCompressionEnable
+    */
+   if (isl_surf_usage_is_cpb(usage))
+      return false;
+
+   if (INTEL_DEBUG(DEBUG_NO_CCS))
+      return false;
+
+   return true;
+}
+
+bool
 isl_surf_supports_ccs(const struct isl_device *dev,
                       const struct isl_surf *surf,
                       const struct isl_surf *hiz_or_mcs_surf)
 {
-   if (INTEL_DEBUG(DEBUG_NO_CCS))
-      return false;
-
-   if (surf->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT)
-      return false;
-
-   if (!isl_format_supports_ccs_d(dev->info, surf->format) &&
-       !isl_format_supports_ccs_e(dev->info, surf->format))
+   if (!_isl_surf_info_supports_ccs(dev, surf->format, surf->usage))
       return false;
 
    /* From the Ivy Bridge PRM, Vol2 Part1 11.7 "MCS Buffer for Render
@@ -2976,12 +3032,6 @@ isl_surf_supports_ccs(const struct isl_device *dev,
     * this means linear is out on Gfx12+ as well.
     */
    if (surf->tiling == ISL_TILING_LINEAR)
-      return false;
-
-   /* TODO: Disable for now, as we're not sure about the meaning of
-    * 3DSTATE_CPSIZE_CONTROL_BUFFER::CPCBCompressionEnable
-    */
-   if (isl_surf_usage_is_cpb(surf->usage))
       return false;
 
    /* SKL PRMs, Volume 5: Memory Views, Tiling and Mip Tails for 2D Surfaces:
@@ -3027,6 +3077,12 @@ isl_surf_supports_ccs(const struct isl_device *dev,
       return false;
 
    if (ISL_GFX_VER(dev) >= 12) {
+      /* Wa_1406738321: 3D textures need a blit to a new surface in order to
+       * perform a resolve. For now, just disable CCS on TGL.
+       */
+      if (dev->info->verx10 == 120 && surf->dim == ISL_SURF_DIM_3D)
+         return false;
+
       if (isl_surf_usage_is_stencil(surf->usage)) {
          /* HiZ and MCS aren't allowed with stencil */
          assert(hiz_or_mcs_surf == NULL || hiz_or_mcs_surf->size_B == 0);
@@ -3034,11 +3090,41 @@ isl_surf_supports_ccs(const struct isl_device *dev,
          /* Multi-sampled stencil cannot have CCS */
          if (surf->samples > 1)
             return false;
+
+         /* No CCS support for 3D Depth/Stencil values
+          *
+          * According to HSD 22015614752, there are issues with multiple engines
+          * accessing the same CCS cacheline in parallel. For 2D depth/stencil,
+          * we can upgrade to Tile64 to avoid any issues,
+          * but we can't do the same for 3D depth/stencil.
+          *
+          * For that case, we can't use Tile64 because the depth/stencil
+          * hardware can't actually output 3D Tile64 data.
+          *
+          * Let's just disable CCS instead.
+          */
+         if (surf->dim == ISL_SURF_DIM_3D)
+            return false;
       } else if (isl_surf_usage_is_depth(surf->usage)) {
          const struct isl_surf *hiz_surf = hiz_or_mcs_surf;
 
          /* With depth surfaces, HIZ is required for CCS. */
          if (hiz_surf == NULL || hiz_surf->size_B == 0)
+            return false;
+
+         /* No CCS support for 3D Depth/Stencil values
+          *
+          * According to HSD 22015614752, there are issues with multiple engines
+          * accessing the same CCS cacheline in parallel. For 2D depth/stencil,
+          * we can upgrade to Tile64 to avoid any issues,
+          * but we can't do the same for 3D depth/stencil.
+          *
+          * For that case, we can't use Tile64 because the depth/stencil
+          * hardware can't actually output 3D Tile64 data.
+          *
+          * Let's just disable CCS instead.
+          */
+         if (surf->dim == ISL_SURF_DIM_3D)
             return false;
 
          assert(hiz_surf->usage & ISL_SURF_USAGE_HIZ_BIT);
@@ -3064,11 +3150,20 @@ isl_surf_supports_ccs(const struct isl_device *dev,
       if (surf->row_pitch_B % 512 != 0)
          return false;
 
-      /* TODO: According to Wa_1406738321, 3D textures need a blit to a new
-       * surface in order to perform a resolve. For now, just disable CCS.
-       */
-      if (surf->dim == ISL_SURF_DIM_3D)
-         return false;
+      if (intel_needs_workaround(dev->info, 22015614752) &&
+          (surf->levels > 1 ||
+           surf->logical_level0_px.depth > 1 ||
+           surf->logical_level0_px.array_len > 1)) {
+         /* There are issues with multiple engines accessing the same CCS
+          * cacheline in parallel. This can happen if this image has multiple
+          * subresources. Such conflicts can be avoided with tilings that set
+          * the subresource alignment to 64K and with miptails disabled. If we
+          * aren't using such a configuration, disable CCS.
+          */
+         assert(surf->miptail_start_level >= surf->levels);
+         if (surf->tiling != ISL_TILING_64)
+            return false;
+      }
 
       /* BSpec 44930: (Gfx12, Gfx12.5)
        *
@@ -3092,18 +3187,13 @@ isl_surf_supports_ccs(const struct isl_device *dev,
           surf->tiling != ISL_TILING_4 &&
           !isl_tiling_is_64(surf->tiling))
          return false;
-
-      /* TODO: Handle single-sampled Tile64. */
-      if (surf->samples == 1 && isl_tiling_is_64(surf->tiling))
-         return false;
    } else {
       /* ISL_GFX_VER(dev) < 12 */
       if (surf->samples > 1)
          return false;
 
       /* CCS is only for color images on Gfx7-11 */
-      if (isl_surf_usage_is_depth_or_stencil(surf->usage))
-         return false;
+      assert(!isl_surf_usage_is_depth_or_stencil(surf->usage));
 
       /* We're single-sampled color so having HiZ or MCS makes no sense */
       assert(hiz_or_mcs_surf == NULL || hiz_or_mcs_surf->size_B == 0);
@@ -4151,6 +4241,13 @@ isl_swizzle_supports_rendering(const struct intel_device_info *devinfo,
        *
        *    "For Render Target, this field MUST be programmed to
        *    value = SCS_ALPHA."
+       *
+       * Bspec 57023: RENDER_SURFACE_STATE:: Shader Channel Select Red
+       *
+       *    "Render Target messages do not support swapping of colors with
+       *    alpha. The Red, Green, or Blue Shader Channel Selects do not
+       *    support SCS_ALPHA. The Shader Channel Select Alpha does not support
+       *    SCS_RED, SCS_GREEN, or SCS_BLUE."
        */
       return (swizzle.r == ISL_CHANNEL_SELECT_RED ||
               swizzle.r == ISL_CHANNEL_SELECT_GREEN ||
@@ -4494,6 +4591,7 @@ isl_tiling_to_name(enum isl_tiling tiling)
       [ISL_TILING_ICL_Ys]    = "ICL-Ys",
       [ISL_TILING_4]         = "4",
       [ISL_TILING_64]        = "64",
+      [ISL_TILING_64_XE2]    = "64-Xe2",
       [ISL_TILING_HIZ]       = "hiz",
       [ISL_TILING_CCS]       = "ccs",
       [ISL_TILING_GFX12_CCS] = "gfx12-ccs",

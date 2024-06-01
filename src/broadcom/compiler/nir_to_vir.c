@@ -656,7 +656,10 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                          */
                         uint32_t perquad =
                                 is_load && !vir_in_nonuniform_control_flow(c) &&
-                                !c->emitted_discard ?
+                                ((c->s->info.stage == MESA_SHADER_FRAGMENT &&
+                                  c->s->info.fs.needs_quad_helper_invocations &&
+                                  !c->emitted_discard) ||
+                                 c->s->info.uses_wide_subgroup_intrinsics) ?
                                 GENERAL_TMU_LOOKUP_PER_QUAD :
                                 GENERAL_TMU_LOOKUP_PER_PIXEL;
                         config = 0xffffff00 | tmu_op << 3 | perquad;
@@ -2193,14 +2196,10 @@ driver_location_compare(const nir_variable *a, const nir_variable *b)
 }
 
 static struct qreg
-ntq_emit_vpm_read(struct v3d_compile *c,
-                  uint32_t *num_components_queued,
-                  uint32_t *remaining,
-                  uint32_t vpm_index)
+ntq_emit_vpm_read(struct v3d_compile *c, uint32_t num_components)
 {
         return vir_LDVPMV_IN(c,
-                             vir_uniform_ui(c,
-                                            (*num_components_queued)++));
+                             vir_uniform_ui(c, num_components));
 }
 
 static void
@@ -2234,8 +2233,7 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
                 }
         }
 
-        unsigned num_components = 0;
-        uint32_t vpm_components_queued = 0;
+        uint32_t vpm_components = 0;
         bool uses_iid = BITSET_TEST(c->s->info.system_values_read,
                                     SYSTEM_VALUE_INSTANCE_ID) ||
                         BITSET_TEST(c->s->info.system_values_read,
@@ -2247,27 +2245,14 @@ ntq_setup_vs_inputs(struct v3d_compile *c)
                         BITSET_TEST(c->s->info.system_values_read,
                                     SYSTEM_VALUE_VERTEX_ID_ZERO_BASE);
 
-        num_components += uses_iid;
-        num_components += uses_biid;
-        num_components += uses_vid;
+        if (uses_iid)
+                c->iid = ntq_emit_vpm_read(c, vpm_components++);
 
-        for (int i = 0; i < ARRAY_SIZE(c->vattr_sizes); i++)
-                num_components += c->vattr_sizes[i];
+        if (uses_biid)
+                c->biid = ntq_emit_vpm_read(c, vpm_components++);
 
-        if (uses_iid) {
-                c->iid = ntq_emit_vpm_read(c, &vpm_components_queued,
-                                           &num_components, ~0);
-        }
-
-        if (uses_biid) {
-                c->biid = ntq_emit_vpm_read(c, &vpm_components_queued,
-                                            &num_components, ~0);
-        }
-
-        if (uses_vid) {
-                c->vid = ntq_emit_vpm_read(c, &vpm_components_queued,
-                                           &num_components, ~0);
-        }
+        if (uses_vid)
+                c->vid = ntq_emit_vpm_read(c, vpm_components++);
 
         /* The actual loads will happen directly in nir_intrinsic_load_input
          */
@@ -2745,8 +2730,21 @@ ntq_emit_load_input(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                SYSTEM_VALUE_VERTEX_ID)) {
                       index++;
                }
-               for (int i = 0; i < offset; i++)
-                      index += c->vattr_sizes[i];
+
+               for (int i = 0; i < offset; i++) {
+                      /* GFXH-1602: if any builtins (vid, iid, etc) are read then
+                       * attribute 0 must be active (size > 0). When we hit this,
+                       * the driver is expected to program attribute 0 to have a
+                       * size of 1, so here we need to add that.
+                       */
+                      if (i == 0 && c->vs_key->is_coord &&
+                          c->vattr_sizes[i] == 0 && index > 0) {
+                         index++;
+                      } else {
+                         index += c->vattr_sizes[i];
+                      }
+               }
+
                index += nir_intrinsic_component(instr);
                for (int i = 0; i < instr->num_components; i++) {
                       struct qreg vpm_offset = vir_uniform_ui(c, index++);
@@ -3539,8 +3537,12 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 ntq_store_def(c, &instr->def, 0, vir_uniform(c, QUNIFORM_DRAW_ID, 0));
                 break;
 
-        case nir_intrinsic_load_tlb_color_v3d:
+        case nir_intrinsic_load_tlb_color_brcm:
                 vir_emit_tlb_color_read(c, instr);
+                break;
+
+        case nir_intrinsic_load_fep_w_v3d:
+                ntq_store_def(c, &instr->def, 0, vir_MOV(c, c->payload_w));
                 break;
 
         case nir_intrinsic_load_input:
@@ -3639,7 +3641,6 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 }
                 break;
 
-        case nir_intrinsic_load_workgroup_id_zero_base:
         case nir_intrinsic_load_workgroup_id: {
                 struct qreg x = vir_AND(c, c->cs_payload[0],
                                          vir_uniform_ui(c, 0xffff));

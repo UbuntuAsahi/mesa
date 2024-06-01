@@ -18,8 +18,9 @@
 
 #include "tu_device.h"
 #include "tu_descriptor_set.h"
-#include "tu_pipeline.h"
 #include "tu_lrz.h"
+#include "tu_pipeline.h"
+#include "tu_rmv.h"
 
 #include <initializer_list>
 
@@ -36,40 +37,6 @@ tu_spirv_to_nir(struct tu_device *dev,
 
       /* Use 16-bit math for RelaxedPrecision ALU ops */
       .mediump_16bit_alu = true,
-
-      .caps = {
-         .demote_to_helper_invocation = true,
-         .descriptor_array_dynamic_indexing = true,
-         .descriptor_array_non_uniform_indexing = true,
-         .descriptor_indexing = true,
-         .device_group = true,
-         .draw_parameters = true,
-         .float_controls = true,
-         .float16 = true,
-         .fragment_density = true,
-         .geometry_streams = true,
-         .image_read_without_format = true,
-         .image_write_without_format = true,
-         .int16 = true,
-         .multiview = true,
-         .physical_storage_buffer_address = true,
-         .post_depth_coverage = true,
-         .runtime_descriptor_array = true,
-         .shader_viewport_index_layer = true,
-         .stencil_export = true,
-         .storage_16bit = dev->physical_device->info->a6xx.storage_16bit,
-         .subgroup_arithmetic = true,
-         .subgroup_ballot = true,
-         .subgroup_basic = true,
-         .subgroup_quad = true,
-         .subgroup_shuffle = true,
-         .subgroup_vote = true,
-         .tessellation = true,
-         .transform_feedback = true,
-         .variable_pointers = true,
-         .vk_memory_model_device_scope = true,
-         .vk_memory_model = true,
-      },
 
       .ubo_addr_format = nir_address_format_vec2_index_32bit_offset,
       .ssbo_addr_format = nir_address_format_vec2_index_32bit_offset,
@@ -311,6 +278,14 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
 
    nir_scalar scalar_idx = nir_scalar_resolved(intrin->src[buffer_src].ssa, 0);
    nir_def *descriptor_idx = nir_channel(b, intrin->src[buffer_src].ssa, 1);
+
+   if (intrin->intrinsic == nir_intrinsic_load_ubo &&
+       dev->instance->allow_oob_indirect_ubo_loads) {
+      nir_scalar offset = nir_scalar_resolved(intrin->src[1].ssa, 0);
+      if (!nir_scalar_is_const(offset)) {
+         nir_intrinsic_set_range(intrin, ~0);
+      }
+   }
 
    /* For isam, we need to use the appropriate descriptor if 16-bit storage is
     * enabled. Descriptor 0 is the 16-bit one, descriptor 1 is the 32-bit one.
@@ -565,6 +540,12 @@ lower_tex_ycbcr(const struct tu_pipeline_layout *layout,
    const struct tu_sampler_ycbcr_conversion *ycbcr_sampler = ycbcr_samplers + array_index;
 
    if (ycbcr_sampler->ycbcr_model == VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY)
+      return;
+
+   /* Skip if not actually a YCbCr format.  CtsGraphics, for example, tries to create
+    * YcbcrConversions for RGB formats.
+    */
+   if (!vk_format_get_ycbcr_info(ycbcr_sampler->format))
       return;
 
    builder->cursor = nir_after_instr(&tex->instr);
@@ -2070,7 +2051,7 @@ tu_setup_pvtmem(struct tu_device *dev,
          dev->physical_device->info->num_sp_cores * pvtmem_bo->per_sp_size;
 
       VkResult result = tu_bo_init_new(dev, &pvtmem_bo->bo, total_size,
-                                       TU_BO_ALLOC_NO_FLAGS, "pvtmem");
+                                       TU_BO_ALLOC_INTERNAL_RESOURCE, "pvtmem");
       if (result != VK_SUCCESS) {
          mtx_unlock(&pvtmem_bo->mtx);
          return result;
@@ -2182,6 +2163,7 @@ tu_upload_shader(struct tu_device *dev,
       return result;
    }
 
+   TU_RMV(cmd_buffer_suballoc_bo_create, dev, &shader->bo);
    tu_cs_init_suballoc(&shader->cs, dev, &shader->bo);
 
    uint64_t iova = tu_upload_variant(&shader->cs, v);
@@ -2241,20 +2223,21 @@ tu_shader_deserialize(struct vk_pipeline_cache *cache,
                       struct blob_reader *blob);
 
 static void
-tu_shader_destroy(struct vk_device *device,
-                  struct vk_pipeline_cache_object *object)
+tu_shader_pipeline_cache_object_destroy(struct vk_device *vk_device,
+                                        struct vk_pipeline_cache_object *object)
 {
+   struct tu_device *device = container_of(vk_device, struct tu_device, vk);
    struct tu_shader *shader =
       container_of(object, struct tu_shader, base);
 
    vk_pipeline_cache_object_finish(&shader->base);
-   vk_free(&device->alloc, shader);
+   tu_shader_destroy(device, shader);
 }
 
 const struct vk_pipeline_cache_object_ops tu_shader_ops = {
    .serialize = tu_shader_serialize,
    .deserialize = tu_shader_deserialize,
-   .destroy = tu_shader_destroy,
+   .destroy = tu_shader_pipeline_cache_object_destroy,
 };
 
 static struct tu_shader *
@@ -2516,6 +2499,8 @@ tu_shader_create(struct tu_device *dev,
          ir3_shader_create_variant(ir3_shader, &safe_constlen_key,
                                    executable_info);
    }
+
+   ir3_shader_destroy(ir3_shader);
 
    shader->view_mask = key->multiview_mask;
 
@@ -2878,6 +2863,7 @@ tu_empty_shader_create(struct tu_device *dev,
       return result;
    }
 
+   TU_RMV(cmd_buffer_suballoc_bo_create, dev, &shader->bo);
    tu_cs_init_suballoc(&shader->cs, dev, &shader->bo);
 
    struct tu_pvtmem_config pvtmem_config = { };
@@ -2919,6 +2905,7 @@ tu_empty_fs_create(struct tu_device *dev, struct tu_shader **shader,
    struct ir3_shader *ir3_shader =
       ir3_shader_from_nir(dev->compiler, fs_b.shader, &options, &so_info);
    (*shader)->variant = ir3_shader_create_variant(ir3_shader, &key, false);
+   ir3_shader_destroy(ir3_shader);
 
    return tu_upload_shader(dev, *shader);
 }
@@ -2979,6 +2966,7 @@ tu_shader_destroy(struct tu_device *dev,
                   struct tu_shader *shader)
 {
    tu_cs_finish(&shader->cs);
+   TU_RMV(resource_destroy, dev, &shader->bo);
 
    pthread_mutex_lock(&dev->pipeline_mutex);
    tu_suballoc_bo_free(&dev->pipeline_suballoc, &shader->bo);
@@ -2986,6 +2974,11 @@ tu_shader_destroy(struct tu_device *dev,
 
    if (shader->pvtmem_bo)
       tu_bo_finish(dev, shader->pvtmem_bo);
+
+   if (shader->variant)
+      ralloc_free((void *)shader->variant);
+   if (shader->safe_const_variant)
+      ralloc_free((void *)shader->safe_const_variant);
 
    vk_free(&dev->vk.alloc, shader);
 }

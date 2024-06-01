@@ -13,6 +13,7 @@
 #include "tu_common.h"
 
 #include "vk_buffer.h"
+#include "vk_device_memory.h"
 
 #include "tu_autotune.h"
 #include "tu_pass.h"
@@ -166,6 +167,14 @@ struct tu_instance
     * core, this is enabled by default.
     */
    bool reserve_descriptor_set;
+
+   /* Allow out of bounds UBO access by disabling lowering of UBO loads for
+    * indirect access, which rely on the UBO bounds specified in the shader,
+    * rather than the bound UBO size which isn't known until draw time.
+    *
+    * See: https://github.com/doitsujin/dxvk/issues/3861
+    */
+   bool allow_oob_indirect_ubo_loads;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
@@ -242,15 +251,6 @@ struct tu_pvtmem_bo {
       struct tu_bo *bo;
       uint32_t per_fiber_size, per_sp_size;
 };
-
-#if DETECT_OS_ANDROID
-enum tu_gralloc_type
-{
-   TU_GRALLOC_UNKNOWN,
-   TU_GRALLOC_CROS,
-   TU_GRALLOC_OTHER,
-};
-#endif
 
 struct tu_virtio_device;
 
@@ -386,11 +386,6 @@ struct tu_device
    struct tu_cs *dbg_cmdbuf_stomp_cs;
    struct tu_cs *dbg_renderpass_stomp_cs;
 
-#if DETECT_OS_ANDROID
-   const void *gralloc;
-   enum tu_gralloc_type gralloc_type;
-#endif
-
 #ifdef TU_HAS_VIRTIO
    struct tu_virtio_device *vdev;
 #endif
@@ -415,14 +410,14 @@ VK_DEFINE_HANDLE_CASTS(tu_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 
 struct tu_device_memory
 {
-   struct vk_object_base base;
+   struct vk_device_memory vk;
 
    struct tu_bo *bo;
 
    /* for dedicated allocations */
    struct tu_image *image;
 };
-VK_DEFINE_NONDISP_HANDLE_CASTS(tu_device_memory, base, VkDeviceMemory,
+VK_DEFINE_NONDISP_HANDLE_CASTS(tu_device_memory, vk.base, VkDeviceMemory,
                                VK_OBJECT_TYPE_DEVICE_MEMORY)
 
 struct tu_buffer

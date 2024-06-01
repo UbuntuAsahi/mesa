@@ -33,6 +33,7 @@ DEPS=(
     llvm16-static
     llvm16-dev
     meson
+    mold
     expat-dev
     elfutils-dev
     libdrm-dev
@@ -41,7 +42,9 @@ DEPS=(
     libpciaccess-dev
     zlib-dev
     python3-dev
+    py3-cparser
     py3-mako
+    py3-packaging
     py3-ply
     vulkan-headers
     spirv-tools-dev

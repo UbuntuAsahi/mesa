@@ -1,7 +1,8 @@
 [[deqp]]
 deqp = "/deqp/external/vulkancts/modules/vulkan/deqp-vk"
-caselists = ["/deqp/mustpass/vk-master.txt"]
+caselists = ["/deqp/mustpass/vk-main.txt"]
 renderer_check = "Mali-G52"
+fraction = 2
 include = [
     "dEQP-VK.pipeline.blend.*",
     "dEQP-VK.api.buffer_view.*",
@@ -12,6 +13,7 @@ include = [
     "dEQP-VK.api.command_buffers.render_pass_continue_no_fb",
     "dEQP-VK.api.copy_and_blit.core.*",
     "dEQP-VK.api.fill_and_update_buffer.suballocation.*",
+    "dEQP-VK.binding_model.buffer_device_address.*",
     "dEQP-VK.binding_model.descriptor_copy.compute.*",
     "dEQP-VK.compute.builtin_var.*",
     "dEQP-VK.draw.renderpass.instanced.draw_indexed_vk_*",
@@ -35,6 +37,7 @@ include = [
     "dEQP-VK.pipeline.image.suballocation.sampling_type.*.view_type.2d*",
     "dEQP-VK.pipeline.input_assembly.*",
     "dEQP-VK.pipeline.logic_op.*",
+    "dEQP-VK.pipeline.monolithic.*",
     "dEQP-VK.pipeline.sampler.view_type.*.format.r*.address_modes.all_mode_clamp_to_border*",
     "dEQP-VK.pipeline.stencil.*",
     "dEQP-VK.rasterization.interpolation.*",

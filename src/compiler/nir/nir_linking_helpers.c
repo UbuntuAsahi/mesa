@@ -120,11 +120,6 @@ tcs_add_output_reads(nir_shader *shader, uint64_t *read, uint64_t *patches_read)
  * progress = nir_remove_unused_io_vars(producer, nir_var_shader_out,
  *                                      read, patches_read) ||
  *                                      progress;
- *
- * The "used" should be an array of 4 uint64_ts (probably of VARYING_BIT_*)
- * representing each .location_frac used.  Note that for vector variables,
- * only the first channel (.location_frac) is examined for deciding if the
- * variable is used!
  */
 bool
 nir_remove_unused_io_vars(nir_shader *shader,
@@ -153,7 +148,9 @@ nir_remove_unused_io_vars(nir_shader *shader,
       if (var->data.explicit_xfb_buffer)
          continue;
 
-      uint64_t other_stage = used[var->data.location_frac];
+      uint64_t other_stage = 0;
+      for (unsigned i = 0; i < get_num_components(var); i++)
+         other_stage |= used[var->data.location_frac + i];
 
       if (!(other_stage & get_variable_io_mask(var, shader->info.stage))) {
          /* This one is invalid, make it a global variable instead */
@@ -1458,7 +1455,7 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
                             unsigned *size, gl_shader_stage stage)
 {
    unsigned location = 0;
-   unsigned assigned_locations[VARYING_SLOT_TESS_MAX];
+   unsigned assigned_locations[VARYING_SLOT_TESS_MAX][2];
    uint64_t processed_locs[2] = { 0 };
 
    struct exec_list io_vars;
@@ -1550,7 +1547,7 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
       if (processed) {
          /* TODO handle overlapping per-view variables */
          assert(!var->data.per_view);
-         unsigned driver_location = assigned_locations[var->data.location];
+         unsigned driver_location = assigned_locations[var->data.location][var->data.index];
          var->data.driver_location = driver_location;
 
          /* An array may be packed such that is crosses multiple other arrays
@@ -1571,7 +1568,7 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
             unsigned num_unallocated_slots = last_slot_location - location;
             unsigned first_unallocated_slot = var_size - num_unallocated_slots;
             for (unsigned i = first_unallocated_slot; i < var_size; i++) {
-               assigned_locations[var->data.location + i] = location;
+               assigned_locations[var->data.location + i][var->data.index] = location;
                location++;
             }
          }
@@ -1579,7 +1576,7 @@ nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode,
       }
 
       for (unsigned i = 0; i < var_size; i++) {
-         assigned_locations[var->data.location + i] = location + i;
+         assigned_locations[var->data.location + i][var->data.index] = location + i;
       }
 
       var->data.driver_location = location;

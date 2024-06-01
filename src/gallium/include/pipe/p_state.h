@@ -49,6 +49,7 @@
 #include "util/compiler.h"
 #include "p_defines.h"
 #include "util/format/u_formats.h"
+#include "util/box.h"
 
 
 #ifdef __cplusplus
@@ -544,23 +545,6 @@ struct pipe_image_view
          uint16_t height;     /**< height of image provided by application */
       } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
-};
-
-
-/**
- * Subregion of 1D/2D/3D image resource.
- */
-struct pipe_box
-{
-   /* Fields only used by textures use int16_t instead of int.
-    * x and width are used by buffers, so they need the full 32-bit range.
-    */
-   int x;
-   int16_t y;
-   int16_t z;
-   int width;
-   int16_t height;
-   int16_t depth;
 };
 
 

@@ -10,6 +10,7 @@ use mesa_rust_util::static_assert;
 use rusticl_opencl_gen::*;
 
 use std::collections::HashSet;
+use std::mem;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -22,7 +23,7 @@ static_assert!(CL_RUNNING == 1);
 static_assert!(CL_SUBMITTED == 2);
 static_assert!(CL_QUEUED == 3);
 
-pub type EventSig = Box<dyn FnOnce(&Arc<Queue>, &QueueContext) -> CLResult<()>>;
+pub type EventSig = Box<dyn FnOnce(&Arc<Queue>, &QueueContext) -> CLResult<()> + Send + Sync>;
 
 pub enum EventTimes {
     Queued = CL_PROFILING_COMMAND_QUEUED as isize,
@@ -53,10 +54,6 @@ pub struct Event {
 }
 
 impl_cl_type_trait!(cl_event, Event, CL_INVALID_EVENT);
-
-// TODO shouldn't be needed, but... uff C pointers are annoying
-unsafe impl Send for Event {}
-unsafe impl Sync for Event {}
 
 impl Event {
     pub fn new(
@@ -111,8 +108,11 @@ impl Event {
             self.cv.notify_all();
         }
 
-        if [CL_COMPLETE, CL_RUNNING, CL_SUBMITTED].contains(&(new as u32)) {
-            if let Some(cbs) = lock.cbs.get_mut(new as usize) {
+        // on error we need to call the CL_COMPLETE callbacks
+        let cb_idx = if new < 0 { CL_COMPLETE } else { new as u32 };
+
+        if [CL_COMPLETE, CL_RUNNING, CL_SUBMITTED].contains(&cb_idx) {
+            if let Some(cbs) = lock.cbs.get_mut(cb_idx as usize) {
                 cbs.drain(..).for_each(|cb| cb.call(self, new));
             }
         }
@@ -260,6 +260,27 @@ impl Event {
             .iter()
             .filter_map(|e| e.queue.clone())
             .collect()
+    }
+}
+
+impl Drop for Event {
+    // implement drop in order to prevent stack overflows of long dependency chains.
+    //
+    // This abuses the fact that `Arc::into_inner` only succeeds when there is one strong reference
+    // so we turn a recursive drop chain into a drop list for events having no other references.
+    fn drop(&mut self) {
+        if self.deps.is_empty() {
+            return;
+        }
+
+        let mut deps_list = vec![mem::take(&mut self.deps)];
+        while let Some(deps) = deps_list.pop() {
+            for dep in deps {
+                if let Some(mut dep) = Arc::into_inner(dep) {
+                    deps_list.push(mem::take(&mut dep.deps));
+                }
+            }
+        }
     }
 }
 

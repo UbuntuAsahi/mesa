@@ -23,10 +23,11 @@
 
 #include "brw_compiler.h"
 #include "brw_kernel.h"
-#include "common/intel_disasm.h"
+#include "compiler/brw_disasm.h"
 #include "compiler/clc/clc.h"
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir_serialize.h"
+#include "compiler/spirv/spirv_info.h"
 #include "dev/intel_debug.h"
 #include "util/build_id.h"
 #include "util/disk_cache.h"
@@ -166,6 +167,8 @@ print_cs_prog_data_fields(FILE *fp, const char *prefix, const char *pad,
    PROG_DATA_FIELD("%u", base.const_data_offset);
    PROG_DATA_FIELD("%u", base.num_relocs);
    fprintf(fp, "%s.base.relocs = %s_relocs,\n", pad, prefix);
+   PROG_DATA_FIELD("%u", base.printf_info_count);
+   fprintf(fp, "%s.base.printf_info = (u_printf_info *)%s_printfs,\n", pad, prefix);
    assert(!cs_prog_data->base.has_ubo_pull);
    assert(cs_prog_data->base.dispatch_grf_start_reg == 0);
    assert(!cs_prog_data->base.use_alt_mode);
@@ -223,6 +226,28 @@ print_kernel(FILE *fp, const char *prefix,
                      kernel->prog_data.base.num_relocs *
                      sizeof(kernel->prog_data.base.relocs[0]));
 
+   fprintf(fp, "static const u_printf_info %s_printfs[] = {\n",
+           prefix);
+   for (unsigned i = 0; i < kernel->prog_data.base.printf_info_count; i++) {
+      const u_printf_info *printf_info = &kernel->prog_data.base.printf_info[i];
+      fprintf(fp, "   {\n");
+      fprintf(fp, "      .num_args = %"PRIu32",\n", printf_info->num_args);
+      fprintf(fp, "      .arg_sizes = (unsigned []) {\n");
+      for (unsigned a = 0; a < printf_info->num_args; a++)
+         fprintf(fp, "         %"PRIu32",\n", printf_info->arg_sizes[a]);
+      fprintf(fp, "      },\n");
+      fprintf(fp, "      .string_size = %"PRIu32",\n", printf_info->string_size);
+      fprintf(fp, "      .strings = (char []) {");
+      for (unsigned c = 0; c < printf_info->string_size; c++) {
+         if (c % 8 == 0 )
+            fprintf(fp, "\n         ");
+         fprintf(fp, "0x%02hhx, ", printf_info->strings[c]);
+      }
+      fprintf(fp, "\n      },\n");
+      fprintf(fp, "   },\n");
+   }
+   fprintf(fp, "};\n");
+
    /* Get rid of the pointers before we hash */
    struct brw_cs_prog_data cs_prog_data = kernel->prog_data;
    cs_prog_data.base.relocs = NULL;
@@ -247,7 +272,7 @@ print_kernel(FILE *fp, const char *prefix,
 
    fprintf(fp, "#if 0  /* BEGIN KERNEL ASSEMBLY */\n");
    fprintf(fp, "\n");
-   intel_disassemble(isa, kernel->code, 0, fp);
+   brw_disassemble_with_errors(isa, kernel->code, 0, fp);
    fprintf(fp, "\n");
    fprintf(fp, "#endif /* END KERNEL ASSEMBLY */\n");
    print_u32_data(fp, prefix, "code", kernel->code,
@@ -278,14 +303,17 @@ print_usage(char *exec_name, FILE *f)
 "Options:\n"
 "  -h  --help              Print this help.\n"
 "  -e, --entrypoint <name> Specify the entry-point name.\n"
+"  -L, --llvm17-wa         Enable LLVM 17 workarounds for opaque pointers"
 "  -p, --platform <name>   Specify the target platform name.\n"
 "      --prefix <prefix>   Prefix for variable names in generated C code.\n"
 "  -o, --out <filename>    Specify the output filename.\n"
 "  -i, --in <filename>     Specify one input filename. Accepted multiple times.\n"
 "  -s, --spv <filename>    Specify the output filename for spirv.\n"
 "  -n, --nir               Specify whether to output serialized NIR instead of ISA.\n"
+"  -g, --gfx-version <ver> Specify the Gfx version used for NIR output.\n"
 "  -t, --text <filename>   Specify the output filename for the parsed text\n"
 "  -v, --verbose           Print more information during compilation.\n"
+"  -M, --llvm-version      Print LLVM version.\n"
    , exec_name);
 }
 
@@ -299,8 +327,11 @@ struct intel_clc_params {
    char *txt_outfile;
    char *prefix;
 
+   unsigned gfx_version;
+
    bool output_nir;
    bool print_info;
+   bool llvm17_wa;
 
    void *mem_ctx;
 
@@ -312,33 +343,33 @@ struct intel_clc_params {
 static int
 output_nir(const struct intel_clc_params *params, struct clc_binary *binary)
 {
+   const struct spirv_capabilities spirv_caps = {
+      .Addresses = true,
+      .Groups = true,
+      .StorageImageWriteWithoutFormat = true,
+      .Int8 = true,
+      .Int16 = true,
+      .Int64 = true,
+      .Int64Atomics = true,
+      .Kernel = true,
+      .Linkage = true, /* We receive linked kernel from clc */
+      .GenericPointer = true,
+      .GroupNonUniform = true,
+      .GroupNonUniformArithmetic = true,
+      .GroupNonUniformBallot = true,
+      .GroupNonUniformQuad = true,
+      .GroupNonUniformShuffle = true,
+      .GroupNonUniformVote = true,
+      .SubgroupDispatch = true,
+
+      .SubgroupShuffleINTEL = true,
+      .SubgroupBufferBlockIOINTEL = true,
+   };
+
    struct spirv_to_nir_options spirv_options = {
       .environment = NIR_SPIRV_OPENCL,
-      .caps = {
-         .address = true,
-         .groups = true,
-         .image_write_without_format = true,
-         .int8 = true,
-         .int16 = true,
-         .int64 = true,
-         .int64_atomics = true,
-         .kernel = true,
-         .linkage = true, /* We receive linked kernel from clc */
-         .float_controls = true,
-         .generic_pointers = true,
-         .storage_8bit = true,
-         .storage_16bit = true,
-         .subgroup_arithmetic = true,
-         .subgroup_basic = true,
-         .subgroup_ballot = true,
-         .subgroup_dispatch = true,
-         .subgroup_quad = true,
-         .subgroup_shuffle = true,
-         .subgroup_vote = true,
-
-         .intel_subgroup_shuffle = true,
-         .intel_subgroup_buffer_block_io = true,
-      },
+      .capabilities = &spirv_caps,
+      .printf = true,
       .shared_addr_format = nir_address_format_62bit_generic,
       .global_addr_format = nir_address_format_62bit_generic,
       .temp_addr_format = nir_address_format_62bit_generic,
@@ -356,10 +387,12 @@ output_nir(const struct intel_clc_params *params, struct clc_binary *binary)
    spirv_library_to_nir_builder(fp, binary->data, binary->size / 4,
                                 &spirv_options);
 
-   nir_shader *nir = brw_nir_from_spirv(params->mem_ctx,
-                                        binary->data, binary->size);
+   nir_shader *nir = brw_nir_from_spirv(params->mem_ctx, params->gfx_version,
+                                        binary->data, binary->size,
+                                        params->llvm17_wa);
    if (!nir) {
       fprintf(stderr, "Failed to generate NIR out of SPIRV\n");
+      fclose(fp);
       return -1;
    }
 
@@ -435,23 +468,32 @@ output_isa(const struct intel_clc_params *params, struct clc_binary *binary)
    return 0;
 }
 
+static void
+print_llvm_version(FILE *out)
+{
+   fprintf(out, "%s\n", MESA_LLVM_VERSION_STRING);
+}
+
 int main(int argc, char **argv)
 {
    int exit_code = 0;
 
-   brw_process_intel_debug_variable();
+   process_intel_debug_variable();
 
    static struct option long_options[] ={
-      {"help",       no_argument,         0, 'h'},
-      {"entrypoint", required_argument,   0, 'e'},
-      {"platform",   required_argument,   0, 'p'},
-      {"prefix",     required_argument,   0, OPT_PREFIX},
-      {"in",         required_argument,   0, 'i'},
-      {"out",        required_argument,   0, 'o'},
-      {"spv",        required_argument,   0, 's'},
-      {"text",       required_argument,   0, 't'},
-      {"nir",        no_argument,         0, 'n'},
-      {"verbose",    no_argument,         0, 'v'},
+      {"help",         no_argument,         0, 'h'},
+      {"entrypoint",   required_argument,   0, 'e'},
+      {"platform",     required_argument,   0, 'p'},
+      {"prefix",       required_argument,   0, OPT_PREFIX},
+      {"in",           required_argument,   0, 'i'},
+      {"out",          required_argument,   0, 'o'},
+      {"spv",          required_argument,   0, 's'},
+      {"text",         required_argument,   0, 't'},
+      {"gfx-version",  required_argument,   0, 'g'},
+      {"nir",          no_argument,         0, 'n'},
+      {"llvm17-wa",    no_argument,         0, 'L'},
+      {"llvm-version", no_argument,         0, 'M'},
+      {"verbose",      no_argument,         0, 'v'},
       {0, 0, 0, 0}
    };
 
@@ -470,7 +512,7 @@ int main(int argc, char **argv)
    util_dynarray_init(&input_files, params.mem_ctx);
 
    int ch;
-   while ((ch = getopt_long(argc, argv, "he:p:s:t:i:no:v", long_options, NULL)) != -1)
+   while ((ch = getopt_long(argc, argv, "he:p:s:t:i:no:MLvg:", long_options, NULL)) != -1)
    {
       switch (ch)
       {
@@ -500,6 +542,15 @@ int main(int argc, char **argv)
          break;
       case 'v':
          params.print_info = true;
+         break;
+      case 'L':
+         params.llvm17_wa = true;
+         break;
+      case 'M':
+         print_llvm_version(stdout);
+         return EXIT_SUCCESS;
+      case 'g':
+         params.gfx_version = strtoul(optarg, NULL, 10);
          break;
       case OPT_PREFIX:
          params.prefix = optarg;
@@ -592,6 +643,12 @@ int main(int argc, char **argv)
    glsl_type_singleton_init_or_ref();
 
    if (params.output_nir) {
+      if (params.gfx_version == 0) {
+         fprintf(stderr, "No target Gfx version specified.\n");
+         print_usage(argv[0], stderr);
+         goto fail;
+      }
+
       exit_code = output_nir(&params, &spirv_obj);
    } else {
       if (params.platform == NULL) {
@@ -614,6 +671,12 @@ int main(int argc, char **argv)
       if (params.devinfo.verx10 < 125) {
          fprintf(stderr, "Platform currently not supported.\n");
          goto fail;
+      }
+
+      if (params.gfx_version) {
+         fprintf(stderr, "WARNING: Ignorining unnecessary parameter for "
+                         "gfx version, using version based on platform.\n");
+         /* Keep going. */
       }
 
       if (params.entry_point == NULL) {

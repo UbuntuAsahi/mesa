@@ -157,6 +157,7 @@ nvk_GetDeviceBufferMemoryRequirements(
    VkMemoryRequirements2 *pMemoryRequirements)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
+   struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const uint32_t alignment =
       nvk_get_buffer_alignment(nvk_device_physical(dev),
@@ -166,7 +167,7 @@ nvk_GetDeviceBufferMemoryRequirements(
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
-      .memoryTypeBits = BITFIELD_MASK(dev->pdev->mem_type_count),
+      .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };
 
    vk_foreach_struct_const(ext, pMemoryRequirements->pNext) {
@@ -178,7 +179,7 @@ nvk_GetDeviceBufferMemoryRequirements(
          break;
       }
       default:
-         nvk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(ext->sType);
          break;
       }
    }
@@ -250,6 +251,11 @@ nvk_BindBufferMemory2(VkDevice device,
       } else {
          buffer->addr = mem->bo->offset + pBindInfos[i].memoryOffset;
       }
+
+      const VkBindMemoryStatusKHR *status =
+         vk_find_struct_const(pBindInfos[i].pNext, BIND_MEMORY_STATUS_KHR);
+      if (status != NULL && status->pResult != NULL)
+         *status->pResult = VK_SUCCESS;
    }
    return VK_SUCCESS;
 }

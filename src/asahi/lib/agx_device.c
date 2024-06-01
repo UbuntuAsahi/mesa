@@ -7,9 +7,11 @@
 
 #include "agx_device.h"
 #include <inttypes.h>
+#include "util/ralloc.h"
 #include "util/timespec.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
+#include "agx_device_virtio.h"
 #include "agx_scratch.h"
 #include "decode.h"
 #include "glsl_types.h"
@@ -28,6 +30,44 @@
 #include "util/simple_mtx.h"
 #include "git_sha1.h"
 #include "nir_serialize.h"
+#include "vdrm.h"
+
+static inline int
+asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
+{
+   if (dev->is_virtio) {
+      return agx_virtio_simple_ioctl(dev, cmd, req);
+   } else {
+      return drmIoctl(dev->fd, cmd, req);
+   }
+}
+
+/* clang-format off */
+static const struct debug_named_value agx_debug_options[] = {
+   {"trace",     AGX_DBG_TRACE,    "Trace the command stream"},
+   {"no16",      AGX_DBG_NO16,     "Disable 16-bit support"},
+   {"perf",      AGX_DBG_PERF,     "Print performance warnings"},
+#ifndef NDEBUG
+   {"dirty",     AGX_DBG_DIRTY,    "Disable dirty tracking"},
+#endif
+   {"compblit",  AGX_DBG_COMPBLIT, "Enable compute blitter"},
+   {"precompile",AGX_DBG_PRECOMPILE,"Precompile shaders for shader-db"},
+   {"nocompress",AGX_DBG_NOCOMPRESS,"Disable lossless compression"},
+   {"nocluster", AGX_DBG_NOCLUSTER,"Disable vertex clustering"},
+   {"sync",      AGX_DBG_SYNC,     "Synchronously wait for all submissions"},
+   {"stats",     AGX_DBG_STATS,    "Show command execution statistics"},
+   {"resource",  AGX_DBG_RESOURCE, "Log resource operations"},
+   {"batch",     AGX_DBG_BATCH,    "Log batches"},
+   {"nowc",      AGX_DBG_NOWC,     "Disable write-combining"},
+   {"synctvb",   AGX_DBG_SYNCTVB,  "Synchronous TVB growth"},
+   {"smalltile", AGX_DBG_SMALLTILE,"Force 16x16 tiles"},
+   {"feedback",  AGX_DBG_FEEDBACK, "Debug feedback loops"},
+   {"nomsaa",    AGX_DBG_NOMSAA,   "Force disable MSAA"},
+   {"noshadow",  AGX_DBG_NOSHADOW, "Force disable resource shadowing"},
+   {"scratch",   AGX_DBG_SCRATCH,  "Debug scratch memory usage"},
+   DEBUG_NAMED_VALUE_END
+};
+/* clang-format on */
 
 void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
@@ -91,13 +131,14 @@ agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
    return ret;
 }
 
-struct agx_bo *
+static struct agx_bo *
 agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
              enum agx_bo_flags flags)
 {
    struct agx_bo *bo;
    unsigned handle = 0;
 
+   assert(size > 0);
    size = ALIGN_POT(size, dev->params.vm_page_size);
 
    /* executable implies low va */
@@ -154,20 +195,18 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
       return NULL;
    }
 
-   bo->guid = bo->handle; /* TODO: We don't care about guids */
-
    uint32_t bind = ASAHI_BIND_READ;
    if (!(flags & AGX_BO_READONLY)) {
       bind |= ASAHI_BIND_WRITE;
    }
 
-   ret = agx_bo_bind(dev, bo, bo->ptr.gpu, bind);
+   ret = dev->ops.bo_bind(dev, bo, bo->ptr.gpu, bind);
    if (ret) {
       agx_bo_free(dev, bo);
       return NULL;
    }
 
-   agx_bo_mmap(bo);
+   dev->ops.bo_mmap(bo);
 
    if (flags & AGX_BO_LOW_VA)
       bo->ptr.gpu -= dev->shader_base;
@@ -177,7 +216,7 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    return bo;
 }
 
-void
+static void
 agx_bo_mmap(struct agx_bo *bo)
 {
    struct drm_asahi_gem_mmap_offset gem_mmap_offset = {.handle = bo->handle};
@@ -264,8 +303,12 @@ agx_bo_import(struct agx_device *dev, int fd)
          abort();
       }
 
-      ret =
-         agx_bo_bind(dev, bo, bo->ptr.gpu, ASAHI_BIND_READ | ASAHI_BIND_WRITE);
+      if (dev->is_virtio) {
+         bo->vbo_res_id = vdrm_handle_to_res_id(dev->vdrm, bo->handle);
+      }
+
+      ret = dev->ops.bo_bind(dev, bo, bo->ptr.gpu,
+                             ASAHI_BIND_READ | ASAHI_BIND_WRITE);
       if (ret) {
          fprintf(stderr, "import failed: Could not bind BO at 0x%llx\n",
                  (long long)bo->ptr.gpu);
@@ -288,6 +331,9 @@ agx_bo_import(struct agx_device *dev, int fd)
          agx_bo_reference(bo);
    }
    pthread_mutex_unlock(&dev->bo_map_lock);
+
+   if (dev->debug & AGX_DBG_TRACE)
+      agxdecode_track_alloc(dev->agxdecode, bo);
 
    return bo;
 
@@ -315,11 +361,11 @@ agx_bo_export(struct agx_bo *bo)
       /* If there is a pending writer to this BO, import it into the buffer
        * for implicit sync.
        */
-      uint32_t writer_syncobj = p_atomic_read_relaxed(&bo->writer_syncobj);
-      if (writer_syncobj) {
+      uint64_t writer = p_atomic_read_relaxed(&bo->writer);
+      if (writer) {
          int out_sync_fd = -1;
-         int ret =
-            drmSyncobjExportSyncFile(bo->dev->fd, writer_syncobj, &out_sync_fd);
+         int ret = drmSyncobjExportSyncFile(
+            bo->dev->fd, agx_bo_writer_syncobj(writer), &out_sync_fd);
          assert(ret >= 0);
          assert(out_sync_fd >= 0);
 
@@ -370,12 +416,54 @@ agx_get_params(struct agx_device *dev, void *buf, size_t size)
    return get_param.size;
 }
 
+static int
+agx_submit(struct agx_device *dev, struct drm_asahi_submit *submit,
+           uint32_t vbo_res_id)
+{
+   return drmIoctl(dev->fd, DRM_IOCTL_ASAHI_SUBMIT, submit);
+}
+
+const agx_device_ops_t agx_device_drm_ops = {
+   .bo_alloc = agx_bo_alloc,
+   .bo_bind = agx_bo_bind,
+   .bo_mmap = agx_bo_mmap,
+   .get_params = agx_get_params,
+   .submit = agx_submit,
+};
+
 bool
 agx_open_device(void *memctx, struct agx_device *dev)
 {
-   ssize_t params_size = -1;
+   dev->debug =
+      debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
-   params_size = agx_get_params(dev, &dev->params, sizeof(dev->params));
+   dev->agxdecode = agxdecode_new_context();
+   dev->ops = agx_device_drm_ops;
+
+   ssize_t params_size = -1;
+   drmVersionPtr version;
+
+   version = drmGetVersion(dev->fd);
+   if (!version) {
+      fprintf(stderr, "cannot get version: %s", strerror(errno));
+      return NULL;
+   }
+
+   if (!strcmp(version->name, "asahi")) {
+      dev->is_virtio = false;
+      dev->ops = agx_device_drm_ops;
+   } else if (!strcmp(version->name, "virtio_gpu")) {
+      dev->is_virtio = true;
+      if (!agx_virtio_open_device(dev)) {
+         fprintf(stderr,
+                 "Error opening virtio-gpu device for Asahi native context\n");
+         return false;
+      }
+   } else {
+      return false;
+   }
+
+   params_size = dev->ops.get_params(dev, &dev->params, sizeof(dev->params));
    if (params_size <= 0) {
       assert(0);
       return false;
@@ -451,7 +539,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    struct drm_asahi_vm_create vm_create = {};
 
-   int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
+   int ret = asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_CREATE failed: %m\n");
       assert(0);
@@ -483,11 +571,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
 void
 agx_close_device(struct agx_device *dev)
 {
-   if (dev->helper)
-      agx_bo_unreference(dev->helper);
-
+   ralloc_free((void *)dev->libagx);
+   agx_bo_unreference(dev->helper);
    agx_bo_cache_evict_all(dev);
    util_sparse_array_finish(&dev->bo_map);
+   agxdecode_destroy_context(dev->agxdecode);
 
    util_vma_heap_finish(&dev->main_heap);
    util_vma_heap_finish(&dev->usc_heap);
@@ -497,22 +585,34 @@ agx_close_device(struct agx_device *dev)
 }
 
 uint32_t
-agx_create_command_queue(struct agx_device *dev, uint32_t caps)
+agx_create_command_queue(struct agx_device *dev, uint32_t caps,
+                         uint32_t priority)
 {
    struct drm_asahi_queue_create queue_create = {
       .vm_id = dev->vm_id,
       .queue_caps = caps,
-      .priority = 1,
+      .priority = priority,
       .flags = 0,
    };
 
-   int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_QUEUE_CREATE, &queue_create);
+   int ret =
+      asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_QUEUE_CREATE, &queue_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_QUEUE_CREATE failed: %m\n");
       assert(0);
    }
 
    return queue_create.queue_id;
+}
+
+int
+agx_destroy_command_queue(struct agx_device *dev, uint32_t queue_id)
+{
+   struct drm_asahi_queue_destroy queue_destroy = {
+      .queue_id = queue_id,
+   };
+
+   return drmIoctl(dev->fd, DRM_IOCTL_ASAHI_QUEUE_DESTROY, &queue_destroy);
 }
 
 int

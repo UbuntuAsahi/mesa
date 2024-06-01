@@ -350,12 +350,10 @@ impl<T> PerRegFile<T> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn values(&self) -> slice::Iter<T> {
         self.per_file.iter()
     }
 
-    #[allow(dead_code)]
     pub fn values_mut(&mut self) -> slice::IterMut<T> {
         self.per_file.iter_mut()
     }
@@ -420,7 +418,6 @@ impl SSAValue {
     }
 
     /// Returns true if this SSA value is equal to SSAValue::NONE
-    #[allow(dead_code)]
     pub fn is_none(&self) -> bool {
         self.packed == 0
     }
@@ -791,6 +788,7 @@ pub enum SrcRef {
 }
 
 impl SrcRef {
+    #[allow(dead_code)]
     pub fn is_alu(&self) -> bool {
         match self {
             SrcRef::Zero | SrcRef::Imm32(_) | SrcRef::CBuf(_) => true,
@@ -809,6 +807,7 @@ impl SrcRef {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_barrier(&self) -> bool {
         match self {
             SrcRef::SSA(ssa) => ssa.file() == RegFile::Bar,
@@ -1037,6 +1036,8 @@ pub enum SrcType {
     SSA,
     GPR,
     ALU,
+    F16,
+    F16v2,
     F32,
     F64,
     I32,
@@ -1046,9 +1047,34 @@ pub enum SrcType {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum SrcSwizzle {
+    None,
+    Xx,
+    Yy,
+}
+
+impl SrcSwizzle {
+    pub fn is_none(&self) -> bool {
+        matches!(self, SrcSwizzle::None)
+    }
+}
+
+impl fmt::Display for SrcSwizzle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SrcSwizzle::None => Ok(()),
+            SrcSwizzle::Xx => write!(f, ".xx"),
+            SrcSwizzle::Yy => write!(f, ".yy"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
 pub struct Src {
     pub src_ref: SrcRef,
     pub src_mod: SrcMod,
+    pub src_swizzle: SrcSwizzle,
 }
 
 impl Src {
@@ -1068,6 +1094,7 @@ impl Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.fabs(),
+            src_swizzle: self.src_swizzle,
         }
     }
 
@@ -1075,6 +1102,7 @@ impl Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.fneg(),
+            src_swizzle: self.src_swizzle,
         }
     }
 
@@ -1082,6 +1110,7 @@ impl Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.ineg(),
+            src_swizzle: self.src_swizzle,
         }
     }
 
@@ -1089,6 +1118,75 @@ impl Src {
         Src {
             src_ref: self.src_ref,
             src_mod: self.src_mod.bnot(),
+            src_swizzle: self.src_swizzle,
+        }
+    }
+
+    pub fn fold_imm(&self, src_type: SrcType) -> Src {
+        let SrcRef::Imm32(mut u) = self.src_ref else {
+            return *self;
+        };
+
+        if self.src_mod.is_none() && self.src_swizzle.is_none() {
+            return *self;
+        }
+
+        assert!(src_type == SrcType::F16v2 || self.src_swizzle.is_none());
+
+        u = match src_type {
+            SrcType::F16 => {
+                let low = u & 0xFFFF;
+
+                match self.src_mod {
+                    SrcMod::None => low,
+                    SrcMod::FAbs => low & !(1_u32 << 15),
+                    SrcMod::FNeg => low ^ (1_u32 << 15),
+                    SrcMod::FNegAbs => low | (1_u32 << 15),
+                    _ => panic!("Not a float source modifier"),
+                }
+            }
+            SrcType::F16v2 => {
+                let u = match self.src_swizzle {
+                    SrcSwizzle::None => u,
+                    SrcSwizzle::Xx => (u << 16) | (u & 0xffff),
+                    SrcSwizzle::Yy => (u & 0xffff0000) | (u >> 16),
+                };
+
+                match self.src_mod {
+                    SrcMod::None => u,
+                    SrcMod::FAbs => u & 0x7FFF7FFF,
+                    SrcMod::FNeg => u ^ 0x80008000,
+                    SrcMod::FNegAbs => u | 0x80008000,
+                    _ => panic!("Not a float source modifier"),
+                }
+            }
+            SrcType::F32 | SrcType::F64 => match self.src_mod {
+                SrcMod::None => u,
+                SrcMod::FAbs => u & !(1_u32 << 31),
+                SrcMod::FNeg => u ^ (1_u32 << 31),
+                SrcMod::FNegAbs => u | (1_u32 << 31),
+                _ => panic!("Not a float source modifier"),
+            },
+            SrcType::I32 => match self.src_mod {
+                SrcMod::None => u,
+                SrcMod::INeg => -(u as i32) as u32,
+                _ => panic!("Not an integer source modifier"),
+            },
+            SrcType::B32 => match self.src_mod {
+                SrcMod::None => u,
+                SrcMod::BNot => !u,
+                _ => panic!("Not a bitwise source modifier"),
+            },
+            _ => {
+                assert!(self.src_mod.is_none());
+                u
+            }
+        };
+
+        Src {
+            src_mod: SrcMod::None,
+            src_ref: u.into(),
+            src_swizzle: SrcSwizzle::None,
         }
     }
 
@@ -1194,13 +1292,10 @@ impl Src {
     }
 
     pub fn is_fneg_zero(&self, src_type: SrcType) -> bool {
-        match self.src_ref {
-            SrcRef::Zero | SrcRef::Imm32(0) => {
-                matches!(self.src_mod, SrcMod::FNeg | SrcMod::FNegAbs)
-            }
-            SrcRef::Imm32(0x80000000) => {
-                src_type == SrcType::F32 && self.src_mod.is_none()
-            }
+        match self.fold_imm(src_type).src_ref {
+            SrcRef::Imm32(0x00008000) => src_type == SrcType::F16,
+            SrcRef::Imm32(0x80000000) => src_type == SrcType::F32,
+            SrcRef::Imm32(0x80008000) => src_type == SrcType::F16v2,
             _ => false,
         }
     }
@@ -1226,7 +1321,7 @@ impl Src {
                 )
             }
             SrcType::ALU => self.src_mod.is_none() && self.src_ref.is_alu(),
-            SrcType::F32 | SrcType::F64 => {
+            SrcType::F16 | SrcType::F32 | SrcType::F64 | SrcType::F16v2 => {
                 match self.src_mod {
                     SrcMod::None
                     | SrcMod::FAbs
@@ -1271,6 +1366,7 @@ impl<T: Into<SrcRef>> From<T> for Src {
         Src {
             src_ref: value.into(),
             src_mod: SrcMod::None,
+            src_swizzle: SrcSwizzle::None,
         }
     }
 }
@@ -1278,12 +1374,14 @@ impl<T: Into<SrcRef>> From<T> for Src {
 impl fmt::Display for Src {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.src_mod {
-            SrcMod::None => write!(f, "{}", self.src_ref),
-            SrcMod::FAbs => write!(f, "|{}|", self.src_ref),
-            SrcMod::FNeg => write!(f, "-{}", self.src_ref),
-            SrcMod::FNegAbs => write!(f, "-|{}|", self.src_ref),
-            SrcMod::INeg => write!(f, "-{}", self.src_ref),
-            SrcMod::BNot => write!(f, "!{}", self.src_ref),
+            SrcMod::None => write!(f, "{}{}", self.src_ref, self.src_swizzle),
+            SrcMod::FAbs => write!(f, "|{}{}|", self.src_ref, self.src_swizzle),
+            SrcMod::FNeg => write!(f, "-{}{}", self.src_ref, self.src_swizzle),
+            SrcMod::FNegAbs => {
+                write!(f, "-|{}{}|", self.src_ref, self.src_swizzle)
+            }
+            SrcMod::INeg => write!(f, "-{}{}", self.src_ref, self.src_swizzle),
+            SrcMod::BNot => write!(f, "!{}{}", self.src_ref, self.src_swizzle),
         }
     }
 }
@@ -1382,7 +1480,6 @@ macro_rules! impl_display_for_op {
     };
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum PredSetOp {
     And,
@@ -1681,7 +1778,6 @@ impl fmt::Display for FloatType {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum FRndMode {
     NearestEven,
@@ -1820,6 +1916,7 @@ impl fmt::Display for ImageDim {
     }
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum IntType {
     U8,
     I8,
@@ -1981,7 +2078,6 @@ impl fmt::Display for MemOrder {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum MemScope {
     CTA,
@@ -2149,7 +2245,6 @@ impl fmt::Display for AtomOp {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum InterpFreq {
     Pass,
@@ -2158,7 +2253,6 @@ pub enum InterpFreq {
     State,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum InterpLoc {
     Default,
@@ -2604,6 +2698,186 @@ impl_display_for_op!(OpDSetP);
 
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHAdd2 {
+    pub dst: Dst,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 2],
+
+    pub saturate: bool,
+    pub ftz: bool,
+    pub f32: bool,
+}
+
+impl DisplayOp for OpHAdd2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sat = if self.saturate { ".sat" } else { "" };
+        let f32 = if self.f32 { ".f32" } else { "" };
+        write!(f, "hadd2{sat}{f32}")?;
+        if self.ftz {
+            write!(f, ".ftz")?;
+        }
+        write!(f, " {} {}", self.srcs[0], self.srcs[1])
+    }
+}
+impl_display_for_op!(OpHAdd2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHSet2 {
+    pub dst: Dst,
+
+    pub set_op: PredSetOp,
+    pub cmp_op: FloatCmpOp,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 2],
+
+    #[src_type(Pred)]
+    pub accum: Src,
+
+    pub ftz: bool,
+}
+
+impl DisplayOp for OpHSet2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ftz = if self.ftz { ".ftz" } else { "" };
+        write!(f, "hset2{}{ftz}", self.cmp_op)?;
+        if !self.set_op.is_trivial(&self.accum) {
+            write!(f, "{}", self.set_op)?;
+        }
+        write!(f, " {} {}", self.srcs[0], self.srcs[1])?;
+        if !self.set_op.is_trivial(&self.accum) {
+            write!(f, " {}", self.accum)?;
+        }
+        Ok(())
+    }
+}
+impl_display_for_op!(OpHSet2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHSetP2 {
+    pub dsts: [Dst; 2],
+
+    pub set_op: PredSetOp,
+    pub cmp_op: FloatCmpOp,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 2],
+
+    #[src_type(Pred)]
+    pub accum: Src,
+
+    pub ftz: bool,
+
+    // When not set, each dsts get the result of each lanes.
+    // When set, the first dst gets the result of both lanes (res0 && res1)
+    // and the second dst gets the negation !(res0 && res1)
+    // before applying the accumulator.
+    pub horizontal: bool,
+}
+
+impl DisplayOp for OpHSetP2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ftz = if self.ftz { ".ftz" } else { "" };
+        write!(f, "hsetp2{}{ftz}", self.cmp_op)?;
+        if !self.set_op.is_trivial(&self.accum) {
+            write!(f, "{}", self.set_op)?;
+        }
+        write!(f, " {} {}", self.srcs[0], self.srcs[1])?;
+        if !self.set_op.is_trivial(&self.accum) {
+            write!(f, " {}", self.accum)?;
+        }
+        Ok(())
+    }
+}
+impl_display_for_op!(OpHSetP2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHMul2 {
+    pub dst: Dst,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 2],
+
+    pub saturate: bool,
+    pub ftz: bool,
+    pub dnz: bool,
+}
+
+impl DisplayOp for OpHMul2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sat = if self.saturate { ".sat" } else { "" };
+        write!(f, "hmul2{sat}")?;
+        if self.dnz {
+            write!(f, ".dnz")?;
+        } else if self.ftz {
+            write!(f, ".ftz")?;
+        }
+        write!(f, " {} {}", self.srcs[0], self.srcs[1])
+    }
+}
+impl_display_for_op!(OpHMul2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHFma2 {
+    pub dst: Dst,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 3],
+
+    pub saturate: bool,
+    pub ftz: bool,
+    pub dnz: bool,
+    pub f32: bool,
+}
+
+impl DisplayOp for OpHFma2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sat = if self.saturate { ".sat" } else { "" };
+        let f32 = if self.f32 { ".f32" } else { "" };
+        write!(f, "hfma2{sat}{f32}")?;
+        if self.dnz {
+            write!(f, ".dnz")?;
+        } else if self.ftz {
+            write!(f, ".ftz")?;
+        }
+        write!(f, " {} {} {}", self.srcs[0], self.srcs[1], self.srcs[2])
+    }
+}
+impl_display_for_op!(OpHFma2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpHMnMx2 {
+    pub dst: Dst,
+
+    #[src_type(F16v2)]
+    pub srcs: [Src; 2],
+
+    #[src_type(Pred)]
+    pub min: Src,
+
+    pub ftz: bool,
+}
+
+impl DisplayOp for OpHMnMx2 {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ftz = if self.ftz { ".ftz" } else { "" };
+        write!(
+            f,
+            "hmnmx2{ftz} {} {} {}",
+            self.srcs[0], self.srcs[1], self.min
+        )
+    }
+}
+impl_display_for_op!(OpHMnMx2);
+
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpBMsk {
     pub dst: Dst,
 
@@ -3010,7 +3284,6 @@ impl DisplayOp for OpLop3 {
 }
 impl_display_for_op!(OpLop3);
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ShflOp {
     Idx,
@@ -3041,7 +3314,7 @@ pub struct OpShf {
     #[src_type(ALU)]
     pub high: Src,
 
-    #[src_type(GPR)]
+    #[src_type(ALU)]
     pub shift: Src,
 
     pub right: bool,
@@ -3154,7 +3427,7 @@ impl SrcsAsSlice for OpF2F {
 
     fn src_types(&self) -> SrcTypeList {
         let src_type = match self.src_type {
-            FloatType::F16 => SrcType::ALU,
+            FloatType::F16 => SrcType::F16,
             FloatType::F32 => SrcType::F32,
             FloatType::F64 => SrcType::F64,
         };
@@ -3204,7 +3477,7 @@ impl SrcsAsSlice for OpF2I {
 
     fn src_types(&self) -> SrcTypeList {
         let src_type = match self.src_type {
-            FloatType::F16 => SrcType::ALU,
+            FloatType::F16 => SrcType::F16,
             FloatType::F32 => SrcType::F32,
             FloatType::F64 => SrcType::F64,
         };
@@ -3324,7 +3597,7 @@ impl SrcsAsSlice for OpFRnd {
 
     fn src_types(&self) -> SrcTypeList {
         let src_type = match self.src_type {
-            FloatType::F16 => SrcType::ALU,
+            FloatType::F16 => SrcType::F16,
             FloatType::F32 => SrcType::F32,
             FloatType::F64 => SrcType::F64,
         };
@@ -3529,7 +3802,7 @@ impl_display_for_op!(OpPopC);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpTex {
     pub dsts: [Dst; 2],
-    pub resident: Dst,
+    pub fault: Dst,
 
     #[src_type(SSA)]
     pub srcs: [Src; 2],
@@ -3562,7 +3835,7 @@ impl_display_for_op!(OpTex);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpTld {
     pub dsts: [Dst; 2],
-    pub resident: Dst,
+    pub fault: Dst,
 
     #[src_type(SSA)]
     pub srcs: [Src; 2],
@@ -3595,7 +3868,7 @@ impl_display_for_op!(OpTld);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpTld4 {
     pub dsts: [Dst; 2],
-    pub resident: Dst,
+    pub fault: Dst,
 
     #[src_type(SSA)]
     pub srcs: [Src; 2],
@@ -3645,7 +3918,7 @@ impl_display_for_op!(OpTmml);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpTxd {
     pub dsts: [Dst; 2],
-    pub resident: Dst,
+    pub fault: Dst,
 
     #[src_type(SSA)]
     pub srcs: [Src; 2],
@@ -3689,7 +3962,7 @@ impl_display_for_op!(OpTxq);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpSuLd {
     pub dst: Dst,
-    pub resident: Dst,
+    pub fault: Dst,
 
     pub image_dim: ImageDim,
     pub mem_order: MemOrder,
@@ -3756,7 +4029,7 @@ impl_display_for_op!(OpSuSt);
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpSuAtom {
     pub dst: Dst,
-    pub resident: Dst,
+    pub fault: Dst,
 
     pub image_dim: ImageDim,
 
@@ -3817,6 +4090,25 @@ impl DisplayOp for OpLd {
 }
 impl_display_for_op!(OpLd);
 
+#[allow(dead_code)]
+pub enum LdcMode {
+    Indexed,
+    IndexedLinear,
+    IndexedSegmented,
+    IndexedSegmentedLinear,
+}
+
+impl fmt::Display for LdcMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LdcMode::Indexed => Ok(()),
+            LdcMode::IndexedLinear => write!(f, ".il"),
+            LdcMode::IndexedSegmented => write!(f, ".is"),
+            LdcMode::IndexedSegmentedLinear => write!(f, ".isl"),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
 pub struct OpLdc {
@@ -3828,6 +4120,7 @@ pub struct OpLdc {
     #[src_type(GPR)]
     pub offset: Src,
 
+    pub mode: LdcMode,
     pub mem_type: MemType,
 }
 
@@ -3836,7 +4129,7 @@ impl DisplayOp for OpLdc {
         let SrcRef::CBuf(cb) = self.cb.src_ref else {
             panic!("Not a cbuf");
         };
-        write!(f, "ldc{} {}[", self.mem_type, cb.buf)?;
+        write!(f, "ldc{}{} {}[", self.mode, self.mem_type, cb.buf)?;
         if self.offset.is_zero() {
             write!(f, "+{:#x}", cb.offset)?;
         } else if cb.offset == 0 {
@@ -4332,7 +4625,7 @@ pub struct OpIsberd {
 
 impl DisplayOp for OpIsberd {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "isberd {} [{}]", self.dst, self.idx)
+        write!(f, "isberd [{}]", self.idx)
     }
 }
 impl_display_for_op!(OpIsberd);
@@ -4850,6 +5143,26 @@ impl DisplayOp for OpOutFinal {
 }
 impl_display_for_op!(OpOutFinal);
 
+/// Describes an annotation on an instruction.
+#[repr(C)]
+#[derive(SrcsAsSlice, DstsAsSlice)]
+pub struct OpAnnotate {
+    /// The annotation
+    pub annotation: String,
+}
+
+impl DisplayOp for OpAnnotate {
+    fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "// {}", self.annotation)
+    }
+}
+
+impl fmt::Display for OpAnnotate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_op(f)
+    }
+}
+
 #[derive(DisplayOp, DstsAsSlice, SrcsAsSlice, FromVariants)]
 pub enum Op {
     FAdd(OpFAdd),
@@ -4866,6 +5179,12 @@ pub enum Op {
     DMnMx(OpDMnMx),
     DMul(OpDMul),
     DSetP(OpDSetP),
+    HAdd2(OpHAdd2),
+    HFma2(OpHFma2),
+    HMul2(OpHMul2),
+    HSet2(OpHSet2),
+    HSetP2(OpHSetP2),
+    HMnMx2(OpHMnMx2),
     BMsk(OpBMsk),
     BRev(OpBRev),
     Bfe(OpBfe),
@@ -4944,6 +5263,7 @@ pub enum Op {
     FSOut(OpFSOut),
     Out(OpOut),
     OutFinal(OpOutFinal),
+    Annotate(OpAnnotate),
 }
 impl_display_for_op!(Op);
 
@@ -5035,6 +5355,13 @@ impl Pred {
 
     pub fn iter_ssa_mut(&mut self) -> slice::IterMut<'_, SSAValue> {
         self.pred_ref.iter_ssa_mut()
+    }
+
+    pub fn bnot(self) -> Self {
+        Pred {
+            pred_ref: self.pred_ref,
+            pred_inv: !self.pred_inv,
+        }
     }
 }
 
@@ -5277,7 +5604,8 @@ impl Instr {
             | Op::Bar(_)
             | Op::FSOut(_)
             | Op::Out(_)
-            | Op::OutFinal(_) => false,
+            | Op::OutFinal(_)
+            | Op::Annotate(_) => false,
             Op::BMov(op) => !op.clear,
             _ => true,
         }
@@ -5292,6 +5620,12 @@ impl Instr {
             | Op::FMul(_)
             | Op::FSet(_)
             | Op::FSetP(_)
+            | Op::HAdd2(_)
+            | Op::HFma2(_)
+            | Op::HMul2(_)
+            | Op::HSet2(_)
+            | Op::HSetP2(_)
+            | Op::HMnMx2(_)
             | Op::FSwzAdd(_) => true,
 
             // Multi-function unit is variable latency
@@ -5394,7 +5728,8 @@ impl Instr {
             | Op::Copy(_)
             | Op::Swap(_)
             | Op::ParCopy(_)
-            | Op::FSOut(_) => {
+            | Op::FSOut(_)
+            | Op::Annotate(_) => {
                 panic!("Not a hardware opcode")
             }
         }
@@ -5649,8 +5984,9 @@ impl fmt::Display for Function {
                 pred_width = max(pred_width, pred.len());
                 dsts_width = max(dsts_width, dsts.len());
                 op_width = max(op_width, op.len());
+                let is_annotation = matches!(i.op, Op::Annotate(_));
 
-                instrs.push((pred, dsts, op, deps));
+                instrs.push((pred, dsts, op, deps, is_annotation));
             }
             blocks.push(instrs);
         }
@@ -5665,9 +6001,11 @@ impl fmt::Display for Function {
             }
             write!(f, "] -> {{\n")?;
 
-            for (pred, dsts, op, deps) in b.drain(..) {
+            for (pred, dsts, op, deps, is_annotation) in b.drain(..) {
                 let eq_sym = if dsts.is_empty() { " " } else { "=" };
-                if deps.is_empty() {
+                if is_annotation {
+                    write!(f, "\n{}\n", op)?;
+                } else if deps.is_empty() {
                     write!(
                         f,
                         "{:<pred_width$} {:<dsts_width$} {} {}\n",
@@ -5896,6 +6234,17 @@ impl Shader {
         for f in &mut self.functions {
             f.map_instrs_priv(&mut map);
         }
+    }
+
+    /// Remove all annotations, presumably before encoding the shader.
+    pub fn remove_annotations(&mut self) {
+        self.map_instrs(|instr: Box<Instr>, _| -> MappedInstrs {
+            if matches!(instr.op, Op::Annotate(_)) {
+                MappedInstrs::None
+            } else {
+                MappedInstrs::One(instr)
+            }
+        })
     }
 
     pub fn lower_ineg(&mut self) {

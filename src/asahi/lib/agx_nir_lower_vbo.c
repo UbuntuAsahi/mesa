@@ -110,7 +110,7 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    struct agx_attribute *attribs = data;
-   b->cursor = nir_before_instr(&intr->instr);
+   b->cursor = nir_instr_remove(&intr->instr);
 
    nir_src *offset_src = nir_get_io_offset_src(intr);
    assert(nir_src_is_const(*offset_src) && "no attribute indirects");
@@ -157,8 +157,12 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
     * the divisor for per-instance data. Divisor=0 specifies per-vertex data.
     */
    nir_def *el;
-   if (attrib.divisor) {
-      el = nir_udiv_imm(b, nir_load_instance_id(b), attrib.divisor);
+   if (attrib.instanced) {
+      if (attrib.divisor > 0)
+         el = nir_udiv_imm(b, nir_load_instance_id(b), attrib.divisor);
+      else
+         el = nir_imm_int(b, 0);
+
       el = nir_iadd(b, el, nir_load_base_instance(b));
 
       BITSET_SET(b->shader->info.system_values_read,

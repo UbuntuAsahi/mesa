@@ -656,7 +656,7 @@ ra_ctx_dump(struct ra_ctx *ctx)
    ra_file_dump(stream, &ctx->full);
    mesa_log_stream_printf(stream, "half:\n");
    ra_file_dump(stream, &ctx->half);
-   mesa_log_stream_printf(stream, "shared:");
+   mesa_log_stream_printf(stream, "shared:\n");
    ra_file_dump(stream, &ctx->shared);
    mesa_log_stream_destroy(stream);
 }
@@ -665,10 +665,14 @@ static unsigned
 reg_file_size(struct ra_file *file, struct ir3_register *reg)
 {
    /* Half-regs can only take up the first half of the combined regfile */
-   if (reg->flags & IR3_REG_HALF)
-      return MIN2(file->size, RA_HALF_SIZE);
-   else
+   if (reg->flags & IR3_REG_HALF) {
+      if (reg->flags & IR3_REG_SHARED)
+         return RA_SHARED_HALF_SIZE;
+      else
+         return MIN2(file->size, RA_HALF_SIZE);
+   } else {
       return file->size;
+   }
 }
 
 /* ra_pop_interval/ra_push_interval provide an API to shuffle around multiple
@@ -1072,8 +1076,7 @@ compress_regs_left(struct ra_ctx *ctx, struct ra_file *file,
 
    unsigned removed_size = 0, removed_half_size = 0;
    unsigned removed_killed_size = 0, removed_killed_half_size = 0;
-   unsigned file_size =
-      reg_align == 1 ? MIN2(file->size, RA_HALF_SIZE) : file->size;
+   unsigned file_size = reg_file_size(file, reg);
    physreg_t start_reg = 0;
 
    foreach_interval_rev_safe (interval, file) {
@@ -2070,12 +2073,10 @@ insert_liveout_copy(struct ir3_block *block, physreg_t dst, physreg_t src,
                     struct ir3_register *reg)
 {
    struct ir3_instruction *old_pcopy = NULL;
-   if (!list_is_empty(&block->instr_list)) {
-      struct ir3_instruction *last =
-         list_entry(block->instr_list.prev, struct ir3_instruction, node);
-      if (last->opc == OPC_META_PARALLEL_COPY)
-         old_pcopy = last;
-   }
+   struct ir3_instruction *last = ir3_block_get_last_non_terminator(block);
+
+   if (last && last->opc == OPC_META_PARALLEL_COPY)
+      old_pcopy = last;
 
    unsigned old_pcopy_srcs = old_pcopy ? old_pcopy->srcs_count : 0;
    struct ir3_instruction *pcopy = ir3_instr_create(
@@ -2546,6 +2547,9 @@ ir3_ra(struct ir3_shader_variant *v)
 {
    ir3_calc_dominance(v->ir);
 
+   /* Predicate RA needs dominance. */
+   ir3_ra_predicates(v);
+
    ir3_create_parallel_copies(v->ir);
 
    struct ra_ctx *ctx = rzalloc(NULL, struct ra_ctx);
@@ -2583,6 +2587,7 @@ ir3_ra(struct ir3_shader_variant *v)
    limit_pressure.full = RA_FULL_SIZE;
    limit_pressure.half = RA_HALF_SIZE;
    limit_pressure.shared = RA_SHARED_SIZE;
+   limit_pressure.shared_half = RA_SHARED_HALF_SIZE;
 
    if (gl_shader_stage_is_compute(v->type) && v->has_barrier) {
       calc_limit_pressure_for_cs_with_barrier(v, &limit_pressure);
@@ -2601,7 +2606,15 @@ ir3_ra(struct ir3_shader_variant *v)
    if (ir3_shader_debug & IR3_DBG_SPILLALL)
       calc_min_limit_pressure(v, live, &limit_pressure);
 
-   if (max_pressure.shared > limit_pressure.shared || has_shared_vectors) {
+   /* In the worst case, each half register could block one full register, so
+    * add shared_half in case of fragmentation. In addition, full registers can
+    * block half registers so we have to consider the total pressure against the
+    * half limit to prevent live range splitting when we run out of space for
+    * half registers in the bottom half.
+    */
+   if (max_pressure.shared + max_pressure.shared_half > limit_pressure.shared ||
+       (max_pressure.shared_half > 0 && max_pressure.shared > limit_pressure.shared_half) ||
+       has_shared_vectors) {
       ir3_ra_shared(v, live);
 
       /* Recalculate liveness and register pressure now that additional values

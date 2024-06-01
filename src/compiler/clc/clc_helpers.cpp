@@ -67,6 +67,7 @@
 
 #ifdef USE_STATIC_OPENCL_C_H
 #include "opencl-c-base.h.h"
+#include "opencl-c.h.h"
 #endif
 
 #include "clc_helpers.h"
@@ -90,13 +91,21 @@ static void
 clc_dump_llvm(const llvm::Module *mod, FILE *f);
 
 static void
+#if LLVM_VERSION_MAJOR >= 19
+llvm_log_handler(const ::llvm::DiagnosticInfo *di, void *data) {
+#else
 llvm_log_handler(const ::llvm::DiagnosticInfo &di, void *data) {
+#endif
    const clc_logger *logger = static_cast<clc_logger *>(data);
 
    std::string log;
    raw_string_ostream os { log };
    ::llvm::DiagnosticPrinterRawOStream printer { os };
+#if LLVM_VERSION_MAJOR >= 19
+   di->print(printer);
+#else
    di.print(printer);
+#endif
 
    clc_error(logger, "%s", log.c_str());
 }
@@ -783,7 +792,7 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    };
 
 #if LLVM_VERSION_MAJOR >= 17
-   const char *triple = args->address_bits == 32 ? "spirv-unknown-unknown" : "spirv64-unknown-unknown";
+   const char *triple = args->address_bits == 32 ? "spir-unknown-unknown" : "spirv64-unknown-unknown";
 #else
    const char *triple = args->address_bits == 32 ? "spir-unknown-unknown" : "spir64-unknown-unknown";
 #endif
@@ -855,8 +864,11 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
       ::llvm::sys::path::append(system_header_path, "opencl-c-base.h");
       c->getPreprocessorOpts().addRemappedFile(system_header_path.str(),
          ::llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(opencl_c_base_source, ARRAY_SIZE(opencl_c_base_source) - 1)).release());
-
-      c->getPreprocessorOpts().Includes.push_back("opencl-c-base.h");
+      // this line is actually important to make it include `opencl-c.h`
+      ::llvm::sys::path::remove_filename(system_header_path);
+      ::llvm::sys::path::append(system_header_path, "opencl-c.h");
+      c->getPreprocessorOpts().addRemappedFile(system_header_path.str(),
+         ::llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(opencl_c_source, ARRAY_SIZE(opencl_c_source) - 1)).release());
    }
 #else
 
@@ -886,8 +898,6 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    c->getHeaderSearchOpts().AddPath(clang_res_path.string(),
                                     clang::frontend::Angled,
                                     false, false);
-   // Add opencl include
-   c->getPreprocessorOpts().Includes.push_back("opencl-c-base.h");
 #endif
 
    // Enable/Disable optional OpenCL C features. Some can be toggled via `OpenCLExtensionsAsWritten`
@@ -905,6 +915,7 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_khr_local_int32_extended_atomics");
    c->getPreprocessorOpts().addMacroDef("cl_khr_expect_assume=1");
 
+   bool needs_opencl_c_h = false;
    if (args->features.fp16) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_khr_fp16");
    }
@@ -934,6 +945,7 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
    }
    if (args->features.intel_subgroups) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+cl_intel_subgroups");
+      needs_opencl_c_h = true;
    }
    if (args->features.subgroups) {
       c->getTargetOpts().OpenCLExtensionsAsWritten.push_back("+__opencl_c_subgroups");
@@ -952,6 +964,12 @@ clc_compile_to_llvm_module(LLVMContext &llvm_ctx,
       c->getPreprocessorOpts().addMacroDef("cl_khr_integer_dot_product=1");
       c->getPreprocessorOpts().addMacroDef("__opencl_c_integer_dot_product_input_4x8bit_packed=1");
       c->getPreprocessorOpts().addMacroDef("__opencl_c_integer_dot_product_input_4x8bit=1");
+   }
+
+   // Add opencl include
+   c->getPreprocessorOpts().Includes.push_back("opencl-c-base.h");
+   if (needs_opencl_c_h) {
+      c->getPreprocessorOpts().Includes.push_back("opencl-c.h");
    }
 
    if (args->num_headers) {
