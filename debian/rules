@@ -195,7 +195,6 @@ confflags += \
 	$(confflags_TEFLON)
 
 override_dh_clean: regen_control
-	dpkg-parsechangelog | awk '/^Version:/ {print $$2}' | sed 's/-.*//;s/~/-/' > VERSION
 	rm -rf .pc
 	rm -rf build
 	rm -rf configure bin/config.guess bin/config.sub config.h.in
