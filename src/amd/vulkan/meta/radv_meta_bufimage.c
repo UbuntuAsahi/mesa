@@ -63,83 +63,42 @@ radv_device_init_meta_itob_state(struct radv_device *device)
    nir_shader *cs = build_nir_itob_compute_shader(device, false);
    nir_shader *cs_3d = build_nir_itob_compute_shader(device, true);
 
-   /*
-    * two descriptors one for the image being sampled
-    * one for the buffer being written.
-    */
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 2,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                        {.binding = 1,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.itob.img_ds_layout);
+   result = radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.itob.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.itob.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 16},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 16,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.itob.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.itob.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.itob.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* compute shader */
-
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.itob.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, &device->meta_state.itob.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.itob.img_p_layout,
+                                              &device->meta_state.itob.pipeline);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage_3d = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs_3d),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info_3d = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage_3d,
-      .flags = 0,
-      .layout = device->meta_state.itob.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info_3d,
-                                         NULL, &device->meta_state.itob.pipeline_3d);
+   result = radv_meta_create_compute_pipeline(device, cs_3d, device->meta_state.itob.img_p_layout,
+                                              &device->meta_state.itob.pipeline_3d);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -212,83 +171,43 @@ radv_device_init_meta_btoi_state(struct radv_device *device)
    VkResult result;
    nir_shader *cs = build_nir_btoi_compute_shader(device, false);
    nir_shader *cs_3d = build_nir_btoi_compute_shader(device, true);
-   /*
-    * two descriptors one for the image being sampled
-    * one for the buffer being written.
-    */
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 2,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                        {.binding = 1,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.btoi.img_ds_layout);
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+   };
+
+   result = radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.btoi.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.btoi.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 16},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 16,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.btoi.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.btoi.img_ds_layout, 1,
+      &pc_range, &device->meta_state.btoi.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* compute shader */
-
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.btoi.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, &device->meta_state.btoi.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.btoi.img_p_layout,
+                                              &device->meta_state.btoi.pipeline);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage_3d = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs_3d),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info_3d = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage_3d,
-      .flags = 0,
-      .layout = device->meta_state.btoi.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info_3d,
-                                         NULL, &device->meta_state.btoi.pipeline_3d);
+   result = radv_meta_create_compute_pipeline(device, cs_3d, device->meta_state.btoi.img_p_layout,
+                                              &device->meta_state.btoi.pipeline_3d);
 
    ralloc_free(cs_3d);
    ralloc_free(cs);
@@ -366,59 +285,38 @@ radv_device_init_meta_btoi_r32g32b32_state(struct radv_device *device)
    VkResult result;
    nir_shader *cs = build_nir_btoi_r32g32b32_compute_shader(device);
 
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 2,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                        {.binding = 1,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.btoi_r32g32b32.img_ds_layout);
+   result =
+      radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.btoi_r32g32b32.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.btoi_r32g32b32.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 16},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 16,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.btoi_r32g32b32.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.btoi_r32g32b32.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.btoi_r32g32b32.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* compute shader */
-
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.btoi_r32g32b32.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, &device->meta_state.btoi_r32g32b32.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.btoi_r32g32b32.img_p_layout,
+                                              &device->meta_state.btoi_r32g32b32.pipeline);
 
 fail:
    ralloc_free(cs);
@@ -497,23 +395,7 @@ create_itoi_pipeline(struct radv_device *device, int samples, VkPipeline *pipeli
    nir_shader *cs = build_nir_itoi_compute_shader(device, false, false, samples);
    VkResult result;
 
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = state->itoi.img_p_layout,
-   };
-
-   result =
-      radv_compute_pipeline_create(radv_device_to_handle(device), state->cache, &vk_pipeline_info, NULL, pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, state->itoi.img_p_layout, pipeline);
    ralloc_free(cs);
    return result;
 }
@@ -524,41 +406,32 @@ radv_device_init_meta_itoi_state(struct radv_device *device)
 {
    VkResult result;
 
-   /*
-    * two descriptors one for the image being sampled
-    * one for the buffer being written.
-    */
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 2,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                        {.binding = 1,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.itoi.img_ds_layout);
+   result = radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.itoi.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.itoi.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 24},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 24,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.itoi.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.itoi.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.itoi.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -583,23 +456,7 @@ radv_device_init_meta_itoi_state(struct radv_device *device)
 
          nir_shader *cs_3d = build_nir_itoi_compute_shader(device, src_3d, dst_3d, 1);
 
-         VkPipelineShaderStageCreateInfo pipeline_shader_stage_3d = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = vk_shader_module_handle_from_nir(cs_3d),
-            .pName = "main",
-            .pSpecializationInfo = NULL,
-         };
-
-         VkComputePipelineCreateInfo vk_pipeline_info_3d = {
-            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .stage = pipeline_shader_stage_3d,
-            .flags = 0,
-            .layout = device->meta_state.itoi.img_p_layout,
-         };
-
-         result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache,
-                                               &vk_pipeline_info_3d, NULL, pipeline);
+         result = radv_meta_create_compute_pipeline(device, cs_3d, device->meta_state.itoi.img_p_layout, pipeline);
 
          ralloc_free(cs_3d);
 
@@ -688,59 +545,38 @@ radv_device_init_meta_itoi_r32g32b32_state(struct radv_device *device)
    VkResult result;
    nir_shader *cs = build_nir_itoi_r32g32b32_compute_shader(device);
 
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 2,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                        {.binding = 1,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding bindings[] = {
+      {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.itoi_r32g32b32.img_ds_layout);
+   result =
+      radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.itoi_r32g32b32.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.itoi_r32g32b32.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 24},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 24,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.itoi_r32g32b32.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.itoi_r32g32b32.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.itoi_r32g32b32.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* compute shader */
-
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.itoi_r32g32b32.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, &device->meta_state.itoi_r32g32b32.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.itoi_r32g32b32.img_p_layout,
+                                              &device->meta_state.itoi_r32g32b32.pipeline);
 
 fail:
    ralloc_free(cs);
@@ -801,23 +637,7 @@ create_cleari_pipeline(struct radv_device *device, int samples, VkPipeline *pipe
    nir_shader *cs = build_nir_cleari_compute_shader(device, false, samples);
    VkResult result;
 
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.cleari.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.cleari.img_p_layout, pipeline);
    ralloc_free(cs);
    return result;
 }
@@ -827,36 +647,24 @@ radv_device_init_meta_cleari_state(struct radv_device *device)
 {
    VkResult result;
 
-   /*
-    * two descriptors one for the image being sampled
-    * one for the buffer being written.
-    */
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 1,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.cleari.img_ds_layout);
+   result = radv_meta_create_descriptor_set_layout(device, 1, &binding, &device->meta_state.cleari.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.cleari.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 20},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 20,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.cleari.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.cleari.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.cleari.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -869,24 +677,8 @@ radv_device_init_meta_cleari_state(struct radv_device *device)
 
    nir_shader *cs_3d = build_nir_cleari_compute_shader(device, true, 1);
 
-   /* compute shader */
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage_3d = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs_3d),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info_3d = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage_3d,
-      .flags = 0,
-      .layout = device->meta_state.cleari.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info_3d,
-                                         NULL, &device->meta_state.cleari.pipeline_3d);
+   result = radv_meta_create_compute_pipeline(device, cs_3d, device->meta_state.cleari.img_p_layout,
+                                              &device->meta_state.cleari.pipeline_3d);
    ralloc_free(cs_3d);
 
    return VK_SUCCESS;
@@ -951,53 +743,30 @@ radv_device_init_meta_cleari_r32g32b32_state(struct radv_device *device)
    VkResult result;
    nir_shader *cs = build_nir_cleari_r32g32b32_compute_shader(device);
 
-   VkDescriptorSetLayoutCreateInfo ds_create_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 1,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
+   const VkDescriptorSetLayoutBinding binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+   };
 
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                           &device->meta_state.cleari_r32g32b32.img_ds_layout);
+   result =
+      radv_meta_create_descriptor_set_layout(device, 1, &binding, &device->meta_state.cleari_r32g32b32.img_ds_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   VkPipelineLayoutCreateInfo pl_create_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &device->meta_state.cleari_r32g32b32.img_ds_layout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges = &(VkPushConstantRange){VK_SHADER_STAGE_COMPUTE_BIT, 0, 16},
+   const VkPushConstantRange pc_range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = 16,
    };
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                      &device->meta_state.cleari_r32g32b32.img_p_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.cleari_r32g32b32.img_ds_layout, 1, &pc_range,
+                                             &device->meta_state.cleari_r32g32b32.img_p_layout);
    if (result != VK_SUCCESS)
       goto fail;
 
-   /* compute shader */
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = device->meta_state.cleari_r32g32b32.img_p_layout,
-   };
-
-   result = radv_compute_pipeline_create(radv_device_to_handle(device), device->meta_state.cache, &vk_pipeline_info,
-                                         NULL, &device->meta_state.cleari_r32g32b32.pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, device->meta_state.cleari_r32g32b32.img_p_layout,
+                                              &device->meta_state.cleari_r32g32b32.pipeline);
 
 fail:
    ralloc_free(cs);
@@ -1275,8 +1044,7 @@ itob_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    radv_meta_push_descriptor_set(
-      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itob.img_p_layout, 0, /* set */
-      2,                                                                                   /* descriptorWriteCount */
+      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itob.img_p_layout, 0, 2,
       (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                 .dstBinding = 0,
                                 .dstArrayElement = 0,
@@ -1302,7 +1070,7 @@ itob_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view
 
 void
 radv_meta_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src,
-                          struct radv_meta_blit2d_buffer *dst, unsigned num_rects, struct radv_meta_blit2d_rect *rects)
+                          struct radv_meta_blit2d_buffer *dst, struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipeline pipeline = device->meta_state.itob.pipeline;
@@ -1318,14 +1086,12 @@ radv_meta_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_b
 
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-   for (unsigned r = 0; r < num_rects; ++r) {
-      unsigned push_constants[4] = {rects[r].src_x, rects[r].src_y, src->layer, dst->pitch};
-      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itob.img_p_layout,
-                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
+   unsigned push_constants[4] = {rect->src_x, rect->src_y, src->layer, dst->pitch};
+   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itob.img_p_layout,
+                              VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
 
-      radv_unaligned_dispatch(cmd_buffer, rects[r].width, rects[r].height, 1);
-      fixup_gfx9_cs_copy(cmd_buffer, dst, src, &rects[r], false);
-   }
+   radv_unaligned_dispatch(cmd_buffer, rect->width, rect->height, 1);
+   fixup_gfx9_cs_copy(cmd_buffer, dst, src, rect, false);
 
    radv_image_view_finish(&src_view);
    radv_buffer_view_finish(&dst_view);
@@ -1338,8 +1104,7 @@ btoi_r32g32b32_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    radv_meta_push_descriptor_set(
-      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.btoi_r32g32b32.img_p_layout, 0, /* set */
-      2, /* descriptorWriteCount */
+      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.btoi_r32g32b32.img_p_layout, 0, 2,
       (VkWriteDescriptorSet[]){{
                                   .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                   .dstBinding = 0,
@@ -1360,8 +1125,7 @@ btoi_r32g32b32_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_
 
 static void
 radv_meta_buffer_to_image_cs_r32g32b32(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_buffer *src,
-                                       struct radv_meta_blit2d_surf *dst, unsigned num_rects,
-                                       struct radv_meta_blit2d_rect *rects)
+                                       struct radv_meta_blit2d_surf *dst, struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipeline pipeline = device->meta_state.btoi_r32g32b32.pipeline;
@@ -1384,19 +1148,17 @@ radv_meta_buffer_to_image_cs_r32g32b32(struct radv_cmd_buffer *cmd_buffer, struc
 
    stride = get_image_stride_for_r32g32b32(cmd_buffer, dst);
 
-   for (unsigned r = 0; r < num_rects; ++r) {
-      unsigned push_constants[4] = {
-         rects[r].dst_x,
-         rects[r].dst_y,
-         stride,
-         src->pitch,
-      };
+   unsigned push_constants[4] = {
+      rect->dst_x,
+      rect->dst_y,
+      stride,
+      src->pitch,
+   };
 
-      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.btoi_r32g32b32.img_p_layout,
-                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
+   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.btoi_r32g32b32.img_p_layout,
+                              VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
 
-      radv_unaligned_dispatch(cmd_buffer, rects[r].width, rects[r].height, 1);
-   }
+   radv_unaligned_dispatch(cmd_buffer, rect->width, rect->height, 1);
 
    radv_buffer_view_finish(&src_view);
    radv_buffer_view_finish(&dst_view);
@@ -1409,8 +1171,7 @@ btoi_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_buffer_vie
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    radv_meta_push_descriptor_set(
-      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.btoi.img_p_layout, 0, /* set */
-      2,                                                                                   /* descriptorWriteCount */
+      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.btoi.img_p_layout, 0, 2,
       (VkWriteDescriptorSet[]){{
                                   .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                   .dstBinding = 0,
@@ -1435,7 +1196,7 @@ btoi_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_buffer_vie
 
 void
 radv_meta_buffer_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_buffer *src,
-                             struct radv_meta_blit2d_surf *dst, unsigned num_rects, struct radv_meta_blit2d_rect *rects)
+                             struct radv_meta_blit2d_surf *dst, struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipeline pipeline = device->meta_state.btoi.pipeline;
@@ -1444,7 +1205,7 @@ radv_meta_buffer_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_met
 
    if (dst->image->vk.format == VK_FORMAT_R32G32B32_UINT || dst->image->vk.format == VK_FORMAT_R32G32B32_SINT ||
        dst->image->vk.format == VK_FORMAT_R32G32B32_SFLOAT) {
-      radv_meta_buffer_to_image_cs_r32g32b32(cmd_buffer, src, dst, num_rects, rects);
+      radv_meta_buffer_to_image_cs_r32g32b32(cmd_buffer, src, dst, rect);
       return;
    }
 
@@ -1456,19 +1217,17 @@ radv_meta_buffer_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_met
       pipeline = device->meta_state.btoi.pipeline_3d;
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-   for (unsigned r = 0; r < num_rects; ++r) {
-      unsigned push_constants[4] = {
-         rects[r].dst_x,
-         rects[r].dst_y,
-         dst->layer,
-         src->pitch,
-      };
-      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.btoi.img_p_layout,
-                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
+   unsigned push_constants[4] = {
+      rect->dst_x,
+      rect->dst_y,
+      dst->layer,
+      src->pitch,
+   };
+   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.btoi.img_p_layout,
+                              VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
 
-      radv_unaligned_dispatch(cmd_buffer, rects[r].width, rects[r].height, 1);
-      fixup_gfx9_cs_copy(cmd_buffer, src, dst, &rects[r], true);
-   }
+   radv_unaligned_dispatch(cmd_buffer, rect->width, rect->height, 1);
+   fixup_gfx9_cs_copy(cmd_buffer, src, dst, rect, true);
 
    radv_image_view_finish(&dst_view);
    radv_buffer_view_finish(&src_view);
@@ -1481,8 +1240,7 @@ itoi_r32g32b32_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    radv_meta_push_descriptor_set(
-      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itoi_r32g32b32.img_p_layout, 0, /* set */
-      2, /* descriptorWriteCount */
+      cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itoi_r32g32b32.img_p_layout, 0, 2,
       (VkWriteDescriptorSet[]){{
                                   .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                   .dstBinding = 0,
@@ -1503,8 +1261,7 @@ itoi_r32g32b32_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_
 
 static void
 radv_meta_image_to_image_cs_r32g32b32(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src,
-                                      struct radv_meta_blit2d_surf *dst, unsigned num_rects,
-                                      struct radv_meta_blit2d_rect *rects)
+                                      struct radv_meta_blit2d_surf *dst, struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    VkPipeline pipeline = device->meta_state.itoi_r32g32b32.pipeline;
@@ -1533,15 +1290,13 @@ radv_meta_image_to_image_cs_r32g32b32(struct radv_cmd_buffer *cmd_buffer, struct
    src_stride = get_image_stride_for_r32g32b32(cmd_buffer, src);
    dst_stride = get_image_stride_for_r32g32b32(cmd_buffer, dst);
 
-   for (unsigned r = 0; r < num_rects; ++r) {
-      unsigned push_constants[6] = {
-         rects[r].src_x, rects[r].src_y, src_stride, rects[r].dst_x, rects[r].dst_y, dst_stride,
-      };
-      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itoi_r32g32b32.img_p_layout,
-                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_constants);
+   unsigned push_constants[6] = {
+      rect->src_x, rect->src_y, src_stride, rect->dst_x, rect->dst_y, dst_stride,
+   };
+   vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itoi_r32g32b32.img_p_layout,
+                              VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_constants);
 
-      radv_unaligned_dispatch(cmd_buffer, rects[r].width, rects[r].height, 1);
-   }
+   radv_unaligned_dispatch(cmd_buffer, rect->width, rect->height, 1);
 
    radv_buffer_view_finish(&src_view);
    radv_buffer_view_finish(&dst_view);
@@ -1554,9 +1309,7 @@ itoi_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
-   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itoi.img_p_layout,
-                                 0, /* set */
-                                 2, /* descriptorWriteCount */
+   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.itoi.img_p_layout, 0, 2,
                                  (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                                            .dstBinding = 0,
                                                            .dstArrayElement = 0,
@@ -1586,7 +1339,7 @@ itoi_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view
 
 void
 radv_meta_image_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src,
-                            struct radv_meta_blit2d_surf *dst, unsigned num_rects, struct radv_meta_blit2d_rect *rects)
+                            struct radv_meta_blit2d_surf *dst, struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_image_view src_view, dst_view;
@@ -1595,7 +1348,7 @@ radv_meta_image_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta
 
    if (src->format == VK_FORMAT_R32G32B32_UINT || src->format == VK_FORMAT_R32G32B32_SINT ||
        src->format == VK_FORMAT_R32G32B32_SFLOAT) {
-      radv_meta_image_to_image_cs_r32g32b32(cmd_buffer, src, dst, num_rects, rects);
+      radv_meta_image_to_image_cs_r32g32b32(cmd_buffer, src, dst, rect);
       return;
    }
 
@@ -1633,15 +1386,13 @@ radv_meta_image_to_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_meta
 
       radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-      for (unsigned r = 0; r < num_rects; ++r) {
-         unsigned push_constants[6] = {
-            rects[r].src_x, rects[r].src_y, src->layer, rects[r].dst_x, rects[r].dst_y, dst->layer,
-         };
-         vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itoi.img_p_layout,
-                                    VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_constants);
+      unsigned push_constants[6] = {
+         rect->src_x, rect->src_y, src->layer, rect->dst_x, rect->dst_y, dst->layer,
+      };
+      vk_common_CmdPushConstants(radv_cmd_buffer_to_handle(cmd_buffer), device->meta_state.itoi.img_p_layout,
+                                 VK_SHADER_STAGE_COMPUTE_BIT, 0, 24, push_constants);
 
-         radv_unaligned_dispatch(cmd_buffer, rects[r].width, rects[r].height, 1);
-      }
+      radv_unaligned_dispatch(cmd_buffer, rect->width, rect->height, 1);
 
       radv_image_view_finish(&src_view);
       radv_image_view_finish(&dst_view);
@@ -1654,8 +1405,7 @@ cleari_r32g32b32_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct rad
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
    radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                 device->meta_state.cleari_r32g32b32.img_p_layout, 0, /* set */
-                                 1,                                                   /* descriptorWriteCount */
+                                 device->meta_state.cleari_r32g32b32.img_p_layout, 0, 1,
                                  (VkWriteDescriptorSet[]){{
                                     .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                     .dstBinding = 0,
@@ -1710,9 +1460,8 @@ cleari_bind_descriptors(struct radv_cmd_buffer *cmd_buffer, struct radv_image_vi
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
-   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.cleari.img_p_layout,
-                                 0, /* set */
-                                 1, /* descriptorWriteCount */
+   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.cleari.img_p_layout, 0,
+                                 1,
                                  (VkWriteDescriptorSet[]){
                                     {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                      .dstBinding = 0,

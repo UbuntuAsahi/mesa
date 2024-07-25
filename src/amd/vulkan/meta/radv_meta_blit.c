@@ -264,8 +264,7 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image,
    radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
 
    radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, device->meta_state.blit.pipeline_layout,
-                                 0, /* set */
-                                 1, /* descriptorWriteCount */
+                                 0, 1,
                                  (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                                            .dstBinding = 0,
                                                            .dstArrayElement = 0,
@@ -826,32 +825,21 @@ radv_device_init_meta_blit_state(struct radv_device *device, bool on_demand)
 {
    VkResult result;
 
-   VkDescriptorSetLayoutCreateInfo ds_layout_info = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                                     .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                                     .bindingCount = 1,
-                                                     .pBindings = (VkDescriptorSetLayoutBinding[]){
-                                                        {.binding = 0,
-                                                         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                         .descriptorCount = 1,
-                                                         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                                         .pImmutableSamplers = NULL},
-                                                     }};
-   result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_layout_info, &device->meta_state.alloc,
-                                           &device->meta_state.blit.ds_layout);
+   const VkDescriptorSetLayoutBinding binding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+   };
+
+   result = radv_meta_create_descriptor_set_layout(device, 1, &binding, &device->meta_state.blit.ds_layout);
    if (result != VK_SUCCESS)
       return result;
 
    const VkPushConstantRange push_constant_range = {VK_SHADER_STAGE_VERTEX_BIT, 0, 20};
 
-   result = radv_CreatePipelineLayout(radv_device_to_handle(device),
-                                      &(VkPipelineLayoutCreateInfo){
-                                         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                         .setLayoutCount = 1,
-                                         .pSetLayouts = &device->meta_state.blit.ds_layout,
-                                         .pushConstantRangeCount = 1,
-                                         .pPushConstantRanges = &push_constant_range,
-                                      },
-                                      &device->meta_state.alloc, &device->meta_state.blit.pipeline_layout);
+   result = radv_meta_create_pipeline_layout(device, &device->meta_state.blit.ds_layout, 1, &push_constant_range,
+                                             &device->meta_state.blit.pipeline_layout);
    if (result != VK_SUCCESS)
       return result;
 

@@ -10,7 +10,7 @@
 #include <sys/types.h>
 #include "agx_bo.h"
 
-#include "drm-uapi/asahi_drm.h"
+#include "unstable_asahi_drm.h"
 
 struct agxdecode_ctx;
 

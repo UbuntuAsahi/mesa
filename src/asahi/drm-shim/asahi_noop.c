@@ -6,8 +6,8 @@
 
 #include <string.h>
 
+#include "../lib/unstable_asahi_drm.h"
 #include "drm-shim/drm_shim.h"
-#include "drm-uapi/asahi_drm.h"
 
 bool drm_shim_driver_prefers_first_render_node = true;
 

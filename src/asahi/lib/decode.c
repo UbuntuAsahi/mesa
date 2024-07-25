@@ -16,9 +16,9 @@
 #include <sys/mman.h>
 #include <agx_pack.h>
 
-#include "drm-uapi/asahi_drm.h"
 #include "util/u_hexdump.h"
 #include "decode.h"
+#include "unstable_asahi_drm.h"
 #ifdef __APPLE__
 #include "agx_iokit.h"
 #endif
@@ -99,15 +99,6 @@ agxdecode_find_mapped_gpu_mem_containing(struct agxdecode_ctx *ctx,
       mem->ro = true;
       util_dynarray_append(&ctx->ro_mappings, struct agx_bo *, mem);
    }
-
-#ifdef __APPLE__
-   if (mem && !mem->mapped) {
-      fprintf(stderr,
-              "[ERROR] access to memory not mapped (GPU %" PRIx64
-              ", handle %u)\n",
-              mem->ptr.gpu, mem->handle);
-   }
-#endif
 
    return mem;
 }

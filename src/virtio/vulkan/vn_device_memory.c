@@ -62,15 +62,15 @@ vn_device_memory_wait_alloc(struct vn_device *dev,
    if (!mem->bo_ring_seqno_valid)
       return VK_SUCCESS;
 
+   /* fine to false it here since renderer submission failure is fatal */
+   mem->bo_ring_seqno_valid = false;
+
    /* no need to wait for ring if
     * - mem alloc is done upon bo map or export
     * - mem import is done upon bo destroy
     */
    if (vn_ring_get_seqno_status(dev->primary_ring, mem->bo_ring_seqno))
       return VK_SUCCESS;
-
-   /* fine to false it here since renderer submission failure is fatal */
-   mem->bo_ring_seqno_valid = false;
 
    const uint64_t ring_id = vn_ring_get_id(dev->primary_ring);
    uint32_t local_data[8];
@@ -358,15 +358,6 @@ vn_AllocateMemory(VkDevice device,
 {
    struct vn_device *dev = vn_device_from_handle(device);
 
-   /* see vn_physical_device_init_memory_properties */
-   VkMemoryAllocateInfo local_info;
-   if (pAllocateInfo->memoryTypeIndex ==
-       dev->physical_device->incoherent_cached) {
-      local_info = *pAllocateInfo;
-      local_info.memoryTypeIndex = dev->physical_device->coherent_uncached;
-      pAllocateInfo = &local_info;
-   }
-
    const VkImportMemoryFdInfoKHR *import_fd_info = NULL;
    const VkMemoryDedicatedAllocateInfo *dedicated_info = NULL;
    vk_foreach_struct_const(pnext, pAllocateInfo->pNext) {
@@ -589,8 +580,10 @@ vn_get_memory_dma_buf_properties(struct vn_device *dev,
    struct vn_renderer_bo *bo;
    VkResult result = vn_renderer_bo_create_from_dma_buf(
       dev->renderer, 0 /* size */, fd, 0 /* flags */, &bo);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      vn_log(dev->instance, "bo_create_from_dma_buf failed");
       return result;
+   }
 
    vn_ring_roundtrip(dev->primary_ring);
 
@@ -605,8 +598,10 @@ vn_get_memory_dma_buf_properties(struct vn_device *dev,
    result = vn_call_vkGetMemoryResourcePropertiesMESA(
       dev->primary_ring, device, bo->res_id, &props);
    vn_renderer_bo_unref(dev->renderer, bo);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      vn_log(dev->instance, "vkGetMemoryResourcePropertiesMESA failed");
       return result;
+   }
 
    *out_alloc_size = alloc_size_props.allocationSize;
    *out_mem_type_bits = props.memoryTypeBits;

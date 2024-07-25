@@ -42,6 +42,7 @@ libagx_shader_files = files(
   'shaders/query.h',
   'shaders/tessellation.cl',
   'shaders/tessellator.cl',
+  'shaders/tessellator.h',
   'shaders/texture.cl',
   'shaders/helper.cl',
 )
@@ -86,7 +87,7 @@ libagx_shaders = custom_target(
 
 libasahi_lib = static_library(
   'asahi_lib',
-  [libasahi_lib_files, libagx_shaders, agx_pack],
+  [libasahi_lib_files, libagx_shaders, agx_pack, sha1_h],
   include_directories : [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
   c_args : [no_override_init_args],
   gnu_symbol_visibility : 'hidden',

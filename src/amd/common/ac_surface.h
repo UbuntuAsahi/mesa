@@ -236,6 +236,7 @@ struct gfx9_surf_layout {
    uint16_t epitch;           /* gfx9 only, not on gfx10 */
    uint8_t swizzle_mode;      /* color or depth */
    bool uses_custom_pitch;    /* only used by gfx10.3+ */
+   bool gfx12_enable_dcc;     /* set AMDGPU_GEM_CREATE_GFX12_DCC if the placement is VRAM */
 
    enum gfx9_resource_type resource_type:8; /* 1D, 2D or 3D */
    uint32_t surf_pitch;       /* up to 64K (in blocks) */
@@ -273,6 +274,12 @@ struct gfx9_surf_layout {
          uint8_t dcc_block_width;
          uint8_t dcc_block_height;
          uint8_t dcc_block_depth;
+
+         /* Gfx12 DCC recompression settings used by kernel memory management.
+          * The driver sets these, not ac_compute_surface.
+          */
+         uint8_t dcc_number_type; /* CB_COLOR0_INFO.NUMBER_TYPE */
+         uint8_t dcc_data_format; /* [0:4]:CB_COLOR0_INFO.FORMAT, [5]:MM */
 
          /* Displayable DCC. This is always rb_aligned=0 and pipe_aligned=0.
           * The 3D engine doesn't support that layout except for chips with 1 RB.
@@ -445,7 +452,6 @@ int ac_compute_surface(struct ac_addrlib *addrlib, const struct radeon_info *inf
                        const struct ac_surf_config *config, enum radeon_surf_mode mode,
                        struct radeon_surf *surf);
 void ac_surface_zero_dcc_fields(struct radeon_surf *surf);
-unsigned ac_get_dcc_min_compressed_block_size(const struct radeon_info *info);
 unsigned ac_pipe_config_to_num_pipes(unsigned pipe_config);
 
 void ac_surface_apply_bo_metadata(const struct radeon_info *info, struct radeon_surf *surf,

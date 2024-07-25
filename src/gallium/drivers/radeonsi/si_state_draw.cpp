@@ -344,7 +344,6 @@ static bool si_update_shaders(struct si_context *sctx)
           */
          struct si_resource *bo = si_aligned_buffer_create(
             &sctx->screen->b,
-            (sctx->screen->info.cpdma_prefetch_writes_memory ? 0 : SI_RESOURCE_FLAG_READ_ONLY) |
             SI_RESOURCE_FLAG_DRIVER_INTERNAL | SI_RESOURCE_FLAG_32BIT,
             PIPE_USAGE_IMMUTABLE, align(total_size, SI_CPDMA_ALIGNMENT), 256);
 
@@ -377,11 +376,11 @@ static bool si_update_shaders(struct si_context *sctx)
                   struct si_pm4_state *pm4 = &shader->pm4;
 
                   uint64_t va_low = shader->gpu_address >> 8;
-                  uint32_t reg = pm4->spi_shader_pgm_lo_reg;
-                  si_pm4_set_reg(&pipeline->pm4, reg, va_low);
+                  uint32_t reg = pm4->base.spi_shader_pgm_lo_reg;
+                  ac_pm4_set_reg(&pipeline->pm4.base, reg, va_low);
                }
             }
-            si_pm4_finalize(&pipeline->pm4);
+            ac_pm4_finalize(&pipeline->pm4.base);
             sctx->screen->ws->buffer_unmap(sctx->screen->ws, bo->buf);
 
             _mesa_hash_table_u64_insert(sctx->sqtt->pipeline_bos,
@@ -499,6 +498,7 @@ template<amd_gfx_level GFX_VERSION>
 static void si_cp_dma_prefetch_inline(struct si_context *sctx, uint64_t address, unsigned size)
 {
    assert(GFX_VERSION >= GFX7);
+   assert(sctx->screen->info.has_cp_dma);
 
    if (GFX_VERSION >= GFX11)
       size = MIN2(size, 32768 - SI_CPDMA_ALIGNMENT);

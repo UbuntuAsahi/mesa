@@ -189,6 +189,7 @@ struct gl_extensions
    GLboolean EXT_shader_samples_identical;
    GLboolean EXT_sRGB;
    GLboolean EXT_stencil_two_side;
+   GLboolean EXT_shadow_samplers;
    GLboolean EXT_texture_array;
    GLboolean EXT_texture_buffer_object;
    GLboolean EXT_texture_compression_latc;
@@ -952,9 +953,6 @@ struct gl_constants
    bool PackedDriverUniformStorage;
 
    bool HasFBFetch;
-
-   /** Whether the backend supports reading from outputs */
-   bool SupportsReadingOutputs;
 
    bool CombinedClipCullDistanceArrays;
 

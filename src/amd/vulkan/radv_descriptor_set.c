@@ -9,7 +9,6 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "util/mesa-sha1.h"
 #include "ac_descriptors.h"
 #include "radv_buffer.h"
 #include "radv_buffer_view.h"
@@ -198,7 +197,6 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
    }
 
    set_layout->binding_count = num_bindings;
-   set_layout->shader_stages = 0;
    set_layout->dynamic_shader_stages = 0;
    set_layout->has_immutable_samplers = false;
    set_layout->size = 0;
@@ -358,7 +356,6 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
          set_layout->size += descriptor_count * set_layout->binding[b].size;
          buffer_count += descriptor_count * binding_buffer_count;
          dynamic_offset_count += descriptor_count * set_layout->binding[b].dynamic_offset_count;
-         set_layout->shader_stages |= binding->stageFlags;
       }
    }
 
@@ -372,7 +369,7 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
     * should be ok.
     */
    uint32_t hash_offset = offsetof(struct radv_descriptor_set_layout, hash) + sizeof(set_layout->hash);
-   _mesa_sha1_compute((const char *)set_layout + hash_offset, size - hash_offset, set_layout->hash);
+   _mesa_blake3_compute((const char *)set_layout + hash_offset, size - hash_offset, set_layout->hash);
 
    *pSetLayout = radv_descriptor_set_layout_to_handle(set_layout);
 
@@ -534,19 +531,19 @@ radv_pipeline_layout_add_set(struct radv_pipeline_layout *layout, uint32_t set_i
 void
 radv_pipeline_layout_hash(struct radv_pipeline_layout *layout)
 {
-   struct mesa_sha1 ctx;
+   struct mesa_blake3 ctx;
 
-   _mesa_sha1_init(&ctx);
+   _mesa_blake3_init(&ctx);
    for (uint32_t i = 0; i < layout->num_sets; i++) {
       struct radv_descriptor_set_layout *set_layout = layout->set[i].layout;
 
       if (!set_layout)
          continue;
 
-      _mesa_sha1_update(&ctx, set_layout->hash, sizeof(set_layout->hash));
+      _mesa_blake3_update(&ctx, set_layout->hash, sizeof(set_layout->hash));
    }
-   _mesa_sha1_update(&ctx, &layout->push_constant_size, sizeof(layout->push_constant_size));
-   _mesa_sha1_final(&ctx, layout->sha1);
+   _mesa_blake3_update(&ctx, &layout->push_constant_size, sizeof(layout->push_constant_size));
+   _mesa_blake3_final(&ctx, layout->hash);
 }
 
 void
@@ -1180,7 +1177,23 @@ write_image_descriptor(unsigned *dst, unsigned size, VkDescriptorType descriptor
    }
    assert(size > 0);
 
-   memcpy(dst, descriptor, size);
+   /* Encourage compilers to inline memcpy for combined image/sampler descriptors. */
+   switch (size) {
+   case 32:
+      memcpy(dst, descriptor, 32);
+      break;
+   case 64:
+      memcpy(dst, descriptor, 64);
+      break;
+   case 80:
+      memcpy(dst, descriptor, 80);
+      break;
+   case 96:
+      memcpy(dst, descriptor, 96);
+      break;
+   default:
+      unreachable("Invalid size");
+   }
 }
 
 static ALWAYS_INLINE void
@@ -1279,7 +1292,7 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
 
       ptr += binding_layout->size * writeset->dstArrayElement / 4;
       buffer_list += binding_layout->buffer_offset;
-      buffer_list += writeset->dstArrayElement;
+      buffer_list += writeset->dstArrayElement * radv_descriptor_type_buffer_count(writeset->descriptorType);
       for (j = 0; j < writeset->descriptorCount; ++j) {
          switch (writeset->descriptorType) {
          case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
@@ -1338,7 +1351,7 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
             break;
          }
          ptr += binding_layout->size / 4;
-         ++buffer_list;
+         buffer_list += radv_descriptor_type_buffer_count(writeset->descriptorType);
       }
    }
 
@@ -1616,7 +1629,8 @@ radv_update_descriptor_set_with_template_impl(struct radv_device *device, struct
          }
          pSrc += templ->entry[i].src_stride;
          pDst += templ->entry[i].dst_stride;
-         ++buffer_list;
+
+         buffer_list += radv_descriptor_type_buffer_count(templ->entry[i].descriptor_type);
       }
    }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2021 Collabora Ltd.
+ * Copyright © 2024 Collabora Ltd.
  * SPDX-License-Identifier: MIT
  */
 
@@ -12,98 +12,74 @@
 
 #include <stdint.h>
 
-#include "vk_object.h"
+#include "util/bitset.h"
+#include "util/vma.h"
 
 #include "panvk_macros.h"
 
-#define PANVK_MAX_PUSH_DESCS      32
-#define PANVK_MAX_DESC_SIZE       32
-#define PANVK_MAX_DESC_UBO_STRIDE 8
+#include "vk_descriptor_update_template.h"
+#include "vk_object.h"
 
-struct panvk_cmd_buffer;
-struct panvk_descriptor_pool;
-struct panvk_descriptor_set_layout;
+#include "panvk_descriptor_set_layout.h"
+
 struct panvk_priv_bo;
+struct panvk_sysvals;
+struct panvk_descriptor_set_layout;
 
-struct panvk_descriptor_pool {
-   struct vk_object_base base;
+struct panvk_opaque_desc {
+   uint32_t data[PANVK_DESCRIPTOR_SIZE / sizeof(uint32_t)];
 };
 
-VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_pool, base, VkDescriptorPool,
-                               VK_OBJECT_TYPE_DESCRIPTOR_POOL)
-
-/* This has to match nir_address_format_64bit_bounded_global */
+#if PAN_ARCH < 9
 struct panvk_ssbo_addr {
    uint64_t base_addr;
    uint32_t size;
-   uint32_t zero; /* Must be zero! */
+   uint32_t zero[5]; /* Must be zero! */
 };
-
-struct panvk_bview_desc {
-   uint32_t elems;
-};
-
-struct panvk_image_desc {
-   uint16_t width;
-   uint16_t height;
-   uint16_t depth;
-   uint8_t levels;
-   uint8_t samples;
-};
-
-struct panvk_buffer_desc {
-   struct panvk_buffer *buffer;
-   VkDeviceSize offset;
-   VkDeviceSize size;
-};
+#endif
 
 struct panvk_descriptor_set {
    struct vk_object_base base;
-   struct panvk_descriptor_pool *pool;
    const struct panvk_descriptor_set_layout *layout;
-   struct panvk_buffer_desc *dyn_ssbos;
-   void *ubos;
-   struct panvk_buffer_desc *dyn_ubos;
-   void *samplers;
-   void *textures;
-   void *img_attrib_bufs;
-   uint32_t *img_fmts;
+   struct {
+      uint64_t dev;
+      void *host;
+   } descs;
 
    struct {
-      struct panvk_priv_bo *bo;
-      struct {
-         uint64_t dev;
-         void *host;
-      } addr;
-   } desc_ubo;
+      uint64_t dev_addr;
+      uint64_t size;
+   } dyn_bufs[MAX_DYNAMIC_BUFFERS];
+
+   /* Includes adjustment for variable-sized descriptors */
+   unsigned desc_count;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_set, base, VkDescriptorSet,
                                VK_OBJECT_TYPE_DESCRIPTOR_SET)
 
-struct panvk_push_descriptor_set {
-   struct {
-      uint8_t descs[PANVK_MAX_PUSH_DESCS * PANVK_MAX_DESC_SIZE];
-      uint8_t desc_ubo[PANVK_MAX_PUSH_DESCS * PANVK_MAX_DESC_UBO_STRIDE];
-      uint32_t img_fmts[PANVK_MAX_PUSH_DESCS];
-   } storage;
-   struct panvk_descriptor_set set;
+struct panvk_descriptor_pool {
+   struct vk_object_base base;
+   struct panvk_priv_bo *desc_bo;
+   struct util_vma_heap desc_heap;
+
+   /* Initialize to ones */
+   BITSET_WORD *free_sets;
+
+   uint32_t max_sets;
+   struct panvk_descriptor_set *sets;
 };
 
-#ifdef PAN_ARCH
-void panvk_per_arch(push_descriptor_set_assign_layout)(
-   struct panvk_push_descriptor_set *push_set,
-   const struct panvk_descriptor_set_layout *layout);
+VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_descriptor_pool, base, VkDescriptorPool,
+                               VK_OBJECT_TYPE_DESCRIPTOR_POOL)
 
-void panvk_per_arch(push_descriptor_set)(
-   struct panvk_push_descriptor_set *push_set,
-   const struct panvk_descriptor_set_layout *layout, uint32_t write_count,
-   const VkWriteDescriptorSet *writes);
+VkResult panvk_per_arch(descriptor_set_write)(struct panvk_descriptor_set *set,
+                                              const VkWriteDescriptorSet *write,
+                                              bool write_immutable_samplers);
 
-void panvk_per_arch(push_descriptor_set_with_template)(
-   struct panvk_push_descriptor_set *push_set,
-   const struct panvk_descriptor_set_layout *layout,
-   VkDescriptorUpdateTemplate templ, const void *data);
-#endif
+void panvk_per_arch(descriptor_set_write_template)(
+   struct panvk_descriptor_set *set,
+   const struct vk_descriptor_update_template *template, const void *data,
+   bool write_immutable_samplers);
 
-#endif
+#endif /* PANVK_VX_DESCRIPTOR_SET_H */

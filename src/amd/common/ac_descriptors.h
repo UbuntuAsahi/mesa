@@ -66,6 +66,43 @@ ac_build_fmask_descriptor(const enum amd_gfx_level gfx_level,
                           const struct ac_fmask_state *state,
                           uint32_t desc[8]);
 
+struct ac_texture_state {
+   struct radeon_surf *surf;
+   enum pipe_format format;
+   enum pipe_format img_format;
+   uint32_t width : 17;
+   uint32_t height : 17;
+   uint32_t depth : 15;
+   uint32_t type : 4;
+   enum pipe_swizzle swizzle[4];
+   uint32_t num_samples : 5;
+   uint32_t num_storage_samples : 5;
+   uint32_t first_level : 4;
+   uint32_t last_level : 5;
+   uint32_t num_levels : 6;
+   uint32_t first_layer : 14;
+   uint32_t last_layer : 13;
+   float min_lod;
+
+   struct {
+      uint32_t uav3d : 1;
+      uint32_t upgraded_depth : 1;
+   } gfx10;
+
+   struct {
+      const struct ac_surf_nbc_view *nbc_view;
+   } gfx9;
+
+   uint32_t dcc_enabled : 1;
+   uint32_t tc_compat_htile_enabled : 1;
+   uint32_t aniso_single_level : 1;
+};
+
+void
+ac_build_texture_descriptor(const struct radeon_info *info,
+                            const struct ac_texture_state *state,
+                            uint32_t desc[8]);
+
 uint32_t
 ac_tile_mode_index(const struct radeon_surf *surf,
                    unsigned level,
@@ -114,6 +151,11 @@ struct ac_buffer_state {
 };
 
 void
+ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level,
+                      const struct ac_buffer_state *state,
+                      uint32_t *rsrc_word3);
+
+void
 ac_build_buffer_descriptor(const enum amd_gfx_level gfx_level,
                            const struct ac_buffer_state *state,
                            uint32_t desc[4]);
@@ -128,6 +170,7 @@ void
 ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level,
                               uint64_t va,
                               uint32_t size,
+                              uint32_t stride,
                               uint32_t desc[4]);
 
 struct ac_ds_state {
@@ -196,6 +239,71 @@ struct ac_mutable_ds_state {
 void
 ac_set_mutable_ds_surface_fields(const struct radeon_info *info, const struct ac_mutable_ds_state *state,
                                  struct ac_ds_surface *ds);
+
+struct ac_cb_state {
+   const struct radeon_surf *surf;
+   enum pipe_format format;
+   uint32_t width : 17;
+   uint32_t height : 17;
+   uint32_t first_layer : 14;
+   uint32_t last_layer : 14;
+   uint32_t num_layers : 14;
+   uint32_t num_samples : 5;
+   uint32_t num_storage_samples : 5;
+   uint32_t base_level : 5;
+   uint32_t num_levels : 6;
+
+   struct {
+      struct ac_surf_nbc_view *nbc_view;
+   } gfx10;
+};
+
+struct ac_cb_surface {
+   uint32_t cb_color_info;
+   uint32_t cb_color_view;
+   uint32_t cb_color_view2;
+   uint32_t cb_color_attrib;
+   uint32_t cb_color_attrib2; /* GFX9+ */
+   uint32_t cb_color_attrib3; /* GFX10+ */
+   uint32_t cb_dcc_control;
+   uint64_t cb_color_base;
+   uint64_t cb_color_cmask;
+   uint64_t cb_color_fmask;
+   uint64_t cb_dcc_base;
+   uint32_t cb_color_slice;
+   uint32_t cb_color_cmask_slice;
+   uint32_t cb_color_fmask_slice;
+   union {
+      uint32_t cb_color_pitch; /* GFX6-GFX8 */
+      uint32_t cb_mrt_epitch;  /* GFX9+ */
+   };
+};
+
+void
+ac_init_cb_surface(const struct radeon_info *info, const struct ac_cb_state *state, struct ac_cb_surface *cb);
+
+struct ac_mutable_cb_state {
+   const struct radeon_surf *surf;
+   const struct ac_cb_surface *cb; /* original CB surface */
+   uint64_t va;
+
+   uint32_t base_level : 5;
+   uint32_t num_samples : 5;
+
+   uint32_t fmask_enabled : 1;
+   uint32_t cmask_enabled : 1;
+   uint32_t fast_clear_enabled : 1;
+   uint32_t tc_compat_cmask_enabled : 1;
+   uint32_t dcc_enabled : 1;
+
+   struct {
+      struct ac_surf_nbc_view *nbc_view;
+   } gfx10;
+};
+
+void
+ac_set_mutable_cb_surface_fields(const struct radeon_info *info, const struct ac_mutable_cb_state *state,
+                                 struct ac_cb_surface *cb);
 
 #ifdef __cplusplus
 }

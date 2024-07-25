@@ -225,6 +225,24 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
              ptex->flags & PIPE_RESOURCE_FLAG_SPARSE)
             flags |= RADEON_SURF_NO_HTILE;
       }
+
+      /* TODO: Set these for scanout after display DCC is enabled. The reason these are not set is
+       * because they overlap DCC_OFFSET_256B and the kernel driver incorrectly reads DCC_OFFSET_256B
+       * on GFX12, which completely breaks the display code.
+       */
+      if (!is_imported && !(ptex->bind & PIPE_BIND_SCANOUT)) {
+         enum pipe_format format = util_format_get_depth_only(ptex->format);
+
+         /* These should be set for both color and Z/S. */
+         surface->u.gfx9.color.dcc_number_type = ac_get_cb_number_type(format);
+         surface->u.gfx9.color.dcc_data_format = ac_get_cb_format(sscreen->info.gfx_level, format);
+      }
+
+      if (surface->modifier == DRM_FORMAT_MOD_INVALID &&
+          (ptex->bind & PIPE_BIND_CONST_BW ||
+           sscreen->debug_flags & DBG(NO_DCC) ||
+           (ptex->bind & PIPE_BIND_SCANOUT && sscreen->debug_flags & DBG(NO_DISPLAY_DCC))))
+         flags |= RADEON_SURF_DISABLE_DCC;
    } else {
       /* Gfx6-11 */
       if (!is_flushed_depth && is_depth) {
@@ -599,7 +617,8 @@ static void si_set_tex_bo_metadata(struct si_screen *sscreen, struct si_texture 
    bool is_array = util_texture_is_array(res->target);
    uint32_t desc[8];
 
-   sscreen->make_texture_descriptor(sscreen, tex, true, res->target, res->format, swizzle, 0,
+   sscreen->make_texture_descriptor(sscreen, tex, true, res->target,
+                                    tex->is_depth ? tex->db_render_format : res->format, swizzle, 0,
                                     res->last_level, 0, is_array ? res->array_size - 1 : 0,
                                     res->width0, res->height0, res->depth0, true, desc, NULL);
    si_set_mutable_tex_desc_fields(sscreen, tex, &tex->surface.u.legacy.level[0], 0, 0,
@@ -959,6 +978,19 @@ void si_print_texture_info(struct si_screen *sscreen, struct si_texture *tex,
    }
 }
 
+static void print_debug_tex(struct si_screen *sscreen, struct si_texture *tex)
+{
+   if (sscreen->debug_flags & DBG(TEX)) {
+      puts("Texture:");
+      struct u_log_context log;
+      u_log_context_init(&log);
+      si_print_texture_info(sscreen, tex, &log);
+      u_log_new_page_print(&log, stdout);
+      fflush(stdout);
+      u_log_context_destroy(&log);
+   }
+}
+
 /**
  * Common function for si_texture_create and si_texture_from_handle.
  *
@@ -1028,6 +1060,14 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
       /* Create the backing buffer. */
       si_init_resource_fields(sscreen, resource, alloc_size, alignment);
 
+      /* GFX12: Image descriptors always set COMPRESSION_EN=1, so this is the only thing that
+       * disables DCC in the driver.
+       */
+      if (sscreen->info.gfx_level >= GFX12 &&
+          resource->domains & RADEON_DOMAIN_VRAM &&
+          surface->u.gfx9.gfx12_enable_dcc)
+         resource->flags |= RADEON_FLAG_GFX12_ALLOW_DCC;
+
       if (!si_alloc_resource(sscreen, resource))
          goto error;
    } else {
@@ -1051,17 +1091,8 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
       fprintf(stderr, "\n");
    }
 
-   if (sscreen->debug_flags & DBG(TEX)) {
-      puts("Texture:");
-      struct u_log_context log;
-      u_log_context_init(&log);
-      si_print_texture_info(sscreen, tex, &log);
-      u_log_new_page_print(&log, stdout);
-      fflush(stdout);
-      u_log_context_destroy(&log);
-   }
-
    if (sscreen->info.gfx_level >= GFX12) {
+      print_debug_tex(sscreen, tex);
       if (tex->is_depth) {
          /* Z24 is no longer supported. We should use Z32_FLOAT instead. */
          if (base->format == PIPE_FORMAT_Z16_UNORM) {
@@ -1076,6 +1107,12 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
          tex->can_sample_z = true;
          tex->can_sample_s = true;
       }
+
+      /* Always set BO metadata - required for programming DCC fields for GFX12 SDMA in the kernel.
+       * If the texture is suballocated, this will overwrite the metadata for all suballocations,
+       * but there is nothing we can do about that.
+       */
+      si_set_tex_bo_metadata(sscreen, tex);
       return tex;
    }
 
@@ -1099,6 +1136,8 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
                               (sscreen->info.gfx_level >= GFX8 &&
                                tex->surface.flags & RADEON_SURF_TC_COMPATIBLE_HTILE &&
                                tex->buffer.b.b.last_level > 0);
+
+   print_debug_tex(sscreen, tex);
 
    /* TC-compatible HTILE:
     * - GFX8 only supports Z32_FLOAT.
@@ -1342,7 +1381,7 @@ si_texture_create_with_modifier(struct pipe_screen *screen,
    bool is_flushed_depth = templ->flags & SI_RESOURCE_FLAG_FLUSHED_DEPTH ||
                            templ->flags & SI_RESOURCE_FLAG_FORCE_LINEAR;
    bool tc_compatible_htile =
-      sscreen->info.gfx_level >= GFX8 && sscreen->info.gfx_level < GFX12 &&
+      sscreen->info.has_tc_compatible_htile &&
       /* There are issues with TC-compatible HTILE on Tonga (and
        * Iceland is the same design), and documented bug workarounds
        * don't help. For example, this fails:
@@ -1549,13 +1588,15 @@ si_get_dmabuf_modifier_planes(struct pipe_screen *pscreen, uint64_t modifier,
 {
    unsigned planes = util_format_get_num_planes(format);
 
-   if (IS_AMD_FMT_MOD(modifier) && planes == 1) {
-      if (AMD_FMT_MOD_GET(DCC_RETILE, modifier))
-         return 3;
-      else if (AMD_FMT_MOD_GET(DCC, modifier))
-         return 2;
-      else
-         return 1;
+   if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) < AMD_FMT_MOD_TILE_VER_GFX12) {
+      if (IS_AMD_FMT_MOD(modifier) && planes == 1) {
+         if (AMD_FMT_MOD_GET(DCC_RETILE, modifier))
+            return 3;
+         else if (AMD_FMT_MOD_GET(DCC, modifier))
+            return 2;
+         else
+            return 1;
+      }
    }
 
    return planes;

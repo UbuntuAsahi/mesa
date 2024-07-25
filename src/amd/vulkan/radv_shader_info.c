@@ -301,12 +301,6 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
    case nir_intrinsic_store_output:
       gather_intrinsic_store_output_info(nir, instr, info, consider_force_vrs);
       break;
-   case nir_intrinsic_load_sbt_base_amd:
-      info->cs.is_rt_shader = true;
-      break;
-   case nir_intrinsic_load_rt_dynamic_callable_stack_base_amd:
-      info->cs.uses_dynamic_rt_callable_stack = true;
-      break;
    case nir_intrinsic_bvh64_intersect_ray_amd:
       info->cs.uses_rt = true;
       break;
@@ -908,7 +902,12 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
    info->ps.pops_is_per_sample =
       info->ps.pops && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered);
 
-   info->ps.spi_ps_input = radv_compute_spi_ps_input(gfx_state, info);
+   info->ps.spi_ps_input_ena = radv_compute_spi_ps_input(pdev, gfx_state, info);
+   info->ps.spi_ps_input_addr = info->ps.spi_ps_input_ena;
+   if (pdev->info.gfx_level >= GFX12) {
+      /* Only SPI_PS_INPUT_ENA has this bit on GFX12. */
+      info->ps.spi_ps_input_addr &= C_02865C_COVERAGE_TO_SHADER_SELECT;
+   }
 
    info->has_epilog = gfx_state->ps.has_epilog && info->ps.colors_written;
 
@@ -1122,7 +1121,7 @@ void
 radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shader *nir,
                           const struct radv_shader_layout *layout, const struct radv_shader_stage_key *stage_key,
                           const struct radv_graphics_state_key *gfx_state, const enum radv_pipeline_type pipeline_type,
-                          bool consider_force_vrs, struct radv_shader_info *info)
+                          bool consider_force_vrs, bool is_indirect_bindable, struct radv_shader_info *info)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct nir_function *func = (struct nir_function *)exec_list_get_head_const(&nir->functions);
@@ -1233,6 +1232,7 @@ radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shader *n
 
    info->user_data_0 = radv_get_user_data_0(device, info);
    info->merged_shader_compiled_separately = radv_is_merged_shader_compiled_separately(device, info);
+   info->force_indirect_desc_sets = info->merged_shader_compiled_separately || is_indirect_bindable;
 
    switch (nir->info.stage) {
    case MESA_SHADER_COMPUTE:

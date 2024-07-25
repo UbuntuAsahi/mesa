@@ -94,7 +94,7 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    /* apparently gfx702 also has 16-bank LDS but I can't find a family for that */
    program->dev.has_16bank_lds = family == CHIP_KABINI || family == CHIP_STONEY;
 
-   program->dev.vgpr_limit = 256;
+   program->dev.vgpr_limit = stage == raytracing_cs ? 128 : 256;
    program->dev.physical_vgprs = 256;
    program->dev.vgpr_alloc_granule = 4;
 
@@ -104,7 +104,8 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       program->dev.sgpr_limit =
          108; /* includes VCC, which can be treated as s[106-107] on GFX10+ */
 
-      if (family == CHIP_NAVI31 || family == CHIP_NAVI32) {
+      if (family == CHIP_NAVI31 || family == CHIP_NAVI32 || family == CHIP_GFX1151 ||
+          gfx_level >= GFX12) {
          program->dev.physical_vgprs = program->wave_size == 32 ? 1536 : 768;
          program->dev.vgpr_alloc_granule = program->wave_size == 32 ? 24 : 12;
       } else {
@@ -155,7 +156,8 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    if (program->family == CHIP_TAHITI || program->family == CHIP_CARRIZO ||
        program->family == CHIP_HAWAII)
       program->dev.has_fast_fma32 = true;
-   program->dev.has_mac_legacy32 = program->gfx_level <= GFX7 || program->gfx_level >= GFX10;
+   program->dev.has_mac_legacy32 = program->gfx_level <= GFX7 || program->gfx_level == GFX10;
+   program->dev.has_fmac_legacy32 = program->gfx_level >= GFX10_3 && program->gfx_level < GFX12;
 
    program->dev.fused_mad_mix = program->gfx_level >= GFX10;
    if (program->family == CHIP_VEGA12 || program->family == CHIP_VEGA20 ||
@@ -174,7 +176,10 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
       program->dev.scratch_global_offset_max = 4095;
    }
 
-   if (program->gfx_level >= GFX11) {
+   if (program->gfx_level >= GFX12) {
+      /* Same as GFX11, except one less for VSAMPLE. */
+      program->dev.max_nsa_vgprs = 3;
+   } else if (program->gfx_level >= GFX11) {
       /* GFX11 can have only 1 NSA dword. The last VGPR isn't included here because it contains the
        * rest of the address.
        */
@@ -205,6 +210,14 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
    program->next_fp_mode.round32 = fp_round_ne;
 }
 
+bool
+is_wait_export_ready(amd_gfx_level gfx_level, const Instruction* instr)
+{
+   return instr->opcode == aco_opcode::s_wait_event &&
+          (gfx_level >= GFX12 ? (instr->salu().imm & wait_event_imm_wait_export_ready_gfx12)
+                              : !(instr->salu().imm & wait_event_imm_dont_wait_export_ready_gfx11));
+}
+
 memory_sync_info
 get_sync_info(const Instruction* instr)
 {
@@ -212,8 +225,7 @@ get_sync_info(const Instruction* instr)
     * overlapping waves in the queue family.
     */
    if (instr->opcode == aco_opcode::p_pops_gfx9_overlapped_wave_wait_done ||
-       (instr->opcode == aco_opcode::s_wait_event &&
-        !(instr->salu().imm & wait_event_imm_dont_wait_export_ready))) {
+       instr->opcode == aco_opcode::s_wait_event) {
       return memory_sync_info(storage_buffer | storage_image, semantic_acquire, scope_queuefamily);
    } else if (instr->opcode == aco_opcode::p_pops_gfx9_ordered_section_done) {
       return memory_sync_info(storage_buffer | storage_image, semantic_release, scope_queuefamily);
@@ -867,40 +879,28 @@ needs_exec_mask(const Instruction* instr)
 }
 
 struct CmpInfo {
-   aco_opcode ordered;
-   aco_opcode unordered;
    aco_opcode swapped;
    aco_opcode inverse;
    aco_opcode vcmpx;
-   aco_opcode f32;
-   unsigned size;
 };
 
-ALWAYS_INLINE bool
+static ALWAYS_INLINE bool
 get_cmp_info(aco_opcode op, CmpInfo* info)
 {
-   info->ordered = aco_opcode::num_opcodes;
-   info->unordered = aco_opcode::num_opcodes;
    info->swapped = aco_opcode::num_opcodes;
    info->inverse = aco_opcode::num_opcodes;
-   info->f32 = aco_opcode::num_opcodes;
    info->vcmpx = aco_opcode::num_opcodes;
    switch (op) {
       // clang-format off
 #define CMP2(ord, unord, ord_swap, unord_swap, sz)                                                 \
    case aco_opcode::v_cmp_##ord##_f##sz:                                                           \
    case aco_opcode::v_cmp_n##unord##_f##sz:                                                        \
-      info->ordered = aco_opcode::v_cmp_##ord##_f##sz;                                             \
-      info->unordered = aco_opcode::v_cmp_n##unord##_f##sz;                                        \
       info->swapped = op == aco_opcode::v_cmp_##ord##_f##sz ? aco_opcode::v_cmp_##ord_swap##_f##sz \
                                                       : aco_opcode::v_cmp_n##unord_swap##_f##sz;   \
       info->inverse = op == aco_opcode::v_cmp_n##unord##_f##sz ? aco_opcode::v_cmp_##unord##_f##sz \
                                                                : aco_opcode::v_cmp_n##ord##_f##sz; \
-      info->f32 = op == aco_opcode::v_cmp_##ord##_f##sz ? aco_opcode::v_cmp_##ord##_f32            \
-                                                        : aco_opcode::v_cmp_n##unord##_f32;        \
       info->vcmpx = op == aco_opcode::v_cmp_##ord##_f##sz ? aco_opcode::v_cmpx_##ord##_f##sz       \
                                                           : aco_opcode::v_cmpx_n##unord##_f##sz;   \
-      info->size = sz;                                                                             \
       return true;
 #define CMP(ord, unord, ord_swap, unord_swap)                                                      \
    CMP2(ord, unord, ord_swap, unord_swap, 16)                                                      \
@@ -916,18 +916,14 @@ get_cmp_info(aco_opcode op, CmpInfo* info)
 #undef CMP2
 #define ORD_TEST(sz)                                                                               \
    case aco_opcode::v_cmp_u_f##sz:                                                                 \
-      info->f32 = aco_opcode::v_cmp_u_f32;                                                         \
       info->swapped = aco_opcode::v_cmp_u_f##sz;                                                   \
       info->inverse = aco_opcode::v_cmp_o_f##sz;                                                   \
       info->vcmpx = aco_opcode::v_cmpx_u_f##sz;                                                    \
-      info->size = sz;                                                                             \
       return true;                                                                                 \
    case aco_opcode::v_cmp_o_f##sz:                                                                 \
-      info->f32 = aco_opcode::v_cmp_o_f32;                                                         \
       info->swapped = aco_opcode::v_cmp_o_f##sz;                                                   \
       info->inverse = aco_opcode::v_cmp_u_f##sz;                                                   \
       info->vcmpx = aco_opcode::v_cmpx_o_f##sz;                                                    \
-      info->size = sz;                                                                             \
       return true;
       ORD_TEST(16)
       ORD_TEST(32)
@@ -938,7 +934,6 @@ get_cmp_info(aco_opcode op, CmpInfo* info)
       info->swapped = aco_opcode::v_cmp_##swap##_##type##sz;                                       \
       info->inverse = aco_opcode::v_cmp_##inv##_##type##sz;                                        \
       info->vcmpx = aco_opcode::v_cmpx_##op##_##type##sz;                                          \
-      info->size = sz;                                                                             \
       return true;
 #define CMPI(op, swap, inv)                                                                        \
    CMPI2(op, swap, inv, i, 16)                                                                     \
@@ -958,7 +953,6 @@ get_cmp_info(aco_opcode op, CmpInfo* info)
 #define CMPCLASS(sz)                                                                               \
    case aco_opcode::v_cmp_class_f##sz:                                                             \
       info->vcmpx = aco_opcode::v_cmpx_class_f##sz;                                                \
-      info->size = sz;                                                                             \
       return true;
       CMPCLASS(16)
       CMPCLASS(32)
@@ -970,38 +964,17 @@ get_cmp_info(aco_opcode op, CmpInfo* info)
 }
 
 aco_opcode
-get_ordered(aco_opcode op)
-{
-   CmpInfo info;
-   return get_cmp_info(op, &info) ? info.ordered : aco_opcode::num_opcodes;
-}
-
-aco_opcode
-get_unordered(aco_opcode op)
-{
-   CmpInfo info;
-   return get_cmp_info(op, &info) ? info.unordered : aco_opcode::num_opcodes;
-}
-
-aco_opcode
-get_inverse(aco_opcode op)
+get_vcmp_inverse(aco_opcode op)
 {
    CmpInfo info;
    return get_cmp_info(op, &info) ? info.inverse : aco_opcode::num_opcodes;
 }
 
 aco_opcode
-get_swapped(aco_opcode op)
+get_vcmp_swapped(aco_opcode op)
 {
    CmpInfo info;
    return get_cmp_info(op, &info) ? info.swapped : aco_opcode::num_opcodes;
-}
-
-aco_opcode
-get_f32_cmp(aco_opcode op)
-{
-   CmpInfo info;
-   return get_cmp_info(op, &info) ? info.f32 : aco_opcode::num_opcodes;
 }
 
 aco_opcode
@@ -1009,20 +982,6 @@ get_vcmpx(aco_opcode op)
 {
    CmpInfo info;
    return get_cmp_info(op, &info) ? info.vcmpx : aco_opcode::num_opcodes;
-}
-
-unsigned
-get_cmp_bitsize(aco_opcode op)
-{
-   CmpInfo info;
-   return get_cmp_info(op, &info) ? info.size : 0;
-}
-
-bool
-is_fp_cmp(aco_opcode op)
-{
-   CmpInfo info;
-   return get_cmp_info(op, &info) && info.ordered != aco_opcode::num_opcodes;
 }
 
 bool

@@ -6,7 +6,6 @@
 #pragma once
 
 #include <xf86drm.h>
-#include "drm-uapi/asahi_drm.h"
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/timespec.h"
@@ -14,6 +13,7 @@
 #include "agx_bo.h"
 #include "agx_formats.h"
 #include "decode.h"
+#include "unstable_asahi_drm.h"
 
 // TODO: this is a lie right now
 static const uint64_t AGX_SUPPORTED_INCOMPAT_FEATURES =
@@ -41,6 +41,7 @@ enum agx_dbg {
    AGX_DBG_SCRATCH = BITFIELD_BIT(18),
    AGX_DBG_COMPBLIT = BITFIELD_BIT(19),
    AGX_DBG_FEEDBACK = BITFIELD_BIT(20),
+   AGX_DBG_1QUEUE = BITFIELD_BIT(21),
 };
 
 /* How many power-of-two levels in the BO cache do we want? 2^14 minimum chosen
@@ -90,6 +91,9 @@ struct agx_device {
 
    /* VM handle */
    uint32_t vm_id;
+
+   /* Global queue handle */
+   uint32_t queue_id;
 
    /* VMA heaps */
    simple_mtx_t vma_lock;

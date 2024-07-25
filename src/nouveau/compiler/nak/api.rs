@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::from_nir::*;
-use crate::ir::{ShaderIoInfo, ShaderStageInfo};
+use crate::ir::{ShaderIoInfo, ShaderModel, ShaderStageInfo};
+use crate::sm50::ShaderModel50;
+use crate::sm70::ShaderModel70;
 use crate::sph;
 
 use nak_bindings::*;
@@ -20,6 +22,7 @@ enum DebugFlags {
     Serial,
     Spill,
     Annotate,
+    NoUgpr,
 }
 
 pub struct Debug {
@@ -43,6 +46,7 @@ impl Debug {
                 "serial" => flags |= 1 << DebugFlags::Serial as u8,
                 "spill" => flags |= 1 << DebugFlags::Spill as u8,
                 "annotate" => flags |= 1 << DebugFlags::Annotate as u8,
+                "nougpr" => flags |= 1 << DebugFlags::NoUgpr as u8,
                 unk => eprintln!("Unknown NAK_DEBUG flag \"{}\"", unk),
             }
         }
@@ -67,6 +71,10 @@ pub trait GetDebugFlags {
 
     fn annotate(&self) -> bool {
         self.debug_flags() & (1 << DebugFlags::Annotate as u8) != 0
+    }
+
+    fn no_ugpr(&self) -> bool {
+        self.debug_flags() & (1 << DebugFlags::NoUgpr as u8) != 0
     }
 }
 
@@ -140,6 +148,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.lower_uadd_carry = true;
     op.lower_usub_borrow = true;
     op.has_iadd3 = dev.sm >= 70;
+    op.has_imad32 = dev.sm >= 70;
     op.has_sdot_4x8 = dev.sm >= 70;
     op.has_udot_4x8 = dev.sm >= 70;
     op.has_sudot_4x8 = dev.sm >= 70;
@@ -149,6 +158,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.has_find_msb_rev = true;
     op.has_pack_half_2x16_rtz = true;
     op.has_bfm = dev.sm >= 70;
+    op.discard_is_demote = true;
 
     op.max_unroll_iterations = 32;
 
@@ -257,7 +267,15 @@ pub extern "C" fn nak_compile_shader(
         Some(unsafe { &*fs_key })
     };
 
-    let mut s = nak_shader_from_nir(nir, nak.sm);
+    let sm: Box<dyn ShaderModel> = if nak.sm >= 70 {
+        Box::new(ShaderModel70::new(nak.sm))
+    } else if nak.sm >= 50 {
+        Box::new(ShaderModel50::new(nak.sm))
+    } else {
+        panic!("Unsupported shader model");
+    };
+
+    let mut s = nak_shader_from_nir(nir, sm.as_ref());
 
     if DEBUG.print() {
         eprintln!("NAK IR:\n{}", &s);
@@ -266,6 +284,11 @@ pub extern "C" fn nak_compile_shader(
     s.opt_bar_prop();
     if DEBUG.print() {
         eprintln!("NAK IR after opt_bar_prop:\n{}", &s);
+    }
+
+    s.opt_uniform_instrs();
+    if DEBUG.print() {
+        eprintln!("NAK IR after lower_uniform_instrs:\n{}", &s);
     }
 
     s.opt_copy_prop();
@@ -298,7 +321,6 @@ pub extern "C" fn nak_compile_shader(
         eprintln!("NAK IR after assign_regs:\n{}", &s);
     }
 
-    s.lower_ineg();
     s.lower_par_copies();
     s.lower_copy_swap();
     s.opt_jump_thread();
@@ -312,8 +334,8 @@ pub extern "C" fn nak_compile_shader(
 
     let info = nak_shader_info {
         stage: nir.info.stage(),
-        sm: s.info.sm,
-        num_gprs: if s.info.sm >= 70 {
+        sm: s.sm.sm(),
+        num_gprs: if s.sm.sm() >= 70 {
             max(4, s.info.num_gprs + 2)
         } else {
             max(4, s.info.num_gprs)
@@ -418,7 +440,7 @@ pub extern "C" fn nak_compile_shader(
             }
             _ => unsafe { std::mem::zeroed() },
         },
-        hdr: sph::encode_header(&s.info, fs_key),
+        hdr: sph::encode_header(sm.as_ref(), &s.info, fs_key),
     };
 
     let mut asm = String::new();
@@ -428,13 +450,7 @@ pub extern "C" fn nak_compile_shader(
 
     s.remove_annotations();
 
-    let code = if nak.sm >= 70 {
-        s.encode_sm70()
-    } else if nak.sm >= 50 {
-        s.encode_sm50()
-    } else {
-        panic!("Unsupported shader model");
-    };
+    let code = sm.encode_shader(&s);
 
     if DEBUG.print() {
         let stage_name = unsafe {

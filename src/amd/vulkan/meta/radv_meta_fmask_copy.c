@@ -103,23 +103,7 @@ create_fmask_copy_pipeline(struct radv_device *device, int samples, VkPipeline *
    nir_shader *cs = build_fmask_copy_compute_shader(device, samples);
    VkResult result;
 
-   VkPipelineShaderStageCreateInfo pipeline_shader_stage = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = vk_shader_module_handle_from_nir(cs),
-      .pName = "main",
-      .pSpecializationInfo = NULL,
-   };
-
-   VkComputePipelineCreateInfo vk_pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage = pipeline_shader_stage,
-      .flags = 0,
-      .layout = state->fmask_copy.p_layout,
-   };
-
-   result =
-      radv_compute_pipeline_create(radv_device_to_handle(device), state->cache, &vk_pipeline_info, NULL, pipeline);
+   result = radv_meta_create_compute_pipeline(device, cs, state->fmask_copy.p_layout, pipeline);
    ralloc_free(cs);
    return result;
 }
@@ -133,38 +117,29 @@ radv_device_init_meta_fmask_copy_state_internal(struct radv_device *device, uint
       return VK_SUCCESS;
 
    if (!device->meta_state.fmask_copy.ds_layout) {
-      VkDescriptorSetLayoutCreateInfo ds_create_info = {
-         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-         .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-         .bindingCount = 2,
-         .pBindings = (VkDescriptorSetLayoutBinding[]){
-            {.binding = 0,
-             .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-             .descriptorCount = 1,
-             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-             .pImmutableSamplers = NULL},
-            {.binding = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-             .descriptorCount = 1,
-             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-             .pImmutableSamplers = NULL},
-         }};
+      const VkDescriptorSetLayoutBinding bindings[] = {
+         {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+         },
+         {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+         },
+      };
 
-      result = radv_CreateDescriptorSetLayout(radv_device_to_handle(device), &ds_create_info, &device->meta_state.alloc,
-                                              &device->meta_state.fmask_copy.ds_layout);
+      result = radv_meta_create_descriptor_set_layout(device, 2, bindings, &device->meta_state.fmask_copy.ds_layout);
       if (result != VK_SUCCESS)
          return result;
    }
 
    if (!device->meta_state.fmask_copy.p_layout) {
-      VkPipelineLayoutCreateInfo pl_create_info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                                   .setLayoutCount = 1,
-                                                   .pSetLayouts = &device->meta_state.fmask_copy.ds_layout,
-                                                   .pushConstantRangeCount = 0,
-                                                   .pPushConstantRanges = NULL};
-
-      result = radv_CreatePipelineLayout(radv_device_to_handle(device), &pl_create_info, &device->meta_state.alloc,
-                                         &device->meta_state.fmask_copy.p_layout);
+      result = radv_meta_create_pipeline_layout(device, &device->meta_state.fmask_copy.ds_layout, 0, NULL,
+                                                &device->meta_state.fmask_copy.p_layout);
       if (result != VK_SUCCESS)
          return result;
    }
@@ -212,8 +187,7 @@ radv_fixup_copy_dst_metadata(struct radv_cmd_buffer *cmd_buffer, const struct ra
 
 bool
 radv_can_use_fmask_copy(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *src_image,
-                        const struct radv_image *dst_image, unsigned num_rects,
-                        const struct radv_meta_blit2d_rect *rects)
+                        const struct radv_image *dst_image, const struct radv_meta_blit2d_rect *rect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -235,9 +209,8 @@ radv_can_use_fmask_copy(struct radv_cmd_buffer *cmd_buffer, const struct radv_im
       return false;
 
    /* The region must be a whole image copy. */
-   if (num_rects != 1 ||
-       (rects[0].src_x || rects[0].src_y || rects[0].dst_x || rects[0].dst_y ||
-        rects[0].width != src_image->vk.extent.width || rects[0].height != src_image->vk.extent.height))
+   if (rect->src_x || rect->src_y || rect->dst_x || rect->dst_y || rect->width != src_image->vk.extent.width ||
+       rect->height != src_image->vk.extent.height)
       return false;
 
    /* Source/destination images must have identical size. */
@@ -306,9 +279,8 @@ radv_fmask_copy(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf
                         },
                         0, NULL);
 
-   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.fmask_copy.p_layout,
-                                 0, /* set */
-                                 2, /* descriptorWriteCount */
+   radv_meta_push_descriptor_set(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.fmask_copy.p_layout, 0,
+                                 2,
                                  (VkWriteDescriptorSet[]){{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                                            .dstBinding = 0,
                                                            .dstArrayElement = 0,

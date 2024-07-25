@@ -303,6 +303,9 @@ typedef struct {
    char vendor_string[256];
 
    bool has_external_handles;
+
+   int efc_count;
+   void *last_efc_surface;
 } vlVaDriver;
 
 typedef struct {
@@ -383,6 +386,15 @@ typedef struct {
    int packed_header_type;
    bool packed_header_emulation_bytes;
    struct set *surfaces;
+   unsigned slice_data_offset;
+   bool have_slice_params;
+
+   struct {
+      void **buffers;
+      unsigned *sizes;
+      unsigned num_buffers;
+      unsigned allocated_size;
+   } bs;
 } vlVaContext;
 
 typedef struct {
@@ -392,7 +404,7 @@ typedef struct {
    unsigned int rt_format;
 } vlVaConfig;
 
-typedef struct {
+typedef struct vlVaSurface {
    struct pipe_video_buffer templat, *buffer;
    struct util_dynarray subpics; /* vlVaSubpicture */
    vlVaContext *ctx;
@@ -401,9 +413,9 @@ typedef struct {
    unsigned int frame_num_cnt;
    bool force_flushed;
    struct pipe_video_buffer *obsolete_buf;
-   enum pipe_format encoder_format;
    bool full_range;
    struct pipe_fence_handle *fence;
+   struct vlVaSurface *efc_surface; /* input surface for EFC */
 } vlVaSurface;
 
 typedef struct {
@@ -546,7 +558,7 @@ void vlVaHandlePictureParameterBufferVP9(vlVaDriver *drv, vlVaContext *context, 
 void vlVaHandleSliceParameterBufferVP9(vlVaContext *context, vlVaBuffer *buf);
 void vlVaDecoderVP9BitstreamHeader(vlVaContext *context, vlVaBuffer *buf);
 void vlVaHandlePictureParameterBufferAV1(vlVaDriver *drv, vlVaContext *context, vlVaBuffer *buf);
-void vlVaHandleSliceParameterBufferAV1(vlVaContext *context, vlVaBuffer *buf, unsigned num_slices, unsigned slice_offset);
+void vlVaHandleSliceParameterBufferAV1(vlVaContext *context, vlVaBuffer *buf);
 void getEncParamPresetH264(vlVaContext *context);
 void getEncParamPresetH265(vlVaContext *context);
 void getEncParamPresetAV1(vlVaContext *context);

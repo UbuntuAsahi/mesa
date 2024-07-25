@@ -12,7 +12,7 @@
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_formats.h"
 #include "asahi/lib/decode.h"
-#include "drm-uapi/asahi_drm.h"
+#include "asahi/lib/unstable_asahi_drm.h"
 #include "drm-uapi/drm_fourcc.h"
 #include "frontend/winsys_handle.h"
 #include "gallium/auxiliary/renderonly/renderonly.h"
@@ -30,6 +30,7 @@
 #include "util/format/u_format.h"
 #include "util/half_float.h"
 #include "util/macros.h"
+#include "util/simple_mtx.h"
 #include "util/timespec.h"
 #include "util/u_drm.h"
 #include "util/u_gen_mipmap.h"
@@ -1563,8 +1564,29 @@ agx_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
           unsigned flags)
 {
    struct agx_context *ctx = agx_context(pctx);
+   struct agx_screen *screen = agx_screen(ctx->base.screen);
 
    agx_flush_all(ctx, "Gallium flush");
+
+   if (!(flags & (PIPE_FLUSH_DEFERRED | PIPE_FLUSH_ASYNC))) {
+      /* Ensure other contexts in this screen serialize against the last
+       * submission (and all prior submissions).
+       */
+      simple_mtx_lock(&screen->flush_seqid_lock);
+
+      uint64_t val = p_atomic_read(&screen->flush_wait_seqid);
+      if (val < ctx->flush_last_seqid)
+         p_atomic_set(&screen->flush_wait_seqid, ctx->flush_last_seqid);
+
+      /* Note: it's possible for the max() logic above to be "wrong" due
+       * to a race in agx_batch_submit causing out-of-order timeline point
+       * updates, making the larger value not actually a later submission.
+       * However, see the comment in agx_batch.c for why this doesn't matter
+       * because this corner case is handled conservatively in the kernel.
+       */
+
+      simple_mtx_unlock(&screen->flush_seqid_lock);
+   }
 
    /* At this point all pending work has been submitted. Since jobs are
     * started and completed sequentially from a UAPI perspective, and since
@@ -2091,13 +2113,13 @@ agx_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 12;
 
    case PIPE_CAP_FS_COORD_ORIGIN_UPPER_LEFT:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
    case PIPE_CAP_TGSI_TEXCOORD:
    case PIPE_CAP_FS_FACE_IS_INTEGER_SYSVAL:
    case PIPE_CAP_FS_POSITION_IS_SYSVAL:
       return true;
    case PIPE_CAP_FS_COORD_ORIGIN_LOWER_LEFT:
-   case PIPE_CAP_FS_COORD_PIXEL_CENTER_INTEGER:
+   case PIPE_CAP_FS_COORD_PIXEL_CENTER_HALF_INTEGER:
    case PIPE_CAP_FS_POINT_IS_SYSVAL:
       return false;
 
@@ -2539,6 +2561,8 @@ agx_destroy_screen(struct pipe_screen *pscreen)
 {
    struct agx_screen *screen = agx_screen(pscreen);
 
+   drmSyncobjDestroy(screen->dev.fd, screen->flush_syncobj);
+
    if (screen->dev.ro)
       screen->dev.ro->destroy(screen->dev.ro);
 
@@ -2646,6 +2670,12 @@ agx_screen_create(int fd, struct renderonly *ro,
       ralloc_free(agx_screen);
       return NULL;
    }
+
+   int ret =
+      drmSyncobjCreate(agx_device(screen)->fd, 0, &agx_screen->flush_syncobj);
+   assert(!ret);
+
+   simple_mtx_init(&agx_screen->flush_seqid_lock, mtx_plain);
 
    screen->destroy = agx_destroy_screen;
    screen->get_screen_fd = agx_screen_get_fd;

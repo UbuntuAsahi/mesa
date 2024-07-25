@@ -1,7 +1,3 @@
-# nvk sparse needs more testing
-KHR-GL46.sparse_texture2_tests.SparseTexture2Commitment,Fail
-KHR-GL46.sparse_texture2_tests.SparseTexture2Lookup,Fail
-
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_neg_y_pos_z_and_pos_x_neg_y_neg_z_and_pos_x_pos_y_neg_z,Crash
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_neg_z_and_neg_x_pos_y_pos_z_and_pos_x_neg_y_neg_z,Crash
 dEQP-GLES2.functional.clipping.triangle_vertex.clip_three.clip_neg_x_pos_y_and_neg_y_neg_z_and_pos_y_pos_z,Crash
@@ -375,9 +371,6 @@ dEQP-GLES31.functional.srgb_texture_decode.skip_decode.srg8.using_sampler,Crash
 dEQP-GLES31.functional.srgb_texture_decode.skip_decode.srgba8.texel_fetch,Crash
 dEQP-GLES31.functional.srgb_texture_decode.skip_decode.srgba8.using_sampler,Crash
 
-# regressions ?
-spec@arb_get_texture_sub_image@arb_get_texture_sub_image-get,Fail
-
 spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
@@ -404,6 +397,7 @@ spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl 3.0@clearbuffer-depth-cs-probe,Fail
 spec@!opengl es 3.0@gles-3.0-transform-feedback-uniform-buffer-object,Fail
 spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
+spec@arb_get_texture_sub_image@arb_get_texture_sub_image-get,Fail
 spec@arb_gpu_shader_fp64@execution@arb_gpu_shader_fp64-tf-separate,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex,Fail
 spec@arb_program_interface_query@arb_program_interface_query-getprogramresourceindex@'vs_input2[1][0]' on GL_PROGRAM_INPUT,Fail
@@ -633,7 +627,6 @@ spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: true,Fail
 spec@arb_sample_shading@arb_sample_shading-builtin-gl-sample-mask-mrt-alpha-to-coverage,Fail
-spec@arb_sample_shading@samplemask 2,Fail
 spec@arb_sample_shading@samplemask 2 all,Fail
 spec@arb_sample_shading@samplemask 2 all@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@0.500000 partition,Fail
@@ -641,13 +634,13 @@ spec@arb_sample_shading@samplemask 2 all@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 2 all@sample mask_in_one,Fail
+spec@arb_sample_shading@samplemask 2,Fail
 spec@arb_sample_shading@samplemask 2@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@0.500000 partition,Fail
 spec@arb_sample_shading@samplemask 2@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2@noms partition,Fail
 spec@arb_sample_shading@samplemask 2@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 4,Fail
 spec@arb_sample_shading@samplemask 4 all,Fail
 spec@arb_sample_shading@samplemask 4 all@0.250000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4 all@0.250000 partition,Fail
@@ -656,6 +649,7 @@ spec@arb_sample_shading@samplemask 4 all@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 4 all@sample mask_in_one,Fail
+spec@arb_sample_shading@samplemask 4,Fail
 spec@arb_sample_shading@samplemask 4@0.250000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4@0.250000 partition,Fail
 spec@arb_sample_shading@samplemask 4@0.500000 mask_in_one,Fail
@@ -663,7 +657,6 @@ spec@arb_sample_shading@samplemask 4@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 4@noms partition,Fail
 spec@arb_sample_shading@samplemask 4@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 6,Fail
 spec@arb_sample_shading@samplemask 6 all,Fail
 spec@arb_sample_shading@samplemask 6 all@0.125000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6 all@0.125000 partition,Fail
@@ -673,6 +666,7 @@ spec@arb_sample_shading@samplemask 6 all@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 6 all@sample mask_in_one,Fail
+spec@arb_sample_shading@samplemask 6,Fail
 spec@arb_sample_shading@samplemask 6@0.125000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6@0.125000 partition,Fail
 spec@arb_sample_shading@samplemask 6@0.250000 mask_in_one,Fail
@@ -681,7 +675,6 @@ spec@arb_sample_shading@samplemask 6@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 6@noms partition,Fail
 spec@arb_sample_shading@samplemask 6@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 8,Fail
 spec@arb_sample_shading@samplemask 8 all,Fail
 spec@arb_sample_shading@samplemask 8 all@0.125000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 8 all@0.125000 partition,Fail
@@ -691,6 +684,7 @@ spec@arb_sample_shading@samplemask 8 all@1.000000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 8 all@noms mask_in_one,Fail
 spec@arb_sample_shading@samplemask 8 all@noms partition,Fail
 spec@arb_sample_shading@samplemask 8 all@sample mask_in_one,Fail
+spec@arb_sample_shading@samplemask 8,Fail
 spec@arb_sample_shading@samplemask 8@0.125000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 8@0.125000 partition,Fail
 spec@arb_sample_shading@samplemask 8@0.250000 mask_in_one,Fail
@@ -707,11 +701,9 @@ spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
 spec@arb_shading_language_packing@execution@built-in-functions@fs-packhalf2x16,Fail
 spec@arb_shading_language_packing@execution@built-in-functions@vs-packhalf2x16,Fail
+spec@arb_sparse_buffer@basic,Crash
+spec@arb_sparse_buffer@buffer-data,Crash
 spec@arb_texture_buffer_object@formats (fs- arb),Crash
-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8I_EXT,Fail
-spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8UI_EXT,Fail
-spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA8I_EXT,Fail
-spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA8UI_EXT,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16F_ARB,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16I_EXT,Fail
@@ -719,6 +711,8 @@ spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA16UI_EXT,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32F_ARB,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32I_EXT,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA32UI_EXT,Fail
+spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8I_EXT,Fail
+spec@arb_texture_buffer_object@formats (fs- arb)@GL_ALPHA8UI_EXT,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE16,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE16F_ARB,Fail
 spec@arb_texture_buffer_object@formats (fs- arb)@GL_LUMINANCE16I_EXT,Fail
@@ -747,6 +741,8 @@ spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA16UI_EXT,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA32F_ARB,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA32I_EXT,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA32UI_EXT,Fail
+spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA8I_EXT,Fail
+spec@arb_texture_buffer_object@formats (vs- arb)@GL_ALPHA8UI_EXT,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_LUMINANCE16,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_LUMINANCE16F_ARB,Fail
 spec@arb_texture_buffer_object@formats (vs- arb)@GL_LUMINANCE16I_EXT,Fail
@@ -798,7 +794,6 @@ spec@ext_framebuffer_multisample@interpolation 8 centroid-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 8 non-centroid-deriv-disabled,Fail
 spec@ext_framebuffer_multisample@interpolation 8 non-centroid-disabled,Fail
 spec@ext_framebuffer_object@fbo-flushing-2,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_nv12,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_nv21,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_p010,Fail
