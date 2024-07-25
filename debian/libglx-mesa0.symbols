@@ -1016,6 +1016,8 @@ libGLX_mesa.so.0 libglx-mesa0
  glTexStorage2DMultisample@Base 0
  glTexStorage3D@Base 0
  glTexStorage3DMultisample@Base 0
+ glTexStorageAttribs2DEXT@Base 24.2.0~
+ glTexStorageAttribs3DEXT@Base 24.2.0~
  glTexSubImage1D@Base 0
  glTexSubImage2D@Base 0
  glTexSubImage3D@Base 0
