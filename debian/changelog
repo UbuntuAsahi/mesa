@@ -1,3 +1,10 @@
+mesa-asahi (24.2.0~git20240727.6d00b02-1) unstable; urgency=medium
+
+  * New asahi release (asahi-20240727)
+    - GPU UAPI bump: needs linux-asahi 6.9.12-1 or higher
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sun, 28 Jul 2024 22:25:07 +0200
+
 mesa-asahi (24.2.0~git20240725.15dc78c-1) unstable; urgency=medium
 
   * New asahi release (asahi-20240725)
