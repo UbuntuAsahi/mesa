@@ -11,7 +11,7 @@ Build-Depends:
  glslang-tools [@LLVM_ARCHS@],
  meson (>= 1.4.0),
  quilt (>= 0.63-8.2~),
- pkg-config,
+ pkgconf,
  libdrm-dev (>= 2.4.121),
  libx11-dev,
  libxxf86vm-dev,
@@ -38,9 +38,11 @@ Build-Depends:
  libxshmfence-dev (>= 1.1),
  libxtensor-dev [linux-arm64],
  libzstd-dev,
+ lua5.4 [arm64 armel armhf],
  python3,
  python3-mako,
  python3-ply,
+ python3-yaml,
  python3-pycparser [arm64 armhf],
  python3-setuptools,
  flex,
@@ -52,15 +54,19 @@ Build-Depends:
  libclang-@LLVM_VERSION@-dev [@LLVM_ARCHS@],
  libclang-cpp@LLVM_VERSION@-dev [@LLVM_ARCHS@],
  libclc-@LLVM_VERSION@-dev [@LLVM_ARCHS@],
+ libclc-@LLVM_VERSION@ [@LLVM_ARCHS@],
  wayland-protocols (>= 1.34),
  zlib1g-dev,
  libglvnd-core-dev (>= 1.3.2),
  valgrind [@VALGRIND_ARCHS@],
- rustc [@RUSTICL_ARCHS@],
+ rustc (>= 1.73) [@RUSTICL_ARCHS@],
+ rustfmt [@RUSTICL_ARCHS@],
  bindgen (>= 0.66.1~) [@RUSTICL_ARCHS@],
+ cbindgen [@RUSTICL_ARCHS@],
  llvm-spirv-@LLVM_VERSION@ [@RUSTICL_ARCHS@],
- libclc-@LLVM_VERSION@ [@RUSTICL_ARCHS@],
  libllvmspirvlib-@LLVM_VERSION@-dev [@LLVM_ARCHS@],
+ librust-paste-dev [@NVK_ARCHS@],
+ librust-syn-dev [@NVK_ARCHS@],
 Rules-Requires-Root: no
 Vcs-Git: https://gitlab.freedesktop.org/asahi/mesa.git
 Vcs-Browser: https://gitlab.freedesktop.org/asahi/mesa
@@ -419,7 +425,7 @@ Depends:
  ${misc:Depends},
 Multi-Arch: same
 Description: DRM shim libraries
- This package provides drm-shim libraries which can be used for testing DRM drivers when
- none exists on the host
+ This package provides drm-shim libraries which can be used for testing DRM
+ drivers when none exists on the host.
 
 # vim: tw=0
