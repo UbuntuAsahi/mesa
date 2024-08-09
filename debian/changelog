@@ -1,3 +1,9 @@
+mesa-asahi (24.2.0~git20240727.6d00b02-2) unstable; urgency=medium
+
+  * Release to unstable(-asahi)
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Fri, 09 Aug 2024 10:51:54 +0200
+
 mesa-asahi (24.2.0~git20240727.6d00b02-2~exp1) experimental; urgency=medium
 
   * Import some packaging changes from tag debian/24.2.0_rc4-1
