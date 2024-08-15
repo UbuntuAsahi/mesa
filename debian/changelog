@@ -1,3 +1,9 @@
+mesa (24.1.0~pre20240725-1asahi1.24.04) noble; urgency=medium
+
+  * Bump to asahi-20240725
+
+ -- Tobias Heider <me@tobhe.de>  Thu, 15 Aug 2024 23:53:27 +0200
+
 mesa (24.1.0~pre20240228-1asahi2.24.04) noble; urgency=medium
 
   * Reenable asahi driver
