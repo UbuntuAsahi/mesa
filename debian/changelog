@@ -1,3 +1,9 @@
+mesa (24.2.0~pre20240725-1asahi1.24.04) noble; urgency=medium
+
+  * Build on 24.04
+
+ -- Tobias Heider <me@tobhe.de>  Tue, 20 Aug 2024 02:57:19 +0200
+
 mesa (24.2.0~pre20240725-1asahi1.22.04) jammy; urgency=medium
 
   * Bump to asahi-20240725
