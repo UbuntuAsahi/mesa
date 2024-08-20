@@ -1,6 +1,13 @@
-mesa (24.1.0~pre20240725-1asahi1.24.04) noble; urgency=medium
+mesa (24.2.0~pre20240725-1asahi1.22.04) jammy; urgency=medium
 
   * Bump to asahi-20240725
+  * Backport to 22.04
+    - Sync dependencies with kisak-mesa. We use the same build dependencies
+      so we don't have to do all the work twice
+    - Add symbols added with mesa 24.2.0
+    - Add python3-pycparser dependency. In 24.04 this is part of python itself.
+    - Don't build rusticl on arm64
+    - Use LLVM 15, 17 is not available on Ubuntu 22.04
 
  -- Tobias Heider <me@tobhe.de>  Thu, 15 Aug 2024 23:53:27 +0200
 
