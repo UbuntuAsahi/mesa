@@ -182,7 +182,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->flags |= ASAHI_RENDER_SET_WHEN_RELOADING_Z_OR_S;
 #endif
 
-   if (dev->dev.debug & AGX_DBG_NOCLUSTER)
+   /* XXX: Hack */
+   if (dev->dev.debug & AGX_DBG_NOCLUSTER || true)
       c->flags |= ASAHI_RENDER_NO_VERTEX_CLUSTERING;
 
 #if 0
