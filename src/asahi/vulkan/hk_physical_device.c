@@ -244,8 +244,7 @@ hk_get_device_features(
       .textureCompressionBC = true,
       .textureCompressionASTC_LDR = false,
       .occlusionQueryPrecise = true,
-      // TODO: blocked on CTS bug
-      //.pipelineStatisticsQuery = true,
+      .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = true,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
