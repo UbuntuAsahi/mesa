@@ -144,6 +144,49 @@ reserved_size(agx_context *ctx)
       return 0;
 }
 
+UNUSED static void
+print_reg_file(struct ra_ctx *rctx)
+{
+   unsigned reserved = reserved_size(rctx->shader);
+
+   /* Dump the contents */
+   for (unsigned i = reserved; i < rctx->bound[RA_GPR]; ++i) {
+      if (BITSET_TEST(rctx->used_regs[RA_GPR], i)) {
+         uint32_t ssa = rctx->reg_to_ssa[i];
+         unsigned n = rctx->ncomps[ssa];
+         printf("h%u...%u: %u\n", i, i + n - 1, ssa);
+         i += (n - 1);
+      }
+   }
+   printf("\n");
+
+   /* Dump a visualization of the sizes to understand what live range
+    * splitting is up against.
+    */
+   for (unsigned i = 0; i < rctx->bound[RA_GPR]; ++i) {
+      /* Space out 16-bit vec4s */
+      if (i && (i % 4) == 0) {
+         printf(" ");
+      }
+
+      if (i < reserved) {
+         printf("-");
+      } else if (BITSET_TEST(rctx->used_regs[RA_GPR], i)) {
+         uint32_t ssa = rctx->reg_to_ssa[i];
+         unsigned n = rctx->ncomps[ssa];
+         for (unsigned j = 0; j < n; ++j) {
+            assert(n < 10);
+            printf("%u", n);
+         }
+
+         i += (n - 1);
+      } else {
+         printf(".");
+      }
+   }
+   printf("\n\n");
+}
+
 enum agx_size
 agx_split_width(const agx_instr *I)
 {
