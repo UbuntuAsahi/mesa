@@ -248,6 +248,8 @@ enum
 enum
 {
    /* Tests: */
+   DBG_TEST_CLEAR_BUFFER,
+   DBG_TEST_COPY_BUFFER,
    DBG_TEST_IMAGE_COPY,
    DBG_TEST_CB_RESOLVE,
    DBG_TEST_COMPUTE_BLIT,
@@ -525,7 +527,6 @@ struct si_screen {
 
    struct radeon_info info;
    struct nir_shader_compiler_options *nir_options;
-   struct nir_lower_subgroups_options *nir_lower_subgroups_options;
    uint64_t debug_flags;
    char renderer_string[183];
 
@@ -1019,7 +1020,10 @@ struct si_context {
    unsigned last_dirty_tex_counter;
    unsigned last_dirty_buf_counter;
    unsigned last_compressed_colortex_counter;
-   unsigned last_num_draw_calls;
+   struct {
+      unsigned with_cb;
+      unsigned with_db;
+   } num_draw_calls_sh_coherent;
    unsigned flags; /* flush flags */
 
    /* Atoms (state emit functions). */
@@ -1642,14 +1646,6 @@ void si_suspend_queries(struct si_context *sctx);
 void si_resume_queries(struct si_context *sctx);
 
 /* si_shaderlib_nir.c */
-union si_cs_clear_copy_buffer_key {
-   struct {
-      bool is_clear:1;
-      unsigned dwords_per_thread:3; /* 1..4 allowed */
-      unsigned clear_value_size_is_12:1;
-   };
-   uint64_t key;
-};
 
 void *si_create_shader_state(struct si_context *sctx, struct nir_shader *nir);
 void *si_create_dcc_retile_cs(struct si_context *sctx, struct radeon_surf *surf);
@@ -1658,7 +1654,6 @@ void *si_create_passthrough_tcs(struct si_context *sctx);
 void *si_clear_image_dcc_single_shader(struct si_context *sctx, bool is_msaa, unsigned wg_dim);
 void *si_get_blitter_vs(struct si_context *sctx, enum blitter_attrib_type type,
                         unsigned num_layers);
-void *si_create_dma_compute_shader(struct si_context *sctx, union si_cs_clear_copy_buffer_key *key);
 void *si_create_ubyte_to_ushort_compute_shader(struct si_context *sctx);
 void *si_create_clear_buffer_rmw_cs(struct si_context *sctx);
 void *si_create_fmask_expand_cs(struct si_context *sctx, unsigned num_samples, bool is_array);
@@ -1676,6 +1671,8 @@ void si_test_blit(struct si_screen *sscreen, unsigned test_flags);
 /* si_test_dma_perf.c */
 void si_test_dma_perf(struct si_screen *sscreen);
 void si_test_mem_perf(struct si_screen *sscreen);
+void si_test_clear_buffer(struct si_screen *sscreen);
+void si_test_copy_buffer(struct si_screen *sscreen);
 
 /* si_test_blit_perf.c */
 void si_test_blit_perf(struct si_screen *sscreen);

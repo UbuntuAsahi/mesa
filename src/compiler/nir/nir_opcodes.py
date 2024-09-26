@@ -1361,6 +1361,13 @@ opcode("imadshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
 opcode("imsubshl_agx", 0, tint, [0, 0, 0, 0], [tint, tint, tint, tint], False,
        "", f"(src0 * src1) - (src2 << src3)")
 
+# Bounds check instruction.
+#
+# Sources: <data, end offset, bounds>
+opcode("bounds_agx", 0, tint, [0, 0, 0],
+       [tint, tint, tint], False,
+       "", "src1 <= src2 ? src0 : 0")
+
 binop_convert("interleave_agx", tuint32, tuint16, "", """
       dst = 0;
       for (unsigned bit = 0; bit < 16; bit++) {
@@ -1370,6 +1377,19 @@ binop_convert("interleave_agx", tuint32, tuint16, "", """
       Interleave bits of 16-bit integers to calculate a 32-bit integer. This can
       be used as-is for Morton encoding.
       """)
+
+# NVIDIA PRMT
+opcode("prmt_nv", 0, tuint32, [0, 0, 0], [tuint32, tuint32, tuint32],
+       False, "", """
+    dst = 0;
+    for (unsigned i = 0; i < 4; i++) {
+        uint8_t byte = (src0 >> (i * 4)) & 0x7;
+        uint8_t x = byte < 4 ? (src1 >> (byte * 8))
+                             : (src2 >> ((byte - 4) * 8));
+        if ((src0 >> (i * 4)) & 0x8)
+            x = ((int8_t)x) >> 7;
+        dst |= ((uint32_t)x) << i * 8;
+    }""")
 
 # 24b multiply into 32b result (with sign extension)
 binop("imul24", tint32, _2src_commutative + associative,
@@ -1502,10 +1522,6 @@ opcode("b32fcsel_mdg", 0, tuint, [0, 0, 0],
        integer sources. That includes support for floating point modifiers in
        the backend.
        """)
-
-# Magnitude equal to fddx/y, sign undefined. Derivative of a constant is zero.
-unop("fddx_must_abs_mali", tfloat, "0.0", algebraic_properties = "derivative")
-unop("fddy_must_abs_mali", tfloat, "0.0", algebraic_properties = "derivative")
 
 # DXIL specific double [un]pack
 # DXIL doesn't support generic [un]pack instructions, so we want those

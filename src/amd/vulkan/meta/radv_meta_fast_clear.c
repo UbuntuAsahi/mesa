@@ -57,7 +57,6 @@ static VkResult
 create_dcc_compress_compute(struct radv_device *device)
 {
    VkResult result = VK_SUCCESS;
-   nir_shader *cs = build_dcc_decompress_compute_shader(device);
 
    const VkDescriptorSetLayoutBinding bindings[] = {
       {
@@ -77,22 +76,40 @@ create_dcc_compress_compute(struct radv_device *device)
    result = radv_meta_create_descriptor_set_layout(
       device, 2, bindings, &device->meta_state.fast_clear_flush.dcc_decompress_compute_ds_layout);
    if (result != VK_SUCCESS)
-      goto cleanup;
+      return result;
 
    result =
       radv_meta_create_pipeline_layout(device, &device->meta_state.fast_clear_flush.dcc_decompress_compute_ds_layout, 0,
                                        NULL, &device->meta_state.fast_clear_flush.dcc_decompress_compute_p_layout);
    if (result != VK_SUCCESS)
-      goto cleanup;
+      return result;
+
+   nir_shader *cs = build_dcc_decompress_compute_shader(device);
 
    result =
       radv_meta_create_compute_pipeline(device, cs, device->meta_state.fast_clear_flush.dcc_decompress_compute_p_layout,
                                         &device->meta_state.fast_clear_flush.dcc_decompress_compute_pipeline);
-   if (result != VK_SUCCESS)
-      goto cleanup;
-
-cleanup:
    ralloc_free(cs);
+   return result;
+}
+
+static VkResult
+get_dcc_decompress_compute_pipeline(struct radv_device *device, VkPipeline *pipeline_out)
+{
+   struct radv_meta_state *state = &device->meta_state;
+   VkResult result = VK_SUCCESS;
+
+   mtx_lock(&state->mtx);
+   if (!state->fast_clear_flush.dcc_decompress_compute_pipeline) {
+      result = create_dcc_compress_compute(device);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   *pipeline_out = state->fast_clear_flush.dcc_decompress_compute_pipeline;
+
+fail:
+   mtx_unlock(&state->mtx);
    return result;
 }
 
@@ -104,12 +121,6 @@ create_pipeline(struct radv_device *device, VkShaderModule vs_module_h, VkPipeli
    VkDevice device_h = radv_device_to_handle(device);
 
    nir_shader *fs_module = radv_meta_build_nir_fs_noop(device);
-
-   if (!fs_module) {
-      /* XXX: Need more accurate error */
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto cleanup;
-   }
 
    const VkPipelineShaderStageCreateInfo stages[2] = {
       {
@@ -351,11 +362,6 @@ radv_device_init_meta_fast_clear_flush_state_internal(struct radv_device *device
    }
 
    nir_shader *vs_module = radv_meta_build_nir_vs_generate_vertices(device);
-   if (!vs_module) {
-      /* XXX: Need more accurate error */
-      res = VK_ERROR_OUT_OF_HOST_MEMORY;
-      goto cleanup;
-   }
 
    res = radv_meta_create_pipeline_layout(device, NULL, 0, NULL, &device->meta_state.fast_clear_flush.p_layout);
    if (res != VK_SUCCESS)
@@ -436,6 +442,7 @@ radv_process_color_image_layer(struct radv_cmd_buffer *cmd_buffer, struct radv_i
 
    const VkRenderingInfo rendering_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .flags = VK_RENDERING_INPUT_ATTACHMENT_NO_CONCURRENT_WRITES_BIT_MESA,
       .renderArea = {.offset = {0, 0}, .extent = {width, height}},
       .layerCount = 1,
       .colorAttachmentCount = 1,
@@ -633,22 +640,21 @@ radv_decompress_dcc_compute(struct radv_cmd_buffer *cmd_buffer, struct radv_imag
    struct radv_meta_saved_state saved_state;
    struct radv_image_view load_iview = {0};
    struct radv_image_view store_iview = {0};
+   VkPipeline pipeline;
+   VkResult result;
+
+   result = get_dcc_decompress_compute_pipeline(device, &pipeline);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      return;
+   }
 
    cmd_buffer->state.flush_bits |=
       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT, image);
 
-   if (!device->meta_state.fast_clear_flush.cmask_eliminate_pipeline) {
-      VkResult ret = radv_device_init_meta_fast_clear_flush_state_internal(device);
-      if (ret != VK_SUCCESS) {
-         vk_command_buffer_set_error(&cmd_buffer->vk, ret);
-         return;
-      }
-   }
-
    radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_COMPUTE_PIPELINE);
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE,
-                        device->meta_state.fast_clear_flush.dcc_decompress_compute_pipeline);
+   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
    for (uint32_t l = 0; l < vk_image_subresource_level_count(&image->vk, subresourceRange); l++) {
       uint32_t width, height;

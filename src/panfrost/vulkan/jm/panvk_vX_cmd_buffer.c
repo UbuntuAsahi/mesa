@@ -48,19 +48,6 @@
 #include "vk_descriptor_update_template.h"
 #include "vk_format.h"
 
-static uint32_t
-panvk_debug_adjust_bo_flags(const struct panvk_device *device,
-                            uint32_t bo_flags)
-{
-   struct panvk_instance *instance =
-      to_panvk_instance(device->vk.physical->instance);
-
-   if (instance->debug_flags & PANVK_DEBUG_DUMP)
-      bo_flags &= ~PAN_KMOD_BO_FLAG_NO_MMAP;
-
-   return bo_flags;
-}
-
 static void
 panvk_cmd_prepare_fragment_job(struct panvk_cmd_buffer *cmdbuf, mali_ptr fbd)
 {
@@ -154,7 +141,7 @@ panvk_per_arch(cmd_close_batch)(struct panvk_cmd_buffer *cmdbuf)
             cmdbuf->state.gfx.render.fb.info.bifrost.pre_post.dcds.gpu = 0;
 
             ASSERTED unsigned num_preload_jobs = GENX(pan_preload_fb)(
-               &dev->meta.blitter.cache, &cmdbuf->desc_pool.base,
+               &dev->blitter.cache, &cmdbuf->desc_pool.base,
                &cmdbuf->state.gfx.render.fb.info, i, batch->tls.gpu, NULL);
 
             /* Bifrost GPUs use pre frame DCDs to preload the FB content. We
@@ -333,13 +320,9 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
    panvk_pool_reset(&cmdbuf->desc_pool);
    panvk_pool_reset(&cmdbuf->tls_pool);
    panvk_pool_reset(&cmdbuf->varying_pool);
+   panvk_cmd_buffer_obj_list_reset(cmdbuf, push_sets);
 
-   panvk_per_arch(cmd_desc_state_reset)(&cmdbuf->state.gfx.desc_state,
-                                        &cmdbuf->state.compute.desc_state);
-   memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
-   memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
-   memset(&cmdbuf->state.compute.cs.desc, 0,
-          sizeof(cmdbuf->state.compute.cs.desc));
+   memset(&cmdbuf->state, 0, sizeof(cmdbuf->state));
 }
 
 static void
@@ -348,10 +331,6 @@ panvk_destroy_cmdbuf(struct vk_command_buffer *vk_cmdbuf)
    struct panvk_cmd_buffer *cmdbuf =
       container_of(vk_cmdbuf, struct panvk_cmd_buffer, vk);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
-
-   panvk_per_arch(cmd_desc_state_cleanup)(&cmdbuf->vk,
-                                          &cmdbuf->state.gfx.desc_state,
-                                          &cmdbuf->state.compute.desc_state);
 
    list_for_each_entry_safe(struct panvk_batch, batch, &cmdbuf->batches, node) {
       list_del(&batch->node);
@@ -364,6 +343,7 @@ panvk_destroy_cmdbuf(struct vk_command_buffer *vk_cmdbuf)
    panvk_pool_cleanup(&cmdbuf->desc_pool);
    panvk_pool_cleanup(&cmdbuf->tls_pool);
    panvk_pool_cleanup(&cmdbuf->varying_pool);
+   panvk_cmd_buffer_obj_list_cleanup(cmdbuf, push_sets);
    vk_command_buffer_finish(&cmdbuf->vk);
    vk_free(&dev->vk.alloc, cmdbuf);
 }
@@ -390,6 +370,7 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
       return result;
    }
 
+   panvk_cmd_buffer_obj_list_init(cmdbuf, push_sets);
    cmdbuf->vk.dynamic_graphics_state.vi = &cmdbuf->state.gfx.dynamic.vi;
    cmdbuf->vk.dynamic_graphics_state.ms.sample_locations =
       &cmdbuf->state.gfx.dynamic.sl;
@@ -407,7 +388,7 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
 
    struct panvk_pool_properties tls_pool_props = {
       .create_flags =
-         panvk_debug_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_NO_MMAP),
+         panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_NO_MMAP),
       .slab_size = 64 * 1024,
       .label = "TLS pool",
       .prealloc = false,
@@ -419,7 +400,7 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
 
    struct panvk_pool_properties var_pool_props = {
       .create_flags =
-         panvk_debug_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_NO_MMAP),
+         panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_NO_MMAP),
       .slab_size = 64 * 1024,
       .label = "TLS pool",
       .prealloc = false,
@@ -448,53 +429,48 @@ panvk_per_arch(BeginCommandBuffer)(VkCommandBuffer commandBuffer,
 
    vk_command_buffer_begin(&cmdbuf->vk, pBeginInfo);
 
-   memset(&cmdbuf->state, 0, sizeof(cmdbuf->state));
-
    return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL
-panvk_per_arch(CmdBindDescriptorSets)(
-   VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
-   VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
-   const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
-   const uint32_t *pDynamicOffsets)
+panvk_per_arch(CmdBindDescriptorSets2KHR)(
+   VkCommandBuffer commandBuffer,
+   const VkBindDescriptorSetsInfoKHR *pBindDescriptorSetsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
 
-   struct panvk_descriptor_state *desc_state =
-      panvk_cmd_get_desc_state(cmdbuf, pipelineBindPoint);
-
-   panvk_per_arch(cmd_desc_state_bind_sets)(
-      desc_state, layout, firstSet, descriptorSetCount, pDescriptorSets,
-      dynamicOffsetCount, pDynamicOffsets);
-
    /* TODO: Invalidate only if the shader tables are disturbed */
-   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+      panvk_per_arch(cmd_desc_state_bind_sets)(&cmdbuf->state.gfx.desc_state,
+                                               pBindDescriptorSetsInfo);
+
       memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
       memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
-   } else {
+   }
+
+   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+      panvk_per_arch(cmd_desc_state_bind_sets)(
+         &cmdbuf->state.compute.desc_state, pBindDescriptorSetsInfo);
+
       memset(&cmdbuf->state.compute.cs.desc, 0,
              sizeof(cmdbuf->state.compute.cs.desc));
    }
 }
 
 VKAPI_ATTR void VKAPI_CALL
-panvk_per_arch(CmdPushConstants)(VkCommandBuffer commandBuffer,
-                                 VkPipelineLayout layout,
-                                 VkShaderStageFlags stageFlags, uint32_t offset,
-                                 uint32_t size, const void *pValues)
+panvk_per_arch(CmdPushConstants2KHR)(
+   VkCommandBuffer commandBuffer,
+   const VkPushConstantsInfoKHR *pPushConstantsInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
 
-   if (stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS)
+   if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS)
       cmdbuf->state.gfx.push_uniforms = 0;
 
-   if (stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+   if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
       cmdbuf->state.compute.push_uniforms = 0;
 
-   panvk_cmd_push_constants(&cmdbuf->state.push_constants, stageFlags, offset,
-                            size, pValues);
+   panvk_cmd_push_constants(&cmdbuf->state.push_constants, pPushConstantsInfo);
 }
 
 static void
@@ -541,52 +517,67 @@ panvk_per_arch(cmd_bind_shaders)(struct vk_command_buffer *vk_cmd,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-panvk_per_arch(CmdPushDescriptorSetKHR)(
-   VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
-   VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
-   const VkWriteDescriptorSet *pDescriptorWrites)
+static void
+panvk_push_descriptor_set(struct panvk_cmd_buffer *cmd,
+                          struct panvk_descriptor_state *desc,
+                          const VkPushDescriptorSetInfoKHR *info)
 {
-   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-   VK_FROM_HANDLE(vk_pipeline_layout, playout, layout);
+   VK_FROM_HANDLE(vk_pipeline_layout, playout, info->layout);
+
    const struct panvk_descriptor_set_layout *set_layout =
-      to_panvk_descriptor_set_layout(playout->set_layouts[set]);
-   struct panvk_descriptor_state *desc_state =
-      panvk_cmd_get_desc_state(cmdbuf, pipelineBindPoint);
+      to_panvk_descriptor_set_layout(playout->set_layouts[info->set]);
+
    struct panvk_descriptor_set *push_set =
-      panvk_per_arch(cmd_push_descriptors)(&cmdbuf->vk, desc_state, set);
+      panvk_per_arch(cmd_push_descriptors)(&cmd->vk, desc, info->set);
    if (!push_set)
       return;
 
    push_set->layout = set_layout;
    push_set->desc_count = set_layout->desc_count;
 
-   for (uint32_t i = 0; i < descriptorWriteCount; i++)
-      panvk_per_arch(descriptor_set_write)(push_set, &pDescriptorWrites[i],
-                                           true);
+   for (uint32_t i = 0; i < info->descriptorWriteCount; i++)
+      panvk_per_arch(descriptor_set_write)(push_set,
+                                           &info->pDescriptorWrites[i], true);
 
    push_set->descs.dev = 0;
    push_set->layout = NULL;
+}
 
-   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdPushDescriptorSet2KHR)(
+   VkCommandBuffer commandBuffer,
+   const VkPushDescriptorSetInfoKHR *pPushDescriptorSetInfo)
+{
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+
+   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+      panvk_push_descriptor_set(cmdbuf, &cmdbuf->state.gfx.desc_state,
+                                pPushDescriptorSetInfo);
+
       memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
       memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
-   } else {
+   }
+
+   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+      panvk_push_descriptor_set(cmdbuf, &cmdbuf->state.compute.desc_state,
+                                pPushDescriptorSetInfo);
+
       memset(&cmdbuf->state.compute.cs.desc, 0,
              sizeof(cmdbuf->state.compute.cs.desc));
    }
 }
 
 VKAPI_ATTR void VKAPI_CALL
-panvk_per_arch(CmdPushDescriptorSetWithTemplateKHR)(
-   VkCommandBuffer commandBuffer,
-   VkDescriptorUpdateTemplate descriptorUpdateTemplate, VkPipelineLayout layout,
-   uint32_t set, const void *pData)
+panvk_per_arch(CmdPushDescriptorSetWithTemplate2KHR)(
+   VkCommandBuffer commandBuffer, const VkPushDescriptorSetWithTemplateInfoKHR
+                                     *pPushDescriptorSetWithTemplateInfo)
 {
    VK_FROM_HANDLE(vk_descriptor_update_template, template,
-                  descriptorUpdateTemplate);
+                  pPushDescriptorSetWithTemplateInfo->descriptorUpdateTemplate);
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-   VK_FROM_HANDLE(vk_pipeline_layout, playout, layout);
+   VK_FROM_HANDLE(vk_pipeline_layout, playout,
+                  pPushDescriptorSetWithTemplateInfo->layout);
+   const uint32_t set = pPushDescriptorSetWithTemplateInfo->set;
    const struct panvk_descriptor_set_layout *set_layout =
       to_panvk_descriptor_set_layout(playout->set_layouts[set]);
    struct panvk_descriptor_state *desc_state =
@@ -599,8 +590,8 @@ panvk_per_arch(CmdPushDescriptorSetWithTemplateKHR)(
    push_set->layout = set_layout;
    push_set->desc_count = set_layout->desc_count;
 
-   panvk_per_arch(descriptor_set_write_template)(push_set, template, pData,
-                                                 true);
+   panvk_per_arch(descriptor_set_write_template)(
+      push_set, template, pPushDescriptorSetWithTemplateInfo->pData, true);
 
    push_set->descs.dev = 0;
    push_set->layout = NULL;

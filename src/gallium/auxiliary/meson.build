@@ -437,9 +437,9 @@ if host_machine.system() == 'windows'
 else
   files_libgalliumvlwinsys += files('vl/vl_winsys_drm.c')
 endif
-if with_dri2 and with_platform_x11
+if with_platform_x11
   files_libgalliumvlwinsys += files('vl/vl_winsys_dri.c')
-  if with_dri3
+  if with_dri_platform == 'drm'
     vlwinsys_deps += [
       dep_xcb_sync, dep_xcb_present, dep_xshmfence, dep_xcb_xfixes,
       dep_xcb_dri3,
@@ -531,7 +531,7 @@ if with_tests
       'util/u_surface_test.cpp',
       include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
       link_with: libgallium,
-      dependencies : [idep_gtest],
+      dependencies : [idep_gtest, idep_mesautil],
     ),
     suite: 'gallium',
     protocol : 'gtest',

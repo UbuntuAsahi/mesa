@@ -145,8 +145,10 @@ VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
    case VA_DISPLAY_GLX:
    case VA_DISPLAY_X11:
       drv->vscreen = vl_dri3_screen_create(ctx->native_dpy, ctx->x11_screen);
+#ifdef HAVE_X11_DRI2
       if (!drv->vscreen)
          drv->vscreen = vl_dri2_screen_create(ctx->native_dpy, ctx->x11_screen);
+#endif
       if (!drv->vscreen)
          drv->vscreen = vl_xlib_swrast_screen_create(ctx->native_dpy, ctx->x11_screen);
       break;
@@ -372,7 +374,7 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
          context->desc.h264enc.frame_idx = util_hash_table_create_ptr_keys();
          break;
       case PIPE_VIDEO_FORMAT_HEVC:
-         context->desc.h265enc.rc.rate_ctrl_method = config->rc;
+         context->desc.h265enc.rc[0].rate_ctrl_method = config->rc;
          context->desc.h265enc.frame_idx = util_hash_table_create_ptr_keys();
          break;
       case PIPE_VIDEO_FORMAT_AV1:
@@ -381,6 +383,7 @@ vlVaCreateContext(VADriverContextP ctx, VAConfigID config_id, int picture_width,
       default:
          break;
       }
+      context->desc.base.packed_headers = config->packed_headers;
    }
 
    context->surfaces = _mesa_set_create(NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);

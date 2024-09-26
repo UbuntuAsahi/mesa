@@ -216,8 +216,9 @@ TEST(Generated, MiptreeTilesizes2D)
          EXPECT_EQ(expect_mask, test.tile_sizes[l] & expect_mask)
             << test.width << "x" << test.height << " "
             << util_format_short_name(test.format) << " [" << blockw_px << "x"
-            << blockh_px << "]" << " texture has wrong tile size at level " << l
-            << ":" << layout.tilesize_el[l].width_el << "x"
+            << blockh_px << "]"
+            << " texture has wrong tile size at level " << l << ":"
+            << layout.tilesize_el[l].width_el << "x"
             << layout.tilesize_el[l].height_el << " valid mask " << std::hex
             << test.tile_sizes[l] << " got " << expect_mask;
       }

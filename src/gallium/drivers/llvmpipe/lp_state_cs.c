@@ -409,8 +409,11 @@ generate_compute(struct llvmpipe_context *lp,
       }
    }
 
-   if (variant->gallivm->cache->data_size)
+   if (variant->gallivm->cache->data_size) {
+      gallivm_stub_func(gallivm, function);
+      gallivm_stub_func(gallivm, coro);
       return;
+   }
 
    context_ptr  = LLVMGetParam(function, CS_ARG_CONTEXT);
    resources_ptr  = LLVMGetParam(function, CS_ARG_RESOURCES);

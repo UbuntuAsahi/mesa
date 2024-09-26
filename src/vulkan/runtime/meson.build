@@ -28,6 +28,7 @@ vulkan_lite_runtime_files = files(
   'vk_graphics_state.c',
   'vk_image.c',
   'vk_log.c',
+  'vk_meta_object_list.c',
   'vk_object.c',
   'vk_physical_device.c',
   'vk_pipeline_layout.c',
@@ -184,6 +185,7 @@ vulkan_lite_runtime_files += [
 # as a runtime library dep to ensure header gen order
 vulkan_lite_runtime_header_gen_deps = declare_dependency(
   sources : [
+    spirv_info_h,
     vk_cmd_enqueue_entrypoints[0],
     vk_cmd_queue[1],
     vk_common_entrypoints[0],
@@ -256,6 +258,7 @@ vulkan_runtime_files = files(
   'vk_meta.c',
   'vk_meta_blit_resolve.c',
   'vk_meta_clear.c',
+  'vk_meta_copy_fill_update.c',
   'vk_meta_draw_rects.c',
   'vk_nir.c',
   'vk_nir_convert_ycbcr.c',

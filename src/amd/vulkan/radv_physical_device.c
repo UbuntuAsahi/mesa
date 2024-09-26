@@ -165,7 +165,6 @@ radv_physical_device_init_cache_key(struct radv_physical_device *pdev)
    key->ge_wave32 = pdev->ge_wave_size == 32;
    key->invariant_geom = !!(instance->debug_flags & RADV_DEBUG_INVARIANT_GEOM);
    key->lower_discard_to_demote = !!(instance->debug_flags & RADV_DEBUG_DISCARD_TO_DEMOTE);
-   key->mesh_fast_launch_2 = pdev->mesh_fast_launch_2;
    key->no_fmask = !!(instance->debug_flags & RADV_DEBUG_NO_FMASK);
    key->no_ngg_gs = !!(instance->debug_flags & RADV_DEBUG_NO_NGG_GS);
    key->no_rt = !!(instance->debug_flags & RADV_DEBUG_NO_RT);
@@ -240,7 +239,7 @@ radv_physical_device_init_queue_table(struct radv_physical_device *pdev)
       idx++;
    }
 
-   if (instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE) {
+   if (pdev->video_decode_enabled) {
       if (pdev->info.ip[pdev->vid_decode_ip].num_queues > 0) {
          pdev->vk_queue_to_radv[idx] = RADV_QUEUE_VIDEO_DEC;
          idx++;
@@ -573,12 +572,13 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_variable_pointers = true,
       .KHR_vertex_attribute_divisor = true,
-      .KHR_video_queue = !!(instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE) || pdev->video_encode_enabled,
+      .KHR_video_maintenance1 = true,
+      .KHR_video_queue = pdev->video_decode_enabled || pdev->video_encode_enabled,
       .KHR_video_decode_av1 = (pdev->info.vcn_ip_version >= VCN_3_0_0 && pdev->info.vcn_ip_version != VCN_3_0_33 &&
-                               VIDEO_CODEC_AV1DEC && !!(instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE)),
-      .KHR_video_decode_queue = !!(instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE),
-      .KHR_video_decode_h264 = VIDEO_CODEC_H264DEC && !!(instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE),
-      .KHR_video_decode_h265 = VIDEO_CODEC_H265DEC && !!(instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE),
+                               VIDEO_CODEC_AV1DEC && pdev->video_decode_enabled),
+      .KHR_video_decode_queue = pdev->video_decode_enabled,
+      .KHR_video_decode_h264 = VIDEO_CODEC_H264DEC && pdev->video_decode_enabled,
+      .KHR_video_decode_h265 = VIDEO_CODEC_H265DEC && pdev->video_decode_enabled,
       .KHR_video_encode_h264 = VIDEO_CODEC_H264ENC && pdev->video_encode_enabled,
       .KHR_video_encode_h265 = VIDEO_CODEC_H265ENC && pdev->video_encode_enabled,
       .KHR_video_encode_queue = pdev->video_encode_enabled,
@@ -629,7 +629,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = pdev->info.gfx_level >= GFX8,
       .EXT_inline_uniform_block = true,
-      .EXT_legacy_vertex_attributes = !pdev->use_llvm && !instance->drirc.enable_dgc,
+      .EXT_legacy_vertex_attributes = !pdev->use_llvm,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
@@ -678,7 +678,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_tooling_info = true,
       .EXT_transform_feedback = true,
       .EXT_vertex_attribute_divisor = true,
-      .EXT_vertex_input_dynamic_state = !pdev->use_llvm && !instance->drirc.enable_dgc,
+      .EXT_vertex_input_dynamic_state = !pdev->use_llvm,
       .EXT_ycbcr_image_arrays = true,
       .AMD_buffer_marker = true,
       .AMD_device_coherent_memory = true,
@@ -726,8 +726,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    bool taskmesh_en = radv_taskmesh_enabled(pdev);
    bool has_perf_query = radv_perf_query_supported(pdev);
-   bool has_shader_image_float_minmax =
-      pdev->info.gfx_level != GFX8 && pdev->info.gfx_level != GFX9 && pdev->info.gfx_level != GFX11;
+   bool has_shader_image_float_minmax = pdev->info.gfx_level != GFX8 && pdev->info.gfx_level != GFX9 &&
+                                        pdev->info.gfx_level != GFX11 && pdev->info.gfx_level != GFX11_5;
    bool has_fragment_shader_interlock = radv_has_pops(pdev);
 
    *features = (struct vk_features){
@@ -1089,7 +1089,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .performanceCounterMultipleQueryPools = has_perf_query,
 
       /* VK_NV_device_generated_commands */
-      .deviceGeneratedCommands = true,
+      .deviceGeneratedCommandsNV = true,
 
       /* VK_EXT_attachment_feedback_loop_layout */
       .attachmentFeedbackLoopLayout = true,
@@ -1233,6 +1233,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_maintenance7 */
       .maintenance7 = true,
+
+      /* VK_KHR_video_maintenance1 */
+      .videoMaintenance1 = true,
    };
 }
 
@@ -2094,9 +2097,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    pdev->emulate_ngg_gs_query_pipeline_stat = pdev->use_ngg && pdev->info.gfx_level < GFX11;
 
-   pdev->mesh_fast_launch_2 =
-      (pdev->info.gfx_level >= GFX11 && !(instance->debug_flags & RADV_DEBUG_NO_GS_FAST_LAUNCH_2)) ||
-      pdev->info.gfx_level >= GFX12;
+   pdev->mesh_fast_launch_2 = pdev->info.gfx_level >= GFX11;
 
    pdev->emulate_mesh_shader_queries = pdev->info.gfx_level == GFX10_3;
 
@@ -2129,6 +2130,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
          pdev->rt_wave_size = 64;
    }
 
+   radv_probe_video_decode(pdev);
    radv_probe_video_encode(pdev);
 
    pdev->max_shared_size = pdev->info.gfx_level >= GFX7 ? 65536 : 32768;
@@ -2295,7 +2297,7 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
    if (pdev->info.ip[AMD_IP_COMPUTE].num_queues > 0 && !(instance->debug_flags & RADV_DEBUG_NO_COMPUTE_QUEUE))
       num_queue_families++;
 
-   if (instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE) {
+   if (pdev->video_decode_enabled) {
       if (pdev->info.ip[pdev->vid_decode_ip].num_queues > 0)
          num_queue_families++;
    }
@@ -2350,7 +2352,7 @@ radv_get_physical_device_queue_family_properties(struct radv_physical_device *pd
       }
    }
 
-   if (instance->perftest_flags & RADV_PERFTEST_VIDEO_DECODE) {
+   if (pdev->video_decode_enabled) {
       if (pdev->info.ip[pdev->vid_decode_ip].num_queues > 0) {
          if (*pCount > idx) {
             *pQueueFamilyProperties[idx] = (VkQueueFamilyProperties){

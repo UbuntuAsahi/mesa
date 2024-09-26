@@ -26,6 +26,7 @@
 #include "radv_shader_object.h"
 #include "radv_sqtt.h"
 
+#include "vk_render_pass.h"
 #include "vk_shader_module.h"
 
 #ifdef __cplusplus
@@ -122,7 +123,7 @@ void radv_device_finish_meta_blit_state(struct radv_device *device);
 VkResult radv_device_init_meta_blit2d_state(struct radv_device *device, bool on_demand);
 void radv_device_finish_meta_blit2d_state(struct radv_device *device);
 
-VkResult radv_device_init_meta_buffer_state(struct radv_device *device);
+VkResult radv_device_init_meta_buffer_state(struct radv_device *device, bool on_demand);
 void radv_device_finish_meta_buffer_state(struct radv_device *device);
 
 VkResult radv_device_init_meta_query_state(struct radv_device *device, bool on_demand);
@@ -154,7 +155,7 @@ void radv_device_finish_meta_etc_decode_state(struct radv_device *device);
 VkResult radv_device_init_meta_astc_decode_state(struct radv_device *device, bool on_demand);
 void radv_device_finish_meta_astc_decode_state(struct radv_device *device);
 
-VkResult radv_device_init_dgc_prepare_state(struct radv_device *device);
+VkResult radv_device_init_dgc_prepare_state(struct radv_device *device, bool on_demand);
 void radv_device_finish_dgc_prepare_state(struct radv_device *device);
 
 void radv_meta_save(struct radv_meta_saved_state *saved_state, struct radv_cmd_buffer *cmd_buffer, uint32_t flags);
@@ -201,7 +202,7 @@ void radv_meta_blit2d(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2
 
 void radv_meta_end_blit2d(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_saved_state *save);
 
-VkResult radv_device_init_meta_bufimage_state(struct radv_device *device);
+VkResult radv_device_init_meta_bufimage_state(struct radv_device *device, bool on_demand);
 void radv_device_finish_meta_bufimage_state(struct radv_device *device);
 void radv_meta_image_to_buffer(struct radv_cmd_buffer *cmd_buffer, struct radv_meta_blit2d_surf *src,
                                struct radv_meta_blit2d_buffer *dst, struct radv_meta_blit2d_rect *rect);
@@ -216,9 +217,6 @@ void radv_meta_clear_image_cs(struct radv_cmd_buffer *cmd_buffer, struct radv_me
 void radv_expand_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                                const VkImageSubresourceRange *subresourceRange,
                                struct radv_sample_locations_state *sample_locs);
-void radv_resummarize_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
-                                    const VkImageSubresourceRange *subresourceRange,
-                                    struct radv_sample_locations_state *sample_locs);
 void radv_fast_clear_flush_image_inplace(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                                          const VkImageSubresourceRange *subresourceRange);
 void radv_decompress_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,

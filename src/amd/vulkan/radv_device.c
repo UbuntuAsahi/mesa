@@ -587,7 +587,7 @@ radv_device_init_rgp(struct radv_device *device)
    if (!(instance->vk.trace_mode & RADV_TRACE_MODE_RGP))
       return VK_SUCCESS;
 
-   if (pdev->info.gfx_level < GFX8 || pdev->info.gfx_level > GFX11) {
+   if (pdev->info.gfx_level < GFX8 || pdev->info.gfx_level > GFX11_5) {
       fprintf(stderr, "GPU hardware not supported: refer to "
                       "the RGP documentation for the list of "
                       "supported GPUs!\n");
@@ -605,7 +605,7 @@ radv_device_init_rgp(struct radv_device *device)
            radv_sqtt_queue_events_enabled() ? "enabled" : "disabled");
 
    if (radv_spm_trace_enabled(instance)) {
-      if (pdev->info.gfx_level >= GFX10) {
+      if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX11_5) {
          if (!radv_spm_init(device))
             return VK_ERROR_INITIALIZATION_FAILED;
       } else {
@@ -875,7 +875,6 @@ radv_device_init_cache_key(struct radv_device *device)
 static void
 radv_create_gfx_preamble(struct radv_device *device)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radeon_cmdbuf *cs = device->ws->cs_create(device->ws, AMD_IP_GFX, false);
    if (!cs)
       return;
@@ -884,12 +883,7 @@ radv_create_gfx_preamble(struct radv_device *device)
 
    radv_emit_graphics(device, cs);
 
-   while (cs->cdw & 7) {
-      if (pdev->info.gfx_ib_pad_with_type2)
-         radeon_emit(cs, PKT2_NOP_PAD);
-      else
-         radeon_emit(cs, PKT3_NOP_PAD);
-   }
+   device->ws->cs_pad(cs, 0);
 
    VkResult result = radv_bo_create(
       device, NULL, cs->cdw * 4, 4096, device->ws->cs_domain(device->ws),
@@ -1133,10 +1127,6 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       device->vk.enabled_extensions.KHR_ray_tracing_pipeline ||
       device->vk.enabled_extensions.KHR_acceleration_structure ||
       device->vk.enabled_extensions.VALVE_descriptor_set_host_mapping;
-
-   device->buffer_robustness = device->vk.enabled_features.robustBufferAccess2  ? RADV_BUFFER_ROBUSTNESS_2
-                               : device->vk.enabled_features.robustBufferAccess ? RADV_BUFFER_ROBUSTNESS_1
-                                                                                : RADV_BUFFER_ROBUSTNESS_DISABLED;
 
    radv_init_shader_arenas(device);
 

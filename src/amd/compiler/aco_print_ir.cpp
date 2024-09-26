@@ -341,7 +341,8 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
       case aco_opcode::s_wait_storecnt:
       case aco_opcode::s_wait_samplecnt:
       case aco_opcode::s_wait_bvhcnt:
-      case aco_opcode::s_wait_kmcnt: {
+      case aco_opcode::s_wait_kmcnt:
+      case aco_opcode::s_setprio: {
          fprintf(output, " imm:%u", imm);
          break;
       }
@@ -371,7 +372,7 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
       }
       case aco_opcode::s_delay_alu: {
          unsigned delay[2] = {imm & 0xfu, (imm >> 7) & 0xfu};
-         unsigned skip = (imm >> 4) & 0x3;
+         unsigned skip = (imm >> 4) & 0x7;
          for (unsigned i = 0; i < 2; i++) {
             if (i == 1 && skip) {
                if (skip == 1)
@@ -531,8 +532,11 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
    }
    case Format::MIMG: {
       const MIMG_instruction& mimg = instr->mimg();
-      unsigned identity_dmask =
-         !instr->definitions.empty() ? (1 << instr->definitions[0].size()) - 1 : 0xf;
+      unsigned identity_dmask = 0xf;
+      if (!instr->definitions.empty()) {
+         unsigned num_channels = instr->definitions[0].bytes() / (mimg.d16 ? 2 : 4);
+         identity_dmask = (1 << num_channels) - 1;
+      }
       if ((mimg.dmask & identity_dmask) != identity_dmask)
          fprintf(output, " dmask:%s%s%s%s", mimg.dmask & 0x1 ? "x" : "",
                  mimg.dmask & 0x2 ? "y" : "", mimg.dmask & 0x4 ? "z" : "",
@@ -600,6 +604,10 @@ print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* ins
          fprintf(output, " BB%d", branch.target[0]);
       if (branch.target[1] != 0)
          fprintf(output, ", BB%d", branch.target[1]);
+      if (branch.rarely_taken)
+         fprintf(output, " rarely_taken");
+      if (branch.never_taken)
+         fprintf(output, " never_taken");
       break;
    }
    case Format::PSEUDO_REDUCTION: {
@@ -1017,7 +1025,9 @@ aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* ou
             fprintf(output, " ");
 
          if (i < 3) {
-            if (neg[i])
+            if (neg[i] && instr->operands[i].isConstant())
+               fprintf(output, "neg(");
+            else if (neg[i])
                fprintf(output, "-");
             if (abs[i])
                fprintf(output, "|");
@@ -1038,6 +1048,8 @@ aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* ou
             if (opsel_lo[i] || !opsel_hi[i])
                fprintf(output, ".%c%c", opsel_lo[i] ? 'y' : 'x', opsel_hi[i] ? 'y' : 'x');
 
+            if (neg[i] && instr->operands[i].isConstant())
+               fprintf(output, ")");
             if (neg_lo[i])
                fprintf(output, "*[-1,1]");
             if (neg_hi[i])
@@ -1058,6 +1070,9 @@ aco_print_program(const Program* program, FILE* output, unsigned flags)
       flags |= print_kill;
       break;
    case CompilationProgress::after_ra: fprintf(output, "After RA:\n"); break;
+   case CompilationProgress::after_lower_to_hw:
+      fprintf(output, "After lowering to hw instructions:\n");
+      break;
    }
 
    print_stage(program->stage, output);

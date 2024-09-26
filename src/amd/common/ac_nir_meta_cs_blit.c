@@ -644,6 +644,7 @@ ac_prepare_compute_blit(const struct ac_cs_blit_options *options,
             /* Verified on Navi31. */
             if (is_resolve) {
                if (!((blit->dst.surf->bpe <= 2 && src_samples == 2) ||
+                     (blit->dst.surf->bpe == 2 && src_samples == 4) ||
                      (blit->dst.surf->bpe == 16 && src_samples == 4)))
                   return false;
             } else {
@@ -653,10 +654,7 @@ ac_prepare_compute_blit(const struct ac_cs_blit_options *options,
                   if (blit->dst.surf->bpe == 2 && blit->src.surf->is_linear && dst_samples == 1)
                      return false;
 
-                  if ((blit->dst.surf->bpe == 4 || blit->dst.surf->bpe == 8) && dst_samples == 1)
-                     return false;
-
-                  if (blit->dst.surf->bpe == 16 && dst_samples == 1 && !blit->src.surf->is_linear)
+                  if (blit->dst.surf->bpe >= 4 && dst_samples == 1 && !blit->src.surf->is_linear)
                      return false;
 
                   if (blit->dst.surf->bpe == 16 && dst_samples == 8)
@@ -679,7 +677,8 @@ ac_prepare_compute_blit(const struct ac_cs_blit_options *options,
     */
    if (blit->dst.surf->bpe <= 8 && (is_resolve ? src_samples : dst_samples) <= 4 &&
        /* Small blits don't benefit. */
-       width * height * depth * blit->dst.surf->bpe * dst_samples > 128 * 1024) {
+       width * height * depth * blit->dst.surf->bpe * dst_samples > 128 * 1024 &&
+       info->has_image_opcodes) {
       if (is_3d_tiling) {
          /* Thick tiling. */
          if (!is_clear && blit->src.surf->is_linear) {

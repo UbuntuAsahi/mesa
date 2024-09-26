@@ -9,6 +9,8 @@
 #include "util/os_time.h"
 #include <string>
 #include <vector>
+#include <mutex>
+#include <cstdlib>
 #include "lp_bld.h"
 #include "lp_bld_debug.h"
 #include "lp_bld_init.h"
@@ -37,6 +39,8 @@
 #include <llvm/ADT/StringMap.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#include <llvm/ExecutionEngine/ObjectCache.h>
 #include "llvm/ExecutionEngine/JITLink/JITLink.h"
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Support/TargetSelect.h>
@@ -54,7 +58,7 @@
 /* conflict with ObjectLinkingLayer.h */
 #include "util/u_memory.h"
 
-#if DETECT_ARCH_RISCV64 == 1 || DETECT_ARCH_RISCV32 == 1 || (defined(_WIN32) && LLVM_VERSION_MAJOR >= 15)
+#if DETECT_ARCH_RISCV64 == 1 || DETECT_ARCH_RISCV32 == 1 || DETECT_ARCH_LOONGARCH64 == 1 || (defined(_WIN32) && LLVM_VERSION_MAJOR >= 15)
 /* use ObjectLinkingLayer (JITLINK backend) */
 #define USE_JITLINK
 #endif
@@ -62,7 +66,44 @@
 
 namespace {
 
+class LPObjectCacheORC : public llvm::ObjectCache {
+private:
+   bool has_object;
+   std::string mid;
+   struct lp_cached_code *cache_out;
+public:
+   LPObjectCacheORC(struct lp_cached_code *cache) {
+      cache_out = cache;
+      has_object = false;
+   }
+
+   ~LPObjectCacheORC() {
+   }
+   void notifyObjectCompiled(const llvm::Module *M, llvm::MemoryBufferRef Obj) override {
+      const std::string ModuleID = M->getModuleIdentifier();
+      if (has_object)
+         fprintf(stderr, "CACHE ALREADY HAS MODULE OBJECT\n");
+      if (mid == ModuleID)
+         fprintf(stderr, "CACHING ANOTHER MODULE\n");
+      has_object = true;
+      mid = ModuleID;
+      cache_out->data_size = Obj.getBufferSize();
+      cache_out->data = malloc(cache_out->data_size);
+      memcpy(cache_out->data, Obj.getBufferStart(), cache_out->data_size);
+   }
+
+   std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module *M) override {
+      const std::string ModuleID = M->getModuleIdentifier();
+      if (cache_out->data_size)
+         return llvm::MemoryBuffer::getMemBuffer(llvm::StringRef((const char *)cache_out->data, cache_out->data_size), "", false);
+      return NULL;
+   }
+
+};
+
 class LPJit;
+
+void lpjit_exit();
 
 class LLVMEnsureMultithreaded {
 public:
@@ -200,7 +241,10 @@ public:
       using llvm::JITEvaluatedSymbol;
       using llvm::orc::ExecutorAddr;
       JITDylib* JD = ::unwrap(jd);
-      auto func = ExitOnErr(LPJit::get_instance()->lljit->lookup(*JD, func_name));
+      LPJit* jit = get_instance();
+      jit->lookup_mutex.lock();
+      auto func = ExitOnErr(jit->lljit->lookup(*JD, func_name));
+      jit->lookup_mutex.unlock();
 #if LLVM_VERSION_MAJOR >= 15
       return func.toPtr<void *>();
 #else
@@ -215,6 +259,12 @@ public:
       ExitOnErr(es.removeJITDylib(* ::unwrap(jd)));
    }
 
+   static void set_object_cache(llvm::ObjectCache *objcache) {
+      auto &ircl = LPJit::get_instance()->lljit->getIRCompileLayer();
+      auto &irc = ircl.getCompiler();
+      auto &sc = dynamic_cast<llvm::orc::SimpleCompiler &>(irc);
+      sc.setObjectCache(objcache);
+   }
    LLVMTargetMachineRef tm;
 
 private:
@@ -223,17 +273,23 @@ private:
    LPJit(const LPJit&) = delete;
    LPJit& operator=(const LPJit&) = delete;
 
+   friend void lpjit_exit();
+
    static void init_native_targets();
    llvm::orc::JITTargetMachineBuilder create_jtdb();
 
    static void init_lpjit() {
       jit = new LPJit;
+      std::atexit(lpjit_exit);
    }
    static LPJit* jit;
 
    std::unique_ptr<llvm::orc::LLJIT> lljit;
+   std::unique_ptr<llvm::TargetMachine> tm_unique;
    /* avoid name conflict */
    unsigned jit_dylib_count;
+
+   std::mutex lookup_mutex;
 
 #if DEBUG
    /* map from module name to gallivm_state */
@@ -242,6 +298,11 @@ private:
 };
 
 LPJit* LPJit::jit = NULL;
+
+void lpjit_exit()
+{
+   delete LPJit::jit;
+}
 
 LLVMErrorRef module_transform(void *Ctx, LLVMModuleRef mod) {
    struct lp_passmgr *mgr;
@@ -269,7 +330,8 @@ LPJit::LPJit() :jit_dylib_count(0) {
 
    init_native_targets();
    JITTargetMachineBuilder JTMB = create_jtdb();
-   tm = wrap(ExitOnErr(JTMB.createTargetMachine()).release());
+   tm_unique = ExitOnErr(JTMB.createTargetMachine());
+   tm = wrap(tm_unique.get());
 
    /* Create an LLJIT instance with an ObjectLinkingLayer (JITLINK)
     * or RuntimeDyld as the base layer.
@@ -360,6 +422,14 @@ llvm::orc::JITTargetMachineBuilder LPJit::create_jtdb() {
    options.MCOptions.ABIName = "ilp32d";
 #else
 #error "GALLIVM: unknown target riscv float abi"
+#endif
+#endif
+
+#if DETECT_ARCH_LOONGARCH64 == 1
+#if defined(__loongarch_lp64) && defined(__loongarch_double_float)
+   options.MCOptions.ABIName = "lp64d";
+#else
+#error "GALLIVM: unknown target loongarch float abi"
 #endif
 #endif
 
@@ -481,10 +551,7 @@ init_gallivm_state(struct gallivm_state *gallivm, const char *name,
    if (!lp_build_init())
       return false;
 
-   // cache is not implemented
    gallivm->cache = cache;
-   if (gallivm->cache)
-      gallivm->cache->data_size = 0;
 
    gallivm->_ts_context = context->ref;
    gallivm->context = LLVMOrcThreadSafeContextGetContext(context->ref);
@@ -543,6 +610,12 @@ gallivm_free_ir(struct gallivm_state *gallivm)
    if (gallivm->builder)
       LLVMDisposeBuilder(gallivm->builder);
 
+   if (gallivm->cache) {
+      if (gallivm->cache->jit_obj_cache)
+         lp_free_objcache(gallivm->cache->jit_obj_cache);
+      free(gallivm->cache->data);
+   }
+
    gallivm->target = NULL;
    gallivm->module=NULL;
    gallivm->module_name=NULL;
@@ -551,6 +624,7 @@ gallivm_free_ir(struct gallivm_state *gallivm)
    gallivm->_ts_context=NULL;
    gallivm->cache=NULL;
    LPJit::deregister_gallivm_state(gallivm);
+   LPJit::set_object_cache(NULL);
 }
 
 void
@@ -580,6 +654,14 @@ gallivm_compile_module(struct gallivm_state *gallivm)
    LPJit::register_gallivm_state(gallivm);
    gallivm->module = nullptr;
 
+   if (gallivm->cache) {
+      if (!gallivm->cache->jit_obj_cache) {
+         LPObjectCacheORC *objcache = new LPObjectCacheORC(gallivm->cache);
+         gallivm->cache->jit_obj_cache = (void *)objcache;
+      }
+      auto *objcache = (LPObjectCacheORC *)gallivm->cache->jit_obj_cache;
+      LPJit::set_object_cache(objcache);
+   }
    /* defer compilation till first lookup by gallivm_jit_function */
 }
 
@@ -589,4 +671,19 @@ gallivm_jit_function(struct gallivm_state *gallivm,
 {
    return pointer_to_func(
       LPJit::lookup_in_jd(func_name, gallivm->_per_module_jd));
+}
+
+void
+gallivm_stub_func(struct gallivm_state *gallivm, LLVMValueRef func)
+{
+   /*
+    * ORCJIT cannot accept a function with absolutely no content at all.
+    * Generate a "void func() {}" stub here.
+    */
+   LLVMBasicBlockRef block = LLVMAppendBasicBlockInContext(gallivm->context,
+                                                           func, "entry");
+   LLVMBuilderRef builder = gallivm->builder;
+   assert(builder);
+   LLVMPositionBuilderAtEnd(builder, block);
+   LLVMBuildRetVoid(builder);
 }

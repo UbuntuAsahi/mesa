@@ -749,13 +749,8 @@ anv_cmd_buffer_alloc_dynamic_state(struct anv_cmd_buffer *cmd_buffer,
 {
    if (size == 0)
       return ANV_STATE_NULL;
-   assert(cmd_buffer->state.current_db_mode !=
-          ANV_CMD_DESCRIPTOR_BUFFER_MODE_UNKNOWN);
    struct anv_state state =
-      anv_state_stream_alloc(cmd_buffer->state.current_db_mode ==
-                             ANV_CMD_DESCRIPTOR_BUFFER_MODE_BUFFER ?
-                             &cmd_buffer->dynamic_state_db_stream :
-                             &cmd_buffer->dynamic_state_stream,
+      anv_state_stream_alloc(&cmd_buffer->dynamic_state_stream,
                              size, alignment);
    if (state.map == NULL)
       anv_batch_set_error(&cmd_buffer->batch, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -884,6 +879,7 @@ anv_cmd_buffer_init_batch_bo_chain(struct anv_cmd_buffer *cmd_buffer)
 
    cmd_buffer->batch.extend_cb = anv_cmd_buffer_chain_batch;
    cmd_buffer->batch.engine_class = cmd_buffer->queue_family->engine_class;
+   cmd_buffer->batch.trace = &cmd_buffer->trace;
 
    anv_batch_bo_start(batch_bo, &cmd_buffer->batch,
                       GFX9_MI_BATCH_BUFFER_START_length * 4);
@@ -1627,7 +1623,7 @@ anv_queue_submit(struct vk_queue *vk_queue,
 
    pthread_mutex_unlock(&device->mutex);
 
-   intel_ds_device_process(&device->ds, true);
+   intel_ds_device_process(&device->ds, false);
 
    return result;
 }

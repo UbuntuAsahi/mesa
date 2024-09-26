@@ -465,7 +465,7 @@ radv_device_init_meta(struct radv_device *device)
    if (result != VK_SUCCESS)
       goto fail_blit2d;
 
-   result = radv_device_init_meta_bufimage_state(device);
+   result = radv_device_init_meta_bufimage_state(device, on_demand);
    if (result != VK_SUCCESS)
       goto fail_bufimage;
 
@@ -473,7 +473,7 @@ radv_device_init_meta(struct radv_device *device)
    if (result != VK_SUCCESS)
       goto fail_depth_decomp;
 
-   result = radv_device_init_meta_buffer_state(device);
+   result = radv_device_init_meta_buffer_state(device, on_demand);
    if (result != VK_SUCCESS)
       goto fail_buffer;
 
@@ -512,7 +512,7 @@ radv_device_init_meta(struct radv_device *device)
       goto fail_astc_decode;
 
    if (radv_uses_device_generated_commands(device)) {
-      result = radv_device_init_dgc_prepare_state(device);
+      result = radv_device_init_dgc_prepare_state(device, on_demand);
       if (result != VK_SUCCESS)
          goto fail_dgc;
    }

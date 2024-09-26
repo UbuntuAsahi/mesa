@@ -41,7 +41,6 @@ rustfmt:
     - shopt -s globstar
     - rustfmt --version
     - rustfmt --verbose src/**/lib.rs
-    - rustfmt --verbose src/**/main.rs
 
 python-test:
   # Cancel job if a newer commit is pushed to the same branch
@@ -70,6 +69,26 @@ python-test:
         - bin/ci/**/*
       when: on_success
     - changes: *bin_ci_files
+      when: manual
+
+toml-lint:
+  extends:
+    - python-test
+    - .no-auto-retry  # this job can't be flaky
+  before_script:
+    - echo "If your change looks right but this script rejects it, contact @eric (GitLab) / eric_engestrom (IRC)."
+    - python3 bin/toml_lint.py
+  rules:
+    - !reference [.disable-farm-mr-rules, rules]
+    - !reference [.never-post-merge-rules, rules]
+    - !reference [.no_scheduled_pipelines-rules, rules]
+    - if: $GITLAB_USER_LOGIN == "marge-bot"
+      changes: &toml_lint_files
+        - .gitlab-ci/test/gitlab-ci.yml
+        - bin/toml_lint.py
+        - src/**/ci/*.toml
+      when: on_success
+    - changes: *toml_lint_files
       when: manual
 
 .test-gl:
@@ -125,7 +144,7 @@ python-test:
 
 .b2c-vkd3d-proton-test:
   variables:
-    HWCI_TEST_SCRIPT: ./install/vkd3d-proton/run.sh
+    HWCI_TEST_SCRIPT: install/vkd3d-runner.sh
 
 .piglit-traces-test:
   artifacts:

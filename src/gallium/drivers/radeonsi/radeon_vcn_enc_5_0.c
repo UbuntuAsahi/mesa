@@ -148,8 +148,6 @@ static void radeon_enc_encode_params_h264(struct radeon_encoder *enc)
 {
    enc->enc_pic.h264_enc_params.input_picture_structure = RENCODE_H264_PICTURE_STRUCTURE_FRAME;
    enc->enc_pic.h264_enc_params.input_pic_order_cnt = 0;
-   enc->enc_pic.h264_enc_params.is_reference = !enc->enc_pic.not_referenced;
-   enc->enc_pic.h264_enc_params.is_long_term = enc->enc_pic.is_ltr;
    enc->enc_pic.h264_enc_params.interlaced_mode = RENCODE_H264_INTERLACING_MODE_PROGRESSIVE;
 
    if (enc->enc_pic.enc_params.reference_picture_index != 0xFFFFFFFF){
@@ -416,9 +414,6 @@ static void radeon_enc_encode_params_av1(struct radeon_encoder *enc)
 
 static void radeon_enc_spec_misc_hevc(struct radeon_encoder *enc)
 {
-   enc->enc_pic.hevc_spec_misc.transform_skip_discarded = 0;
-   enc->enc_pic.hevc_spec_misc.cu_qp_delta_enabled_flag = 0;
-
    RADEON_ENC_BEGIN(enc->cmd.spec_misc_hevc);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.log2_min_luma_coding_block_size_minus3);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.amp_disabled);
@@ -427,7 +422,7 @@ static void radeon_enc_spec_misc_hevc(struct radeon_encoder *enc)
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.cabac_init_flag);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.half_pel_enabled);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.quarter_pel_enabled);
-   RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.transform_skip_discarded);
+   RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.transform_skip_disabled);
    RADEON_ENC_CS(0);
    RADEON_ENC_CS(enc->enc_pic.hevc_spec_misc.cu_qp_delta_enabled_flag);
    RADEON_ENC_END();
@@ -614,9 +609,9 @@ static void radeon_enc_tile_config_av1(struct radeon_encoder *enc)
    num_tile_cols = CLAMP(p_config->num_tile_cols,
                          MAX2(1, min_tile_num_in_width),
                          MIN2(RENCODE_AV1_TILE_CONFIG_MAX_NUM_COLS, max_tile_num_in_width));
-   /* legacy way of spliting tiles, if width is less than or equal to 64 sbs, it cannot be
+   /* legacy way of splitting tiles, if width is less than or equal to 64 sbs, it cannot be
     * split */
-   if (enc->enc_pic.av1_tile_spliting_legacy_flag)
+   if (enc->enc_pic.av1_tile_splitting_legacy_flag)
       num_tile_cols = (frame_width_in_sb <= 64) ? 1 : num_tile_cols;
 
    num_tile_rows = CLAMP(p_config->num_tile_rows,
@@ -773,29 +768,15 @@ static void radeon_enc_av1_quantization_params(struct radeon_encoder *enc)
 static void radeon_enc_av1_frame_header(struct radeon_encoder *enc, bool frame_header)
 {
    uint32_t i;
-   uint32_t extension_flag = enc->enc_pic.num_temporal_layers > 1 ? 1 : 0;
    bool show_existing = false;
    bool frame_is_intra = enc->enc_pic.frame_type == PIPE_AV1_ENC_FRAME_TYPE_KEY ||
                          enc->enc_pic.frame_type == PIPE_AV1_ENC_FRAME_TYPE_INTRA_ONLY;
+   uint32_t obu_type = frame_header ? RENCODE_OBU_TYPE_FRAME_HEADER
+                                    : RENCODE_OBU_TYPE_FRAME;
 
    radeon_enc_av1_bs_instruction_type(enc, RENCODE_AV1_BITSTREAM_INSTRUCTION_COPY, 0);
-   /*  obu_header() */
-   /*  obu_forbidden_bit  */
-   radeon_enc_code_fixed_bits(enc, 0, 1);
-   /*  obu_type  */
-   radeon_enc_code_fixed_bits(enc, frame_header ? RENCODE_OBU_TYPE_FRAME_HEADER
-                                                : RENCODE_OBU_TYPE_FRAME, 4);
-   /*  obu_extension_flag  */
-   radeon_enc_code_fixed_bits(enc, extension_flag, 1);
-   /*  obu_has_size_field  */
-   radeon_enc_code_fixed_bits(enc, 1, 1);
-   /*  obu_reserved_1bit  */
-   radeon_enc_code_fixed_bits(enc, 0, 1);
-   if (extension_flag) {
-      radeon_enc_code_fixed_bits(enc, enc->enc_pic.temporal_id, 3);
-      radeon_enc_code_fixed_bits(enc, 0, 2);
-      radeon_enc_code_fixed_bits(enc, 0, 3);
-   }
+
+   radeon_enc_av1_obu_header(enc, obu_type);
 
    radeon_enc_av1_bs_instruction_type(enc, RENCODE_AV1_BITSTREAM_INSTRUCTION_OBU_SIZE, 0);
 
@@ -991,6 +972,7 @@ static void radeon_enc_obu_instruction(struct radeon_encoder *enc)
     *
     * if (others)
     *    radeon_enc_av1_others(enc); */
+   radeon_enc_av1_metadata_obu(enc);
 
    radeon_enc_av1_bs_instruction_type(enc,
          RENCODE_AV1_BITSTREAM_INSTRUCTION_OBU_START,

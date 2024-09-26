@@ -340,6 +340,8 @@ optimizations = [
    *add_fabs_fneg((('bcsel(nsz,nnan,ninf)', ignore_exact('feq', b, 0.0), 1.0, ('fexp2', ('fmul@32', a, 'mb'))),
     ('fexp2', ('fmulz', a, 'mb')),
     has_fmulz), {'mb': b}),
+   *add_fabs_fneg((('bcsel', ignore_exact('feq', b, 0.0), 1.0, ('fexp2', ('fmulz', a, 'mb'))),
+    ('fexp2', ('fmulz', a, 'mb'))), {'mb': b}),
 ]
 
 # Shorthand for the expansion of just the dot product part of the [iu]dp4a
@@ -1518,6 +1520,8 @@ optimizations.extend([
    # Exponential/logarithmic identities
    (('~fexp2', ('flog2', a)), a), # 2^lg2(a) = a
    (('~flog2', ('fexp2', a)), a), # lg2(2^a) = a
+   # 32-bit fpow should use fmulz to fix https://gitlab.freedesktop.org/mesa/mesa/-/issues/11464 (includes apitrace)
+   (('fpow@32', a, b), ('fexp2', ('fmulz', ('flog2', a), b)), 'options->lower_fpow && ' + has_fmulz), # a^b = 2^(lg2(a)*b)
    (('fpow', a, b), ('fexp2', ('fmul', ('flog2', a), b)), 'options->lower_fpow'), # a^b = 2^(lg2(a)*b)
    (('~fexp2', ('fmul', ('flog2', a), b)), ('fpow', a, b), '!options->lower_fpow'), # 2^(lg2(a)*b) = a^b
    (('~fexp2', ('fadd', ('fmul', ('flog2', a), b), ('fmul', ('flog2', c), d))),
@@ -1793,6 +1797,14 @@ optimizations.extend([
    (('extract_u8', ('iand', a, 0x00ff0000), 2), ('extract_u8', a, 2)),
    (('extract_u8', ('iand', a, 0xff000000), 3), ('extract_u8', a, 3)),
 
+   (('iand', ('extract_u8',  a, 0), '#b'), ('iand', a, ('iand', b, 0x00ff))),
+   (('iand', ('extract_u16', a, 0), '#b'), ('iand', a, ('iand', b, 0xffff))),
+
+   (('ieq', ('iand', ('extract_u8',  a, '#b'), '#c'), 0), ('ieq', ('iand', a, ('ishl', ('iand', c, 0x00ff), ('imul', ('i2i32', b),  8))), 0)),
+   (('ine', ('iand', ('extract_u8',  a, '#b'), '#c'), 0), ('ine', ('iand', a, ('ishl', ('iand', c, 0x00ff), ('imul', ('i2i32', b),  8))), 0)),
+   (('ieq', ('iand', ('extract_u16(is_used_once)', a, '#b'), '#c'), 0), ('ieq', ('iand', a, ('ishl', ('iand', c, 0xffff), ('imul', ('i2i32', b), 16))), 0)),
+   (('ine', ('iand', ('extract_u16(is_used_once)', a, '#b'), '#c'), 0), ('ine', ('iand', a, ('ishl', ('iand', c, 0xffff), ('imul', ('i2i32', b), 16))), 0)),
+
     # Word extraction
    (('ushr', ('ishl', 'a@32', 16), 16), ('extract_u16', a, 0), '!options->lower_extract_word'),
    (('ushr', 'a@32', 16), ('extract_u16', a, 1), '!options->lower_extract_word'),
@@ -1875,6 +1887,20 @@ optimizations.extend([
 
    (('iadd', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
    (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
+
+   (('pack_uint_2x16', ('vec2', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', b, 0))), ('pack_half_2x16_rtz_split', a, b)),
+
+   (('bfi', 0xffff0000, ('pack_half_2x16_split', a, b), ('pack_half_2x16_split', c, d)),
+    ('pack_half_2x16_split', c, a)),
+
+   # The important part here is that ~0xf & 0xfffffffc = ~0xf.
+   (('iand', ('bfi', 0x0000000f, '#a', b), 0xfffffffc),
+    ('bfi', 0x0000000f, ('iand', a, 0xfffffffc), b)),
+   (('iand', ('bfi', 0x00000007, '#a', b), 0xfffffffc),
+    ('bfi', 0x00000007, ('iand', a, 0xfffffffc), b)),
+
+   # 0x0f << 3 == 0x78, so that's already the maximum possible value.
+   (('umin', ('ishl', ('iand', a, 0xf), 3), 0x78), ('ishl', ('iand', a, 0xf), 3)),
 
    (('extract_i8', ('pack_32_4x8_split', a, b, c, d), 0), ('i2i', a)),
    (('extract_i8', ('pack_32_4x8_split', a, b, c, d), 1), ('i2i', b)),
@@ -1977,6 +2003,7 @@ optimizations.extend([
    (('iand', '#a', ('iand', 'b(is_not_const)', '#c')), ('iand', ('iand', a, c), b)),
    (('ior',  '#a', ('ior',  'b(is_not_const)', '#c')), ('ior',  ('ior',  a, c), b)),
    (('ixor', '#a', ('ixor', 'b(is_not_const)', '#c')), ('ixor', ('ixor', a, c), b)),
+   (('ior', ('iand', a, '#c'), ('ior', b, ('iand', a, '#d'))), ('ior', b, ('iand', a, ('ior', c, d)))),
 
    # Reassociate add chains for more MAD/FMA-friendly code
    (('~fadd', ('fadd(is_used_once)', 'a(is_fmul)', 'b(is_fmul)'), 'c(is_not_fmul)'), ('fadd', ('fadd', a, c), b)),
@@ -2026,12 +2053,18 @@ optimizations.extend([
    (('bcsel', ('ine', 'a@32', 0), ('iadd', 31, ('ineg', ('ufind_msb_rev', a))), ('ufind_msb_rev', a)), ('ufind_msb', a), '!options->lower_ufind_msb'),
    (('bcsel', ('ieq', 'a@32', 0), ('ufind_msb_rev', a), ('iadd', 31, ('ineg', ('ufind_msb_rev', a)))), ('ufind_msb', a), '!options->lower_ufind_msb'),
 
+   # Clear the LSB
+   (('iand', a, ('inot', ('ishl', 1, ('find_lsb', a)))), ('iand', a, ('inot', ('ineg', a)))),
+
    # This is safe. Both ufind_msb_rev and bitfield_reverse can only have
    # 32-bit sources, so the transformation can only generate correct NIR.
    (('find_lsb', ('bitfield_reverse', a)), ('ufind_msb_rev', a), 'options->has_find_msb_rev'),
    (('ufind_msb_rev', ('bitfield_reverse', a)), ('find_lsb', a), '!options->lower_find_lsb'),
 
    (('ifind_msb', ('f2i32(is_used_once)', a)), ('ufind_msb', ('f2i32', ('fabs', a)))),
+   (('ifind_msb', ('extract_u8', a, b)),       ('ufind_msb', ('extract_u8', a, b))),
+   (('ifind_msb', ('extract_u16', a, b)),      ('ufind_msb', ('extract_u16', a, b))),
+   (('ifind_msb', ('imax', a, 1)),             ('ufind_msb', ('imax', a, 1))),
 
    (('~fmul', ('bcsel(is_used_once)', c, -1.0, 1.0), b), ('bcsel', c, ('fneg', b), b)),
    (('~fmul', ('bcsel(is_used_once)', c, 1.0, -1.0), b), ('bcsel', c, b, ('fneg', b))),
@@ -2855,7 +2888,7 @@ for op in ['fadd', 'fmul', 'fmulz', 'iadd', 'imul']:
 for op in ['fddx', 'fddx_fine', 'fddx_coarse',
            'fddy', 'fddy_fine', 'fddy_coarse']:
    optimizations += [
-      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->cs.derivative_group == DERIVATIVE_GROUP_NONE')
+      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->derivative_group == DERIVATIVE_GROUP_NONE')
 ]
 
 # Some optimizations for ir3-specific instructions.

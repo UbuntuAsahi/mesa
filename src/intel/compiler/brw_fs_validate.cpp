@@ -21,7 +21,7 @@
  * IN THE SOFTWARE.
  */
 
-/** @file brw_fs_validate.cpp
+/** @file
  *
  * Implements a pass that validates various invariants of the IR.  The current
  * pass only validates that GRF's uses are sane.  More can be added later.
@@ -35,7 +35,7 @@
       if (!(assertion)) {                                               \
          fprintf(stderr, "ASSERT: Scalar %s validation failed!\n",      \
                  _mesa_shader_stage_to_abbrev(s.stage));                \
-         s.dump_instruction(inst, stderr);                              \
+         brw_print_instruction(s, inst, stderr);                        \
          fprintf(stderr, "%s:%d: '%s' failed\n", __FILE__, __LINE__, #assertion);  \
          abort();                                                       \
       }                                                                 \
@@ -48,7 +48,7 @@
       if (a != b) {                                                     \
          fprintf(stderr, "ASSERT: Scalar %s validation failed!\n",      \
                  _mesa_shader_stage_to_abbrev(s.stage));                \
-         s.dump_instruction(inst, stderr);                              \
+         brw_print_instruction(s, inst, stderr);                        \
          fprintf(stderr, "%s:%d: A == B failed\n", __FILE__, __LINE__); \
          fprintf(stderr, "  A = %s = %u\n", #A, a);                     \
          fprintf(stderr, "  B = %s = %u\n", #B, b);                     \
@@ -63,7 +63,7 @@
       if (a == b) {                                                     \
          fprintf(stderr, "ASSERT: Scalar %s validation failed!\n",      \
                  _mesa_shader_stage_to_abbrev(s.stage));                \
-         s.dump_instruction(inst, stderr);                              \
+         brw_print_instruction(s, inst, stderr);                        \
          fprintf(stderr, "%s:%d: A != B failed\n", __FILE__, __LINE__); \
          fprintf(stderr, "  A = %s = %u\n", #A, a);                     \
          fprintf(stderr, "  B = %s = %u\n", #B, b);                     \
@@ -78,7 +78,7 @@
       if (a > b) {                                                      \
          fprintf(stderr, "ASSERT: Scalar %s validation failed!\n",      \
                  _mesa_shader_stage_to_abbrev(s.stage));                \
-         s.dump_instruction(inst, stderr);                              \
+         brw_print_instruction(s, inst, stderr);                        \
          fprintf(stderr, "%s:%d: A <= B failed\n", __FILE__, __LINE__); \
          fprintf(stderr, "  A = %s = %u\n", #A, a);                     \
          fprintf(stderr, "  B = %s = %u\n", #B, b);                     \
@@ -134,7 +134,7 @@ brw_fs_validate(const fs_visitor &s)
 
          if (devinfo->ver >= 10) {
             for (unsigned i = 0; i < 3; i++) {
-               if (inst->src[i].file == BRW_IMMEDIATE_VALUE)
+               if (inst->src[i].file == IMM)
                   continue;
 
                switch (inst->src[i].vstride) {
@@ -166,7 +166,7 @@ brw_fs_validate(const fs_visitor &s)
              * passes (e.g., combine constants) will fix them.
              */
             for (unsigned i = 0; i < 3; i++) {
-               fsv_assert_ne(inst->src[i].file, BRW_IMMEDIATE_VALUE);
+               fsv_assert_ne(inst->src[i].file, IMM);
 
                /* A stride of 1 (the usual case) or 0, with a special
                 * "repctrl" bit, is allowed. The repctrl bit doesn't work for

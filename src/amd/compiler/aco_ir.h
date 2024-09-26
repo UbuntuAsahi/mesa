@@ -31,6 +31,7 @@ extern uint64_t debug_flags;
 enum {
    DEBUG_VALIDATE_IR = 0x1,
    DEBUG_VALIDATE_RA = 0x2,
+   DEBUG_VALIDATE_LIVE_VARS = 0x4,
    DEBUG_FORCE_WAITCNT = 0x8,
    DEBUG_NO_VN = 0x10,
    DEBUG_NO_OPT = 0x20,
@@ -1673,10 +1674,11 @@ struct Pseudo_branch_instruction : public Instruction {
     */
    uint32_t target[2];
 
-   /* Indicates that selection control prefers to remove this instruction if possible.
-    * This is set when the branch is divergent and always taken, or flattened.
-    */
-   bool selection_control_remove;
+   /* Indicates that this rarely or never jumps to target[0]. */
+   bool rarely_taken;
+   bool never_taken;
+
+   uint16_t padding;
 };
 static_assert(sizeof(Pseudo_branch_instruction) == sizeof(Instruction) + 12, "Unexpected padding");
 
@@ -1851,6 +1853,8 @@ enum vmem_type : uint8_t {
  */
 uint8_t get_vmem_type(enum amd_gfx_level gfx_level, Instruction* instr);
 
+unsigned parse_vdst_wait(Instruction* instr);
+
 enum block_kind {
    /* uniform indicates that leaving this block,
     * all actives lanes stay active */
@@ -1889,6 +1893,15 @@ struct Block {
    uint32_t kind = 0;
    int32_t logical_idom = -1;
    int32_t linear_idom = -1;
+
+   /* Preorder and postorder traversal indices of the dominance tree. Because a program can have
+    * several dominance trees (because of block_kind_resume), these start at the block index of the
+    * root node. */
+   uint32_t logical_dom_pre_index = 0;
+   uint32_t logical_dom_post_index = 0;
+   uint32_t linear_dom_pre_index = 0;
+   uint32_t linear_dom_post_index = 0;
+
    uint16_t loop_nest_depth = 0;
    uint16_t divergent_if_logical_depth = 0;
    uint16_t uniform_if_depth = 0;
@@ -2013,6 +2026,7 @@ enum class CompilationProgress {
    after_isel,
    after_spilling,
    after_ra,
+   after_lower_to_hw,
 };
 
 class Program final {
@@ -2035,6 +2049,7 @@ public:
    bool has_pops_overlapped_waves_wait = false;
    bool has_color_exports = false;
    bool is_prolog = false;
+   bool is_epilog = false;
 
    std::vector<uint8_t> constant_data;
    Temp private_segment_buffer;
@@ -2171,7 +2186,9 @@ void schedule_program(Program* program);
 void schedule_ilp(Program* program);
 void schedule_vopd(Program* program);
 void spill(Program* program);
-void insert_wait_states(Program* program);
+void insert_waitcnt(Program* program);
+void insert_delay_alu(Program* program);
+void combine_delay_alu(Program* program);
 bool dealloc_vgprs(Program* program);
 void insert_NOPs(Program* program);
 void form_hard_clauses(Program* program);
@@ -2186,6 +2203,7 @@ bool print_asm(Program* program, std::vector<uint32_t>& binary, unsigned exec_si
 bool validate_ir(Program* program);
 bool validate_cfg(Program* program);
 bool validate_ra(Program* program);
+bool validate_live_vars(Program* program);
 
 void collect_presched_stats(Program* program);
 void collect_preasm_stats(Program* program);
@@ -2221,8 +2239,8 @@ void _aco_err(Program* program, const char* file, unsigned line, const char* fmt
 int get_op_fixed_to_def(Instruction* instr);
 
 /* utilities for dealing with register demand */
-RegisterDemand get_live_changes(aco_ptr<Instruction>& instr);
-RegisterDemand get_temp_registers(aco_ptr<Instruction>& instr);
+RegisterDemand get_live_changes(Instruction* instr);
+RegisterDemand get_temp_registers(Instruction* instr);
 
 /* number of sgprs that need to be allocated but might notbe addressable as s0-s105 */
 uint16_t get_extra_sgprs(Program* program);
@@ -2239,6 +2257,20 @@ uint16_t get_addr_sgpr_from_waves(Program* program, uint16_t max_waves);
 uint16_t get_addr_vgpr_from_waves(Program* program, uint16_t max_waves);
 
 bool uses_scratch(Program* program);
+
+inline bool
+dominates_logical(const Block& parent, const Block& child)
+{
+   return child.logical_dom_pre_index >= parent.logical_dom_pre_index &&
+          child.logical_dom_post_index <= parent.logical_dom_post_index;
+}
+
+inline bool
+dominates_linear(const Block& parent, const Block& child)
+{
+   return child.linear_dom_pre_index >= parent.linear_dom_pre_index &&
+          child.linear_dom_post_index <= parent.linear_dom_post_index;
+}
 
 typedef struct {
    const int16_t opcode_gfx7[static_cast<int>(aco_opcode::num_opcodes)];

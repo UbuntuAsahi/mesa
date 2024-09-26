@@ -17,12 +17,6 @@
 #include "vl/vl_video_buffer.h"
 #include <sys/utsname.h>
 
-#if LLVM_AVAILABLE
-#include <llvm/Config/llvm-config.h> /* for LLVM_VERSION_MAJOR */
-#else
-#define LLVM_VERSION_MAJOR 0
-#endif
-
 /* The capabilities reported by the kernel has priority
    over the existing logic in si_get_video_param */
 #define QUERYABLE_KERNEL   (sscreen->info.is_amdgpu && \
@@ -420,6 +414,15 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       /* Conversion to nanos from cycles per millisecond */
       return DIV_ROUND_UP(1000000, sscreen->info.clock_crystal_freq);
 
+   case PIPE_CAP_SHADER_SUBGROUP_SIZE:
+      return 64;
+   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_STAGES:
+      return BITFIELD_MASK(PIPE_SHADER_TYPES);
+   case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_FEATURES:
+      return BITFIELD_MASK(PIPE_SHADER_SUBGROUP_NUM_FEATURES);
+   case PIPE_CAP_SHADER_SUBGROUP_QUAD_ALL_STAGES:
+      return true;
+
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
    }
@@ -728,8 +731,12 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
             pipe_features.bits.constrained_intra_pred = PIPE_ENC_FEATURE_SUPPORTED;
             pipe_features.bits.deblocking_filter_disable
                                                       = PIPE_ENC_FEATURE_SUPPORTED;
-            if (sscreen->info.vcn_ip_version >= VCN_2_0_0)
+            if (sscreen->info.vcn_ip_version >= VCN_2_0_0) {
                pipe_features.bits.sao = PIPE_ENC_FEATURE_SUPPORTED;
+               pipe_features.bits.cu_qp_delta = PIPE_ENC_FEATURE_SUPPORTED;
+            }
+            if (sscreen->info.vcn_ip_version >= VCN_3_0_0)
+               pipe_features.bits.transform_skip = PIPE_ENC_FEATURE_SUPPORTED;
 
             return pipe_features.value;
          } else
@@ -760,7 +767,7 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
 
       case PIPE_VIDEO_CAP_ENC_SLICES_STRUCTURE:
          if (sscreen->info.vcn_ip_version >= VCN_2_0_0) {
-            int value = (PIPE_VIDEO_CAP_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
+            int value = (PIPE_VIDEO_CAP_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS |
                          PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_ROWS |
                          PIPE_VIDEO_CAP_SLICE_STRUCTURE_EQUAL_MULTI_ROWS);
             return value;
@@ -875,6 +882,17 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          }
          else
             return 0;
+
+      case PIPE_VIDEO_CAP_ENC_RATE_CONTROL_QVBR:
+         if (sscreen->info.vcn_ip_version >= VCN_3_0_0 &&
+             sscreen->info.vcn_ip_version < VCN_4_0_0)
+            return sscreen->info.vcn_enc_minor_version >= 30;
+
+         if (sscreen->info.vcn_ip_version >= VCN_4_0_0 &&
+             sscreen->info.vcn_ip_version < VCN_5_0_0)
+            return sscreen->info.vcn_enc_minor_version >= 15;
+
+         return 0;
 
       default:
          return 0;
@@ -1133,25 +1151,36 @@ static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
       return !is_dcc && !is_format_conversion;
 
    case PIPE_VIDEO_ENTRYPOINT_ENCODE:
+      if (is_dcc)
+         return false;
+
       /* EFC */
       if (is_format_conversion) {
-         if (sscreen->info.family <= CHIP_RENOIR ||
+         const bool input_8bit =
+            target->buffer_format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_B8G8R8X8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R8G8B8X8_UNORM;
+         const bool input_10bit =
+            target->buffer_format == PIPE_FORMAT_B10G10R10A2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_B10G10R10X2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R10G10B10A2_UNORM ||
+            target->buffer_format == PIPE_FORMAT_R10G10B10X2_UNORM;
+
+         if (sscreen->info.vcn_ip_version < VCN_2_0_0 ||
+             sscreen->info.vcn_ip_version >= VCN_5_0_0 ||
              sscreen->debug_flags & DBG(NO_EFC))
             return false;
 
-         /* Input formats */
-         if (target->buffer_format != PIPE_FORMAT_B8G8R8A8_UNORM &&
-             target->buffer_format != PIPE_FORMAT_R8G8B8A8_UNORM &&
-             target->buffer_format != PIPE_FORMAT_B8G8R8X8_UNORM &&
-             target->buffer_format != PIPE_FORMAT_R8G8B8X8_UNORM)
-            return false;
-
-         /* Output formats */
-         if (format != PIPE_FORMAT_NV12)
+         if (input_8bit)
+            return format == PIPE_FORMAT_NV12;
+         else if (input_10bit)
+            return format == PIPE_FORMAT_NV12 || format == PIPE_FORMAT_P010;
+         else
             return false;
       }
 
-      return !is_dcc;
+      return true;
 
    default:
       return !is_format_conversion;
@@ -1622,6 +1651,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       (sscreen->info.family >= CHIP_GFX940 && !sscreen->info.has_graphics) ||
       /* fma32 is too slow for gpu < gfx9, so apply the option only for gpu >= gfx9 */
       (sscreen->info.gfx_level >= GFX9 && sscreen->options.force_use_fma32);
+   bool has_mediump = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16;
 
    nir_shader_compiler_options *options = sscreen->nir_options;
    ac_set_nir_options(&sscreen->info, !sscreen->use_aco, options);
@@ -1648,12 +1678,10 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     * when execution mode is rtz instead of rtne.
     */
    options->force_f2f16_rtz = true;
-   options->io_options = nir_io_has_flexible_input_interpolation_except_flat |
-                         nir_io_prefer_scalar_fs_inputs |
-                         nir_io_glsl_lower_derefs |
-                         (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
-   options->lower_mediump_io = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16 ?
-                                  si_lower_mediump_io : NULL;
+   options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) |
+                          nir_io_glsl_lower_derefs |
+                          (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
+   options->lower_mediump_io = has_mediump ? si_lower_mediump_io : NULL;
    /* HW supports indirect indexing for: | Enabled in driver
     * -------------------------------------------------------
     * TCS inputs                         | Yes
@@ -1669,23 +1697,4 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    options->support_indirect_outputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
    options->varying_expression_max_cost = si_varying_expression_max_cost;
    options->varying_estimate_instr_cost = si_varying_estimate_instr_cost;
-
-   nir_lower_subgroups_options *lower_subgroups_options = sscreen->nir_lower_subgroups_options;
-   lower_subgroups_options->subgroup_size = 64;
-   lower_subgroups_options->ballot_bit_size = 64;
-   lower_subgroups_options->ballot_components = 1;
-   lower_subgroups_options->lower_to_scalar = true;
-   lower_subgroups_options->lower_subgroup_masks = true;
-   lower_subgroups_options->lower_relative_shuffle = true;
-   lower_subgroups_options->lower_rotate_to_shuffle = !sscreen->use_aco;
-   lower_subgroups_options->lower_shuffle_to_32bit = true;
-   lower_subgroups_options->lower_vote_eq = true;
-   lower_subgroups_options->lower_vote_bool_eq = true;
-   lower_subgroups_options->lower_quad_broadcast_dynamic = true;
-   lower_subgroups_options->lower_quad_broadcast_dynamic_to_const = sscreen->info.gfx_level <= GFX7;
-   lower_subgroups_options->lower_shuffle_to_swizzle_amd = true;
-   lower_subgroups_options->lower_ballot_bit_count_to_mbcnt_amd = true;
-   lower_subgroups_options->lower_inverse_ballot = !sscreen->use_aco && LLVM_VERSION_MAJOR < 17;
-   lower_subgroups_options->lower_boolean_reduce = true;
-   lower_subgroups_options->lower_boolean_shuffle = true;
 }
