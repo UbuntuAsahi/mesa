@@ -3042,6 +3042,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, agx_nir_fuse_algebraic_late);
    } while (progress);
+
+   /* Before optimizing bounds checks, we need to clean up and index defs so
+    * optimize_bounds does the right thing.
+    */
    NIR_PASS(_, nir, nir_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
 
