@@ -38,7 +38,6 @@ Build-Depends:
  libxshmfence-dev (>= 1.1),
  libxtensor-dev [linux-arm64],
  libzstd-dev,
- lua5.4 [arm64 armel armhf],
  python3,
  python3-mako,
  python3-ply,
@@ -66,7 +65,7 @@ Build-Depends:
  llvm-spirv-@LLVM_VERSION@ [@RUSTICL_ARCHS@],
  libllvmspirvlib-@LLVM_VERSION@-dev [@LLVM_ARCHS@],
  librust-paste-dev [@NVK_ARCHS@],
- librust-syn-dev [@NVK_ARCHS@],
+ librust-syn-dev (>= 2.0.68) [@NVK_ARCHS@],
 Rules-Requires-Root: no
 Vcs-Git: https://gitlab.freedesktop.org/asahi/mesa.git
 Vcs-Browser: https://gitlab.freedesktop.org/asahi/mesa
@@ -138,6 +137,7 @@ Architecture: linux-any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
+ mesa-libgallium (= ${binary:Version}),
 Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
 Description: generic buffer management API -- runtime
@@ -169,6 +169,7 @@ Depends:
  ${shlibs:Depends},
  ${misc:Depends},
  libgbm1 (= ${binary:Version}) [!hurd-any],
+ mesa-libgallium (= ${binary:Version}),
 Provides: libegl-vendor
 Pre-Depends: ${misc:Pre-Depends}
 Multi-Arch: same
@@ -227,6 +228,7 @@ Depends:
  ${shlibs:Depends},
  ${misc:Depends},
  libgl1-mesa-dri,
+ mesa-libgallium (= ${binary:Version}),
 Provides: libglx-vendor
 Breaks:
  libopengl-perl (<< 0.6704+dfsg-2),
@@ -295,6 +297,19 @@ Description: Developer documentation for Mesa
  This package includes the specifications for the Mesa-specific OpenGL
  extensions, the complete set of release notes and the development header
  files common to all Mesa packages.
+
+Package: mesa-libgallium
+Section: libs
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Pre-Depends: ${misc:Pre-Depends}
+Multi-Arch: same
+Description: shared infrastructure for Mesa drivers
+ This package contains libgallium, a private library shared between
+ multiple Mesa drivers. This library is an implementation detail of Mesa
+ and should not be used directly by user code.
 
 Package: libosmesa6
 Section: libs
