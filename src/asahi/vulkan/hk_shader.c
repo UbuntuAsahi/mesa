@@ -655,6 +655,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             hk_buffer_addr_format(rs->uniform_buffers));
 
+   /* Before inserting bounds checks, we want to do a fair bit of optimization.
+    * lower_load_global_constant_offset_instr has special optimizations for
+    * constant offsets, so we want as many offsets to be constant as possible.
+    */
    bool progress;
    do {
       progress = false;
