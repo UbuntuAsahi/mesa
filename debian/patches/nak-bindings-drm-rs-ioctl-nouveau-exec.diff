@@ -1,0 +1,20 @@
+From: NoisyCoil <noisycoil@tutanota.com>
+Date: Fri, 27 Sep 2024 02:28:05 +0200
+Subject: nak_bindings.h: Explicitly define DRM_RS_IOCTL_NOUVEAU_EXEC
+
+DRM_RS_IOCTL_NOUVEAU_EXEC is not found in the bindings if defined using a
+macro, so we define it explicitly.
+---
+ src/nouveau/compiler/nak_bindings.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/nouveau/compiler/nak_bindings.h b/src/nouveau/compiler/nak_bindings.h
+index 9af1aec..8ff09fe 100644
+--- a/src/nouveau/compiler/nak_bindings.h
++++ b/src/nouveau/compiler/nak_bindings.h
+@@ -15,4 +15,4 @@
+ #define DRM_RS_IOCTL(FOO) \
+    static const unsigned long DRM_RS_IOCTL_##FOO = DRM_IOCTL_##FOO
+ 
+-DRM_RS_IOCTL(NOUVEAU_EXEC);
++static const unsigned long DRM_RS_IOCTL_NOUVEAU_EXEC = DRM_IOCTL_NOUVEAU_EXEC;
