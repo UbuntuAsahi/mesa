@@ -1,3 +1,12 @@
+mesa-asahi (24.3.0~git20240925.04a6592-1~exp1) experimental; urgency=medium
+
+  * New asahi release (asahi-20240925)
+  * Import some packaging changes from tag debian/24.2.3-1
+  * d/rules: delete 'dri3' build option
+  * d/patches: add nak-bindings-drm-rs-ioctl-nouveau-exec.diff
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Fri, 27 Sep 2024 02:32:06 +0200
+
 mesa-asahi (24.2.0~git20240727.6d00b02-2) unstable; urgency=medium
 
   * Release to unstable(-asahi)
