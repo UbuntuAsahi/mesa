@@ -1,3 +1,9 @@
+mesa-asahi (24.3.0~git20240930.6e70429-1) unstable; urgency=medium
+
+  * Release to unstable(-asahi)
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Tue, 01 Oct 2024 19:20:11 +0200
+
 mesa-asahi (24.3.0~git20240930.6e70429-1~exp1) experimental; urgency=medium
 
   * New asahi release (asahi-20240930)
