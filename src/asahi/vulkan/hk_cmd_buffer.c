@@ -294,6 +294,9 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   if (HK_PERF(dev, NOBARRIER))
+      return;
+
    perf_debug(dev, "Pipeline barrier");
 
    /* The big hammer. We end both compute and graphics batches. Ending compute
@@ -745,11 +748,12 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    cs->tib = render->tilebuffer;
 
    /* Assume this is not the first control stream of the render pass, so
-    * initially use the partial background program and ZLS control.
-    * hk_BeginRendering will override.
+    * initially use the partial background/EOT program and ZLS control.
+    * hk_BeginRendering/hk_EndRendering will override.
     */
    cs->cr = render->cr;
    cs->cr.bg.main = render->cr.bg.partial;
+   cs->cr.eot.main = render->cr.eot.partial;
    cs->cr.zls_control = render->cr.zls_control_partial;
 
    /* Barrier to enforce GPU-CPU coherency, in case this batch is back to back

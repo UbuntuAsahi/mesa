@@ -110,9 +110,10 @@ else
 	GALLIUM_DRIVERS += d3d12
   endif
 
-  # Build asahi on i386, amd64 and arm64
+  # Build asahi drivers on i386, amd64 and arm64
   ifneq (,$(filter $(DEB_HOST_ARCH), i386 amd64 arm64))
 	GALLIUM_DRIVERS += asahi
+	VULKAN_DRIVERS += asahi
   endif
 
   # LLVM is required for building r300g, radeonsi and llvmpipe drivers.

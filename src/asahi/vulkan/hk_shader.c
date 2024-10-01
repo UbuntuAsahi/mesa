@@ -31,6 +31,7 @@
 #include "vk_nir_convert_ycbcr.h"
 #include "vk_pipeline.h"
 #include "vk_pipeline_layout.h"
+#include "vk_shader.h"
 #include "vk_shader_module.h"
 #include "vk_ycbcr_conversion.h"
 
@@ -581,6 +582,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              uint32_t set_layout_count,
              struct vk_descriptor_set_layout *const *set_layouts)
 {
+   if (HK_PERF(dev, NOROBUST)) {
+      rs = &vk_robustness_disabled;
+   }
+
    const nir_opt_access_options access_options = {
       .is_vulkan = true,
    };
@@ -642,7 +647,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, true /* support_lod_bias */);
 
-   if (!(dev->dev.debug & AGX_DBG_NOBORDER)) {
+   if (!HK_PERF(dev, NOBORDER)) {
       NIR_PASS(_, nir, agx_nir_lower_custom_border);
    }
 

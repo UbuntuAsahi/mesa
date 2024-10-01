@@ -17,24 +17,6 @@
 #include "shader_enums.h"
 
 /* SSA-based register allocator */
-
-enum ra_class {
-   /* General purpose register */
-   RA_GPR,
-
-   /* Memory, used to assign stack slots */
-   RA_MEM,
-
-   /* Keep last */
-   RA_CLASSES,
-};
-
-static inline enum ra_class
-ra_class_for_index(agx_index idx)
-{
-   return idx.memory ? RA_MEM : RA_GPR;
-}
-
 struct phi_web_node {
    /* Parent index, or circular for root */
    uint32_t parent;
@@ -101,6 +83,7 @@ struct ra_ctx {
    agx_instr *instr;
    uint16_t *ssa_to_reg;
    uint8_t *ncomps;
+   uint8_t *ncomps_unrounded;
    enum agx_size *sizes;
    enum ra_class *classes;
    BITSET_WORD *visited;
@@ -147,7 +130,7 @@ reserved_size(agx_context *ctx)
 }
 
 UNUSED static void
-print_reg_file(struct ra_ctx *rctx)
+print_reg_file(struct ra_ctx *rctx, FILE *fp)
 {
    unsigned reserved = reserved_size(rctx->shader);
 
@@ -156,11 +139,11 @@ print_reg_file(struct ra_ctx *rctx)
       if (BITSET_TEST(rctx->used_regs[RA_GPR], i)) {
          uint32_t ssa = rctx->reg_to_ssa[i];
          unsigned n = rctx->ncomps[ssa];
-         printf("h%u...%u: %u\n", i, i + n - 1, ssa);
+         fprintf(fp, "h%u...%u: %u\n", i, i + n - 1, ssa);
          i += (n - 1);
       }
    }
-   printf("\n");
+   fprintf(fp, "\n");
 
    /* Dump a visualization of the sizes to understand what live range
     * splitting is up against.
@@ -168,25 +151,25 @@ print_reg_file(struct ra_ctx *rctx)
    for (unsigned i = 0; i < rctx->bound[RA_GPR]; ++i) {
       /* Space out 16-bit vec4s */
       if (i && (i % 4) == 0) {
-         printf(" ");
+         fprintf(fp, " ");
       }
 
       if (i < reserved) {
-         printf("-");
+         fprintf(fp, "-");
       } else if (BITSET_TEST(rctx->used_regs[RA_GPR], i)) {
          uint32_t ssa = rctx->reg_to_ssa[i];
          unsigned n = rctx->ncomps[ssa];
          for (unsigned j = 0; j < n; ++j) {
             assert(n < 10);
-            printf("%u", n);
+            fprintf(fp, "%u", n);
          }
 
          i += (n - 1);
       } else {
-         printf(".");
+         fprintf(fp, ".");
       }
    }
-   printf("\n\n");
+   fprintf(fp, "\n\n");
 }
 
 enum agx_size
@@ -371,8 +354,11 @@ find_best_region_to_evict(struct ra_ctx *rctx, enum ra_class cls, unsigned size,
           "register file size must be aligned to the maximum vector size");
    assert(cls == RA_GPR);
 
+   /* Useful for testing RA */
+   bool invert = false;
+
    unsigned best_base = ~0;
-   unsigned best_moves = ~0;
+   unsigned best_moves = invert ? 0 : ~0;
 
    for (unsigned base = 0; base + size <= rctx->bound[cls]; base += size) {
       /* The first k registers are preallocated and unevictable, so must be
@@ -424,7 +410,7 @@ find_best_region_to_evict(struct ra_ctx *rctx, enum ra_class cls, unsigned size,
        * (due to killed sources), since the recursive splitting algorithm
        * requires at least one free register.
        */
-      if (any_free && moves < best_moves) {
+      if (any_free && ((moves < best_moves) ^ invert)) {
          best_moves = moves;
          best_base = base;
       }
@@ -442,6 +428,33 @@ set_ssa_to_reg(struct ra_ctx *rctx, unsigned ssa, unsigned reg)
    *(rctx->count[cls]) = MAX2(*(rctx->count[cls]), reg + rctx->ncomps[ssa]);
 
    rctx->ssa_to_reg[ssa] = reg;
+
+   if (cls == RA_GPR) {
+      rctx->reg_to_ssa[reg] = ssa;
+   }
+}
+
+/*
+ * Insert parallel copies to move an SSA variable `var` to a new register
+ * `new_reg`. This may require scalarizing.
+ */
+static void
+insert_copy(struct ra_ctx *rctx, struct util_dynarray *copies, unsigned new_reg,
+            unsigned var)
+{
+   enum agx_size size = rctx->sizes[var];
+   unsigned align = agx_size_align_16(size);
+
+   for (unsigned i = 0; i < rctx->ncomps[var]; i += align) {
+      struct agx_copy copy = {
+         .dest = new_reg + i,
+         .src = agx_register(rctx->ssa_to_reg[var] + i, size),
+      };
+
+      assert((copy.dest % align) == 0 && "new dest must be aligned");
+      assert((copy.src.value % align) == 0 && "src must be aligned");
+      util_dynarray_append(copies, struct agx_copy, copy);
+   }
 }
 
 static unsigned
@@ -474,9 +487,6 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
 
       /* Pop it from the work list by swapping in the last element */
       blocked_vars[chosen_idx] = blocked_vars[--nr_blocked];
-
-      enum agx_size size = rctx->sizes[ssa];
-      unsigned align = agx_size_align_16(size);
 
       /* We need to shuffle some variables to make room. Look for a range of
        * the register file that is partially blocked.
@@ -520,18 +530,7 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
        * variable. For those, copy the blocked variable to its new register.
        */
       if (ssa != dest.value) {
-         unsigned old_reg = rctx->ssa_to_reg[ssa];
-
-         for (unsigned i = 0; i < nr; i += align) {
-            struct agx_copy copy = {
-               .dest = new_reg + i,
-               .src = agx_register(old_reg + i, size),
-            };
-
-            assert((copy.dest % align) == 0 && "new dest must be aligned");
-            assert((copy.src.value % align) == 0 && "src must be aligned");
-            util_dynarray_append(copies, struct agx_copy, copy);
-         }
+         insert_copy(rctx, copies, new_reg, ssa);
       }
 
       /* Mark down the set of clobbered registers, so that killed sources may be
@@ -541,7 +540,6 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
 
       /* Update bookkeeping for this variable */
       set_ssa_to_reg(rctx, ssa, new_reg);
-      rctx->reg_to_ssa[new_reg] = ssa;
    }
 
    return rctx->ssa_to_reg[dest.value];
@@ -579,12 +577,8 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
    unsigned vars[16] = {0};
    unsigned nr_vars = 0;
 
-   /* Precondition: the nesting counter is not overwritten. Therefore we do not
-    * have to move it.  find_best_region_to_evict knows better than to try.
-    */
-   assert(!(reg == 0 && rctx->shader->any_cf) && "r0l is never moved");
-   assert(!(reg == 1 && rctx->shader->any_quad_divergent_shuffle) &&
-          "r0h is never moved");
+   /* Precondition: the reserved region is not shuffled. */
+   assert(reg >= reserved_size(rctx->shader) && "reserved is never moved");
 
    /* Consider the destination clobbered for the purpose of source collection.
     * This way, killed sources already in the destination will be preserved
@@ -595,9 +589,10 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
    /* Collect killed clobbered sources, if any */
    agx_foreach_ssa_src(I, s) {
       unsigned reg = rctx->ssa_to_reg[I->src[s].value];
+      unsigned nr = rctx->ncomps[I->src[s].value];
 
       if (I->src[s].kill && ra_class_for_index(I->src[s]) == RA_GPR &&
-          BITSET_TEST(clobbered, reg)) {
+          BITSET_TEST_RANGE(clobbered, reg, reg + nr - 1)) {
 
          assert(nr_vars < ARRAY_SIZE(vars) &&
                 "cannot clobber more than max variable size");
@@ -628,7 +623,6 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
 
    for (unsigned i = 0; i < nr_vars; ++i) {
       unsigned var = vars[i];
-      unsigned var_base = rctx->ssa_to_reg[var];
       unsigned var_count = rctx->ncomps[var];
       unsigned var_align = agx_size_align_16(rctx->sizes[var]);
 
@@ -636,18 +630,8 @@ insert_copies_for_clobbered_killed(struct ra_ctx *rctx, unsigned reg,
       assert((base % var_align) == 0 && "induction");
       assert((var_count % var_align) == 0 && "no partial variables");
 
-      for (unsigned j = 0; j < var_count; j += var_align) {
-         struct agx_copy copy = {
-            .dest = base + j,
-            .src = agx_register(var_base + j, rctx->sizes[var]),
-         };
-
-         util_dynarray_append(copies, struct agx_copy, copy);
-      }
-
+      insert_copy(rctx, copies, base, var);
       set_ssa_to_reg(rctx, var, base);
-      rctx->reg_to_ssa[base] = var;
-
       base += var_count;
    }
 
@@ -680,8 +664,10 @@ agx_emit_move_before_phi(agx_context *ctx, agx_block *block,
 
    /* Look for the phi writing the destination */
    agx_foreach_phi_in_block(block, phi) {
-      if (agx_is_equiv(phi->dest[0], copy->src) && !phi->dest[0].memory) {
-         phi->dest[0].value = copy->dest;
+      if (agx_is_equiv(agx_as_register(phi->dest[0]), copy->src) &&
+          !phi->dest[0].memory) {
+
+         phi->dest[0].reg = copy->dest;
          return;
       }
    }
@@ -691,6 +677,7 @@ agx_emit_move_before_phi(agx_context *ctx, agx_block *block,
 
    agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
                                agx_num_predecessors(block));
+   assert(!copy->src.kill);
 
    agx_foreach_src(phi, s) {
       phi->src[s] = copy->src;
@@ -797,6 +784,12 @@ reserve_live_in(struct ra_ctx *rctx)
 
       unsigned base;
       enum ra_class cls = rctx->classes[i];
+      enum agx_size size = rctx->sizes[i];
+
+      /* We need to use the unrounded channel count, since the extra padding
+       * will be uninitialized and would fail RA validation.
+       */
+      unsigned channels = rctx->ncomps_unrounded[i] / agx_size_align_16(size);
 
       /* If we split live ranges, the variable might be defined differently at
        * the end of each predecessor. Join them together with a phi inserted at
@@ -805,10 +798,12 @@ reserve_live_in(struct ra_ctx *rctx)
       if (nr_preds > 1) {
          /* We'll fill in the destination after, to coalesce one of the moves */
          agx_instr *phi = agx_phi_to(&b, agx_null(), nr_preds);
-         enum agx_size size = rctx->sizes[i];
 
          agx_foreach_predecessor(rctx->block, pred) {
             unsigned pred_idx = agx_predecessor_index(rctx->block, *pred);
+
+            phi->src[pred_idx] = agx_get_vec_index(i, size, channels);
+            phi->src[pred_idx].memory = cls == RA_MEM;
 
             if ((*pred)->reg_to_ssa_out[cls] == NULL) {
                /* If this is a loop header, we don't know where the register
@@ -817,14 +812,11 @@ reserve_live_in(struct ra_ctx *rctx)
                 * we'll need to fill in the real register later.
                 */
                assert(rctx->block->loop_header);
-               phi->src[pred_idx] = agx_get_index(i, size);
-               phi->src[pred_idx].memory = rctx->classes[i] == RA_MEM;
             } else {
                /* Otherwise, we can build the phi now */
-               unsigned reg = search_ssa_to_reg_out(rctx, *pred, cls, i);
-               phi->src[pred_idx] = cls == RA_MEM
-                                       ? agx_memory_register(reg, size)
-                                       : agx_register(reg, size);
+               phi->src[pred_idx].reg =
+                  search_ssa_to_reg_out(rctx, *pred, cls, i);
+               phi->src[pred_idx].has_reg = true;
             }
          }
 
@@ -833,8 +825,9 @@ reserve_live_in(struct ra_ctx *rctx)
           * particular predecessor. That means that such a register allocation
           * is valid here, because it was valid in the predecessor.
           */
+         assert(phi->src[0].has_reg && "not loop source");
          phi->dest[0] = phi->src[0];
-         base = phi->dest[0].value;
+         base = phi->dest[0].reg;
       } else {
          /* If we don't emit a phi, there is already a unique register */
          assert(nr_preds == 1);
@@ -848,9 +841,6 @@ reserve_live_in(struct ra_ctx *rctx)
 
       for (unsigned j = 0; j < rctx->ncomps[i]; ++j) {
          BITSET_SET(rctx->used_regs[cls], base + j);
-
-         if (cls == RA_GPR)
-            rctx->reg_to_ssa[base + j] = i;
       }
    }
 }
@@ -873,9 +863,6 @@ assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
           "no interference");
    BITSET_SET_RANGE(rctx->used_regs[cls], reg, end);
 
-   if (cls == RA_GPR)
-      rctx->reg_to_ssa[reg] = v.value;
-
    /* Phi webs need to remember which register they're assigned to */
    struct phi_web_node *node =
       &rctx->phi_web[phi_web_find(rctx->phi_web, v.value)];
@@ -894,8 +881,8 @@ agx_set_sources(struct ra_ctx *rctx, agx_instr *I)
    agx_foreach_ssa_src(I, s) {
       assert(BITSET_TEST(rctx->visited, I->src[s].value) && "no phis");
 
-      unsigned v = rctx->ssa_to_reg[I->src[s].value];
-      agx_replace_src(I, s, agx_register_like(v, I->src[s]));
+      I->src[s].reg = rctx->ssa_to_reg[I->src[s].value];
+      I->src[s].has_reg = true;
    }
 }
 
@@ -903,9 +890,8 @@ static void
 agx_set_dests(struct ra_ctx *rctx, agx_instr *I)
 {
    agx_foreach_ssa_dest(I, s) {
-      unsigned v = rctx->ssa_to_reg[I->dest[s].value];
-      I->dest[s] =
-         agx_replace_index(I->dest[s], agx_register_like(v, I->dest[s]));
+      I->dest[s].reg = rctx->ssa_to_reg[I->dest[s].value];
+      I->dest[s].has_reg = true;
    }
 }
 
@@ -1109,8 +1095,8 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
       }
 
       /* If we're in a loop, we may have already allocated the phi. Try that. */
-      if (phi->dest[0].type == AGX_INDEX_REGISTER) {
-         unsigned base = phi->dest[0].value;
+      if (phi->dest[0].has_reg) {
+         unsigned base = phi->dest[0].reg;
 
          if (base + count <= rctx->bound[cls] &&
              !BITSET_TEST_RANGE(rctx->used_regs[cls], base, base + count - 1))
@@ -1227,6 +1213,9 @@ agx_ra_assign_local(struct ra_ctx *rctx)
        * because of the SSA form.
        */
       agx_foreach_ssa_dest(I, d) {
+         if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
+            continue;
+
          assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
       }
 
@@ -1258,13 +1247,12 @@ agx_ra_assign_local(struct ra_ctx *rctx)
       unsigned pred_idx = agx_predecessor_index(succ, block);
 
       agx_foreach_phi_in_block(succ, phi) {
-         if (phi->src[pred_idx].type == AGX_INDEX_NORMAL) {
+         if (phi->src[pred_idx].type == AGX_INDEX_NORMAL &&
+             !phi->src[pred_idx].has_reg) {
             /* This source needs a fixup */
             unsigned value = phi->src[pred_idx].value;
-
-            agx_replace_src(
-               phi, pred_idx,
-               agx_register_like(rctx->ssa_to_reg[value], phi->src[pred_idx]));
+            phi->src[pred_idx].reg = rctx->ssa_to_reg[value];
+            phi->src[pred_idx].has_reg = true;
          }
       }
    }
@@ -1482,6 +1470,7 @@ agx_ra(agx_context *ctx)
    }
 
    uint8_t *ncomps = calloc(ctx->alloc, sizeof(uint8_t));
+   uint8_t *ncomps_unrounded = calloc(ctx->alloc, sizeof(uint8_t));
    enum ra_class *classes = calloc(ctx->alloc, sizeof(enum ra_class));
    agx_instr **src_to_collect_phi = calloc(ctx->alloc, sizeof(agx_instr *));
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
@@ -1501,7 +1490,8 @@ agx_ra(agx_context *ctx)
          unsigned v = I->dest[d].value;
          assert(ncomps[v] == 0 && "broken SSA");
          /* Round up vectors for easier live range splitting */
-         ncomps[v] = util_next_power_of_two(agx_index_size_16(I->dest[d]));
+         ncomps_unrounded[v] = agx_index_size_16(I->dest[d]);
+         ncomps[v] = util_next_power_of_two(ncomps_unrounded[v]);
          sizes[v] = I->dest[d].size;
          classes[v] = ra_class_for_index(I->dest[d]);
 
@@ -1552,6 +1542,7 @@ agx_ra(agx_context *ctx)
          .src_to_collect_phi = src_to_collect_phi,
          .phi_web = phi_web,
          .ncomps = ncomps,
+         .ncomps_unrounded = ncomps_unrounded,
          .sizes = sizes,
          .classes = classes,
          .visited = visited,
@@ -1576,7 +1567,20 @@ agx_ra(agx_context *ctx)
 
    assert(ctx->max_reg <= max_regs);
 
+   /* Validate RA after assigning registers just before lowering SSA */
+   agx_validate_ra(ctx);
+
    agx_foreach_instr_global_safe(ctx, ins) {
+      /* Lower away SSA */
+      agx_foreach_ssa_dest(ins, d) {
+         ins->dest[d] =
+            agx_replace_index(ins->dest[d], agx_as_register(ins->dest[d]));
+      }
+
+      agx_foreach_ssa_src(ins, s) {
+         agx_replace_src(ins, s, agx_as_register(ins->src[s]));
+      }
+
       /* Lower away RA pseudo-instructions */
       agx_builder b = agx_init_builder(ctx, agx_after_instr(ins));
 
@@ -1688,6 +1692,7 @@ agx_ra(agx_context *ctx)
    free(phi_web);
    free(src_to_collect_phi);
    free(ncomps);
+   free(ncomps_unrounded);
    free(sizes);
    free(classes);
    free(visited);
