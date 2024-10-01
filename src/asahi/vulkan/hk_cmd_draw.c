@@ -83,6 +83,37 @@ struct hk_draw {
    enum agx_index_size index_size;
 };
 
+UNUSED static inline void
+print_draw(struct hk_draw d, FILE *fp)
+{
+   if (d.b.indirect)
+      fprintf(fp, "indirect (buffer %" PRIx64 "):", d.b.ptr);
+   else
+      fprintf(fp, "direct (%ux%u):", d.b.count[0], d.b.count[1]);
+
+   if (d.index_size)
+      fprintf(fp, " index_size=%u", agx_index_size_to_B(d.index_size));
+   else
+      fprintf(fp, " non-indexed");
+
+   if (d.raw)
+      fprintf(fp, " raw");
+
+   if (d.restart)
+      fprintf(fp, " restart");
+
+   if (d.index_bias)
+      fprintf(fp, " index_bias=%u", d.index_bias);
+
+   if (d.start)
+      fprintf(fp, " start=%u", d.start);
+
+   if (d.start_instance)
+      fprintf(fp, " start_instance=%u", d.start_instance);
+
+   fprintf(fp, "\n");
+}
+
 static struct hk_draw
 hk_draw_indirect(uint64_t ptr)
 {
@@ -297,12 +328,12 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          continue;
 
       if (store) {
-         bool store = is_attachment_stored(att_info);
+         bool should_store = is_attachment_stored(att_info);
 
          /* Partial renders always need to flush to memory. */
-         store |= partial_render;
+         should_store |= partial_render;
 
-         if (store)
+         if (should_store)
             key.op[i] = AGX_EOT_STORE;
       } else {
          bool load = att_info->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -483,9 +514,14 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
 {
    agx_pack(packed, ZLS_CONTROL, zls_control) {
       if (z_layout) {
+         /* XXX: Dropping Z stores is wrong if the render pass gets split into
+          * multiple control streams (can that ever happen?) We need more ZLS
+          * variants. Force || true for now.
+          */
          zls_control.z_store_enable =
             attach_z->storeOp == VK_ATTACHMENT_STORE_OP_STORE ||
-            attach_z->resolveMode != VK_RESOLVE_MODE_NONE || partial_render;
+            attach_z->resolveMode != VK_RESOLVE_MODE_NONE || partial_render ||
+            true;
 
          zls_control.z_load_enable =
             attach_z->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD || partial_render ||
@@ -612,7 +648,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->cr.eot.main =
       hk_build_bg_eot(cmd, pRenderingInfo, true, false, incomplete_render_area);
-   render->cr.eot.partial = render->cr.eot.main;
+   render->cr.eot.partial =
+      hk_build_bg_eot(cmd, pRenderingInfo, true, true, incomplete_render_area);
 
    render->cr.isp_bgobjvals = 0x300;
 
@@ -891,6 +928,14 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_rendering_state *render = &cmd->state.gfx.render;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* The last control stream of the render pass is special since it gets its
+    * stores dropped. Swap it in.
+    */
+   struct hk_cs *cs = cmd->current_cs.gfx;
+   if (cs) {
+      cs->cr.eot.main = render->cr.eot.main;
+   }
 
    perf_debug(dev, "End rendering");
    hk_cmd_buffer_end_graphics(cmd);
@@ -3382,6 +3427,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       cmd, VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT);
 
    bool ia_stats = stat_ia_verts || stat_vs_inv;
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    hk_foreach_view(cmd) {
       struct hk_draw draw = draw_;
@@ -3392,13 +3438,16 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       if (!cs)
          return;
 
-      cs->stats.calls++;
-
       bool geom = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY];
       bool tess = cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
       struct hk_cs *ccs = NULL;
       uint8_t *out = cs->current;
       assert(cs->current + 0x1000 < cs->end);
+
+      if (tess && HK_PERF(dev, NOTESS))
+         continue;
+
+      cs->stats.calls++;
 
       if (geom || tess || ia_stats) {
          ccs =
@@ -3412,11 +3461,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct hk_draw draw_)
       }
 
       if (tess) {
-         struct hk_device *dev = hk_cmd_buffer_device(cmd);
-         if (unlikely(dev->dev.debug & AGX_DBG_NOTESS)) {
-            continue;
-         }
-
          draw = hk_launch_tess(cmd, ccs, draw);
 
          if (draw.raw) {
