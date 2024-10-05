@@ -1072,10 +1072,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        drm_device->bustype != DRM_BUS_PLATFORM)
       return VK_ERROR_INCOMPATIBLE_DRIVER;
 
-   /* We're not ready to ship Honeykrisp just yet. */
-   if (!getenv("HK_I_LIKE_ROTTEN_APPLES"))
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
-
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    int fd = open(path, O_RDWR | O_CLOEXEC);
    if (fd < 0) {
