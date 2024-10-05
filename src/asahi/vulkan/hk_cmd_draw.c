@@ -189,6 +189,9 @@ hk_cmd_buffer_dirty_render_pass(struct hk_cmd_buffer *cmd)
 
    /* This may depend on render targets for ESO */
    BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
+
+   /* This may depend on render targets */
+   BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP);
 }
 
 void
@@ -224,6 +227,18 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
          render->depth_att.vk_format = inheritance_info->depthAttachmentFormat;
          render->stencil_att.vk_format =
             inheritance_info->stencilAttachmentFormat;
+
+         const VkRenderingAttachmentLocationInfoKHR att_loc_info_default = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+            .colorAttachmentCount = inheritance_info->colorAttachmentCount,
+         };
+         const VkRenderingAttachmentLocationInfoKHR *att_loc_info =
+            vk_get_command_buffer_rendering_attachment_location_info(
+               cmd->vk.level, pBeginInfo);
+         if (att_loc_info == NULL)
+            att_loc_info = &att_loc_info_default;
+
+         vk_cmd_set_rendering_attachment_locations(&cmd->vk, att_loc_info);
 
          hk_cmd_buffer_dirty_render_pass(cmd);
       }
@@ -351,6 +366,38 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
          /* Don't read back spilled render targets, they're already in memory */
          load &= !key.tib.spilled[i];
+
+         /* This is a very frustrating corner case. From the spec:
+          *
+          *     VK_ATTACHMENT_STORE_OP_NONE specifies the contents within the
+          *     render area are not accessed by the store operation as long as
+          *     no values are written to the attachment during the render pass.
+          *
+          * With VK_ATTACHMENT_STORE_OP_NONE, we suppress stores on the main
+          * end-of-tile program. Unfortunately, that's not enough: we also need
+          * to preserve the contents throughout partial renders. The easiest way
+          * to do that is forcing a load in the background program, so that
+          * partial stores for unused attachments will be no-op'd by writing
+          * existing contents.
+          *
+          * Optimizing this would require nontrivial tracking. Fortunately,
+          * this is all Android gunk and we don't have to care too much for
+          * dekstop games. So do the simple thing.
+          *
+          * VK_ATTACHMENT_STORE_OP_DONT_CARE does not need this workaround,
+          * fortunately. It's just here as a temporary stopgap to workaround CTS
+          * issue #5369.
+          */
+         bool no_store =
+            (att_info->storeOp == VK_ATTACHMENT_STORE_OP_NONE) ||
+            (att_info->storeOp == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+
+         bool no_store_wa = no_store && !load && !clear;
+         if (no_store_wa) {
+            perf_debug(dev, "STORE_OP_NONE workaround");
+         }
+
+         load |= no_store_wa;
 
          /* Don't apply clears for spilled render targets when we clear the
           * render area explicitly after.
@@ -619,6 +666,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
     */
    render->tilebuffer = agx_build_tilebuffer_layout(
       formats, render->color_att_count, render->tilebuffer.nr_samples, true);
+
+   const VkRenderingAttachmentLocationInfoKHR ral_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+      .colorAttachmentCount = pRenderingInfo->colorAttachmentCount,
+   };
+   vk_cmd_set_rendering_attachment_locations(&cmd->vk, &ral_info);
 
    hk_cmd_buffer_dirty_render_pass(cmd);
 
@@ -1000,6 +1053,9 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    memset(render, 0, sizeof(*render));
 
    if (need_resolve) {
+      perf_debug(dev, "Resolving render pass, colour store op %u",
+                 vk_color_att[0].storeOp);
+
       hk_meta_resolve_rendering(cmd, &vk_render);
    }
 }
@@ -2670,7 +2726,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             (dev->vk.enabled_features.robustBufferAccess2 ||
              dev->vk.enabled_features.pipelineRobustness)
                ? AGX_ROBUSTNESS_D3D
-               : AGX_ROBUSTNESS_GL,
+            : dev->vk.enabled_features.robustBufferAccess
+               ? AGX_ROBUSTNESS_GL
+               : AGX_ROBUSTNESS_DISABLED,
 
          .prolog.robustness.soft_fault = agx_has_soft_fault(&dev->dev),
       };
@@ -2808,6 +2866,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                      ? vk_logic_op_to_pipe(dyn->cb.logic_op)
                                      : PIPE_LOGICOP_COPY,
          };
+
+         for (unsigned rt = 0; rt < ARRAY_SIZE(dyn->cal.color_map); ++rt) {
+            int map = dyn->cal.color_map[rt];
+            key.epilog.remap[rt] = map == MESA_VK_ATTACHMENT_UNUSED ? -1 : map;
+         }
 
          if (dyn->ms.alpha_to_one_enable || dyn->ms.alpha_to_coverage_enable ||
              dyn->cb.logic_op_enable) {

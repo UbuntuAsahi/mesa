@@ -64,8 +64,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_draw_indirect_count = true,
       .KHR_driver_properties = true,
       .KHR_dynamic_rendering = true,
-      // TODO
-      .KHR_dynamic_rendering_local_read = false,
+      .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = true,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
@@ -729,9 +728,8 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* Vulkan 1.1 properties */
       .subgroupSize = 32,
-      .subgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT |
-                                 VK_SHADER_STAGE_FRAGMENT_BIT |
-                                 VK_SHADER_STAGE_VERTEX_BIT,
+      .subgroupSupportedStages =
+         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_ALL_GRAPHICS,
       .subgroupSupportedOperations =
          VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
          VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT |
@@ -856,7 +854,7 @@ hk_get_device_properties(const struct agx_device *dev,
       /* VK_KHR_maintenance6 */
       .blockTexelViewCompatibleMultipleLayers = false,
       .maxCombinedImageSamplerDescriptorCount = 3,
-      .fragmentShadingRateClampCombinerInputs = false, /* TODO */
+      .fragmentShadingRateClampCombinerInputs = false,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
@@ -1010,7 +1008,10 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
 #ifdef ENABLE_SHADER_CACHE
    char renderer[10];
-   ASSERTED int len = snprintf(renderer, sizeof(renderer), "hk_g13g_");
+   ASSERTED int len =
+      snprintf(renderer, sizeof(renderer), "HK_G%u%c_",
+               pdev->dev.params.gpu_generation, pdev->dev.params.gpu_variant);
+
    assert(len == sizeof(renderer) - 2);
 
    char timestamp[41];
@@ -1071,10 +1072,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
        drm_device->bustype != DRM_BUS_PLATFORM)
       return VK_ERROR_INCOMPATIBLE_DRIVER;
 
-   /* We're not ready to ship Honeykrisp just yet. */
-   if (!getenv("HK_I_LIKE_ROTTEN_APPLES"))
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
-
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    int fd = open(path, O_RDWR | O_CLOEXEC);
    if (fd < 0) {
@@ -1095,9 +1092,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    drmFreeVersion(version);
 
    if (!is_asahi) {
-      result =
-         vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                   "device %s does not use the asahi kernel driver", path);
+      /* Fail silently */
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_fd;
    }
 
@@ -1119,33 +1115,14 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_fd;
    }
 
-   /* TODO: we're render-only, should we be reporting displays anyway in
-    * KHR_display?
-    */
+   /* We're render-only */
    pdev->master_fd = -1;
-
-#if 0
-   if (instance->vk.enabled_extensions.KHR_display) {
-      int master_fd =
-         open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
-
-      if (master_fd >= 0) {
-         struct stat st;
-         if (!stat(drm_device->nodes[DRM_NODE_PRIMARY], &st)) {
-            pdev->master_fd = master_fd;
-            properties.drmHasPrimary = true;
-            properties.drmPrimaryMajor = major(st.st_rdev);
-            properties.drmPrimaryMinor = minor(st.st_rdev);
-         }
-      }
-   }
-#endif
-
    pdev->render_dev = render_dev;
    pdev->dev.fd = fd;
 
    if (!agx_open_device(NULL, &pdev->dev)) {
-      result = vk_error(instance, VK_ERROR_UNKNOWN);
+      /* Fail silently, for virtgpu */
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_pdev_alloc;
    }
 

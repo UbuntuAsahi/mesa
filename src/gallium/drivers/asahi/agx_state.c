@@ -2204,8 +2204,9 @@ agx_update_vs(struct agx_context *ctx, unsigned index_size_B)
       .prolog.vs.hw = key.hw,
       .prolog.vs.sw_index_size_B = key.hw ? 0 : index_size_B,
 
-      /* TODO: We could optimize this */
-      .prolog.vs.robustness.level = AGX_ROBUSTNESS_GL,
+      .prolog.vs.robustness.level =
+         ctx->robust ? AGX_ROBUSTNESS_GL : AGX_ROBUSTNESS_DISABLED,
+
       .prolog.vs.robustness.soft_fault = agx_has_soft_fault(dev),
       .main = ctx->vs,
    };
@@ -2351,6 +2352,8 @@ agx_update_fs(struct agx_batch *batch)
       struct pipe_surface *surf = batch->key.cbufs[i];
 
       link_key.epilog.fs.rt_formats[i] = surf ? surf->format : PIPE_FORMAT_NONE;
+      link_key.epilog.fs.remap[i] =
+         link_key.epilog.fs.link.broadcast_rt0 ? 0 : i;
    }
 
    memcpy(&link_key.epilog.fs.blend, &ctx->blend->key,
@@ -2361,7 +2364,7 @@ agx_update_fs(struct agx_batch *batch)
       link_key.epilog.fs.link.rt_spill_base = 0;
 
    /* Try to disable blending to get rid of some fsats */
-   if (link_key.epilog.fs.link.rt0_w_1) {
+   if (link_key.epilog.fs.link.loc0_w_1) {
       struct agx_blend_rt_key *k = &link_key.epilog.fs.blend.rt[0];
 
       k->rgb_src_factor = optimize_blend_factor_w_1(k->rgb_src_factor);

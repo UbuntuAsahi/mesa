@@ -346,7 +346,7 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
                       VkPipelineStageFlags2 stage, VkQueryPool queryPool,
                       uint32_t query)
 {
-   unreachable("todo");
+   // unreachable("todo");
 #if 0
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);

@@ -18,4 +18,4 @@
 #define AGX_ABI_FOUT_Z             (4)
 #define AGX_ABI_FOUT_S             (6)
 #define AGX_ABI_FOUT_WRITE_SAMPLES (7)
-#define AGX_ABI_FOUT_COLOUR(rt)    (2 * (4 + (4 * read_rt)))
+#define AGX_ABI_FOUT_COLOUR(rt)    (2 * (4 + (4 * rt)))
