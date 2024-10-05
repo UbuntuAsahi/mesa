@@ -1,3 +1,10 @@
+mesa-asahi (24.3.0~git20241006.6e004ce-1~exp1) experimental; urgency=medium
+
+  * New asahi release (asahi-20241006)
+  * d/control: fix Vcs-* fields, set myself as Maintainer
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sat, 05 Oct 2024 21:18:09 +0200
+
 mesa-asahi (24.3.0~git20240930.6e70429-1) unstable; urgency=medium
 
   * Release to unstable(-asahi)
