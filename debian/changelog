@@ -1,3 +1,13 @@
+mesa (24.2.0~pre20241006-1asahi1.24.04) noble; urgency=medium
+
+  * Bump to asahi-20241006
+  * Build on 24.04
+  * Use LLVM 16, as Mesa requires LLVM 16+, which is not available on 22.04
+  * Remove dri3 build option, as it's not supported anymore
+  * Disable r600 driver, as it caused build errors
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Tue, 11 Oct 2024 08:56:00 +0200
+
 mesa (24.2.0~pre20240725-1asahi1.24.04) noble; urgency=medium
 
   * Build on 24.04
