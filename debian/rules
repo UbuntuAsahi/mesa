@@ -56,6 +56,7 @@ else
   # hurd also lacks *_CLOEXEC
   EGL_PLATFORMS += wayland
 
+  VULKAN_DRIVERS += asahi
   GALLIUM_DRIVERS += asahi nouveau r300 virgl
   confflags_DIRECT_RENDERING = -Dglx-direct=true
   confflags_GBM = -Dgbm=enabled
@@ -71,7 +72,7 @@ else
   # etnaviv, tegra, vc4 and v3d kernel support are only available on armhf and arm64
   ifneq (,$(filter $(DEB_HOST_ARCH), armhf arm64))
 	GALLIUM_DRIVERS += etnaviv panfrost svga tegra vc4 v3d
-	VULKAN_DRIVERS += broadcom freedreno asahi
+	VULKAN_DRIVERS += broadcom freedreno
   endif
 
   ifneq (,$(filter $(DEB_HOST_ARCH), armhf arm64 loong64 riscv64))
