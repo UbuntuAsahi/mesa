@@ -1,3 +1,11 @@
+mesa (24.2.0~pre20241006-1asahi3.24.04) oracular; urgency=medium
+
+  * Make libgallium install path arch agnostic
+  * Build asahi vulkan driver on all archs
+  * Add i386 to RUSTICL_ARCHS
+
+ -- Tobias Heider <me@tobhe.de>  Sun, 20 Oct 2024 16:45:09 +0200
+
 mesa (24.2.0~pre20241006-1asahi2.24.04) noble; urgency=medium
 
   * Use LLVM 18
