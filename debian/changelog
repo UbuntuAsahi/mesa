@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241006-1asahi3.24.04) noble; urgency=medium
+
+  * Sync debian/ from ubuntu/oracular
+
+ -- Tobias Heider <tobias.heider@canonical.com>  Mon, 21 Oct 2024 21:18:59 +0200
+
 mesa (24.2.0~pre20241006-1asahi3.24.04) oracular; urgency=medium
 
   * Make libgallium install path arch agnostic
