@@ -103,21 +103,7 @@ load_glsl(unsigned num_files, char *const *files, gl_shader_stage stage)
    if (!prog)
       errx(1, "couldn't parse `%s'", files[0]);
 
-   nir_shader *nir = glsl_to_nir(&local_ctx.Const,
-                                 &prog->_LinkedShaders[stage]->ir,
-                                 &prog->_LinkedShaders[stage]->Program->info,
-                                 stage, nir_options);
-
-   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      nir->info.fs.pixel_center_integer =
-         prog->_LinkedShaders[stage]->Program->info.fs.pixel_center_integer;
-      nir->info.fs.origin_upper_left =
-         prog->_LinkedShaders[stage]->Program->info.fs.origin_upper_left;
-      nir->info.fs.advanced_blend_modes =
-         prog->_LinkedShaders[stage]->Program->info.fs.advanced_blend_modes;
-   }
-
-   gl_nir_inline_functions(nir);
+   nir_shader *nir = prog->_LinkedShaders[stage]->Program->nir;
 
    /* required NIR passes: */
    if (nir_options->lower_all_io_to_temps ||
@@ -411,8 +397,10 @@ main(int argc, char **argv)
       return -1;
    }
 
+   const struct ir3_shader_nir_options options = {};
+
    ir3_nir_lower_io_to_temporaries(nir);
-   ir3_finalize_nir(compiler, nir);
+   ir3_finalize_nir(compiler, &options, nir);
 
    struct ir3_shader *shader = rzalloc_size(NULL, sizeof(*shader));
    shader->compiler = compiler;
@@ -430,7 +418,7 @@ main(int argc, char **argv)
    shader->variants = v;
    shader->variant_count = 1;
 
-   ir3_nir_lower_variant(v, nir);
+   ir3_nir_lower_variant(v, &options, nir);
 
    info = "NIR compiler";
    ret = ir3_compile_shader_nir(compiler, shader, v);

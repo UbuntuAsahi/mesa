@@ -64,11 +64,14 @@
 
 
 # Make sure this list stays the same as all the jobs with
-# `stage: build-for-tests`
+# `stage: build-for-tests`, except for the windows job as
+# explained below.
 .build-for-tests-jobs:
   - job: debian-testing
     optional: true
   - job: debian-testing-asan
+    optional: true
+  - job: debian-build-testing
     optional: true
   - job: debian-arm32
     optional: true
@@ -78,7 +81,11 @@
     optional: true
   - job: debian-arm64-asan
     optional: true
-  - job: windows-msvc
+  # Windows runners don't have more than one build right now, so there is
+  # no need to wait on the "first one" to be done.
+  # - job: windows-msvc
+  #   optional: true
+  - job: python-test
     optional: true
 
 
@@ -178,13 +185,9 @@ debian-testing-msan:
       -D intel-clc=enabled
       -D install-intel-clc=true
 
-# Disabled because it is unacceptably slow and blocks too many MRs
-# Should be re-enabled once this problem has been fixed.
-.debian-build-testing:
+debian-build-testing:
   extends: .meson-build
-  needs:
-    - !reference [.meson-build, needs]
-    - !reference [.build-for-tests-jobs]
+  stage: build-for-tests
   variables:
     BUILDTYPE: debug
     UNWIND: "enabled"
@@ -197,7 +200,6 @@ debian-testing-msan:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
-      -D gallium-omx=bellagio
       -D gallium-va=enabled
       -D gallium-xa=enabled
       -D gallium-nine=false
@@ -208,29 +210,33 @@ debian-testing-msan:
       -D spirv-to-dxil=true
       -D osmesa=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,intel-ui,nir,nouveau,lima,panfrost,asahi
-      -D b_lto=true
     LLVM_VERSION: 15
     S3_ARTIFACT_NAME: debian-build-testing
   script: |
-    section_start lava-pytest "lava-pytest"
-    .gitlab-ci/lava/lava-pytest.sh
-    section_switch shellcheck "shellcheck"
-    .gitlab-ci/run-shellcheck.sh
-    section_switch yamllint "yamllint"
-    .gitlab-ci/run-yamllint.sh
-    section_end yamllint
     .gitlab-ci/meson/build.sh
     .gitlab-ci/prepare-artifacts.sh
-  timeout: 15m
 
-# Disabled because it currently needs debian-build-testing
-.shader-db:
+shader-db:
   stage: code-validation
   extends:
     - .use-debian/x86_64_build
-    - .container+build-rules
+  rules:
+    - !reference [.never-post-merge-rules, rules]
+    - !reference [.core-rules, rules]
+    # Keep this list in sync with the drivers tested in run-shader-db.sh
+    - !reference [.freedreno-common-rules, rules]
+    - !reference [.intel-common-rules, rules]
+    - !reference [.lima-rules, rules]
+    - !reference [.v3d-rules, rules]
+    - !reference [.vc4-rules, rules]
+    - !reference [.nouveau-rules, rules]
+    - !reference [.r300-rules, rules]
+    # Also run if this job's own config or script changes
+    - changes:
+        - .gitlab-ci/build/gitlab-ci.yml
+        - .gitlab-ci/run-shader-db.sh
   needs:
-    - .debian-build-testing
+    - debian-build-testing
   variables:
     S3_ARTIFACT_NAME: debian-build-testing
   before_script:
@@ -262,7 +268,6 @@ debian-release:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
-      -D gallium-omx=disabled
       -D gallium-va=enabled
       -D gallium-xa=enabled
       -D gallium-nine=false
@@ -295,6 +300,7 @@ alpine-build-testing:
     C_ARGS: >
       -Wno-error=cpp
       -Wno-error=array-bounds
+      -Wno-error=stringop-overflow
       -Wno-error=stringop-overread
     DRI_LOADERS: >
       -D glx=disabled
@@ -306,7 +312,6 @@ alpine-build-testing:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=disabled
-      -D gallium-omx=disabled
       -D gallium-va=enabled
       -D gallium-xa=disabled
       -D gallium-nine=true
@@ -329,12 +334,17 @@ fedora-release:
     - !reference [.build-for-tests-jobs]
   variables:
     BUILDTYPE: "release"
-    C_LINK_ARGS: >
+    # array-bounds are pure non-LTO gcc buggy warning, verify after bump to F39
+    C_ARGS: >
       -Wno-error=stringop-overflow
       -Wno-error=stringop-overread
+      -Wno-error=array-bounds
     CPP_ARGS: >
       -Wno-error=dangling-reference
       -Wno-error=overloaded-virtual
+    C_LINK_ARGS: >
+      -Wno-error=stringop-overflow
+      -Wno-error=stringop-overread
     CPP_LINK_ARGS: >
       -Wno-error=stringop-overflow
       -Wno-error=stringop-overread
@@ -345,9 +355,7 @@ fedora-release:
       -D glvnd=enabled
       -D platforms=x11,wayland
     EXTRA_OPTION: >
-      -D b_lto=true
       -D osmesa=true
-      -D selinux=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,nir,nouveau,lima,panfrost,imagination
       -D vulkan-layers=device-select,overlay
       -D intel-rt=enabled
@@ -357,7 +365,6 @@ fedora-release:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
-      -D gallium-omx=disabled
       -D gallium-va=enabled
       -D gallium-xa=enabled
       -D gallium-nine=false
@@ -408,7 +415,6 @@ debian-android:
       -D intel-clc=system
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
-      -D gallium-omx=disabled
       -D gallium-va=disabled
       -D gallium-xa=disabled
       -D gallium-nine=false
@@ -451,7 +457,6 @@ debian-android:
       -D osmesa=false
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
-      -D gallium-omx=disabled
       -D gallium-va=disabled
       -D gallium-xa=disabled
       -D gallium-nine=false
@@ -580,6 +585,27 @@ debian-arm64-release:
     - .gitlab-ci/meson/build.sh
     - 'if [ -n "$MESA_CI_PERFORMANCE_ENABLED" ]; then .gitlab-ci/prepare-artifacts.sh; fi'
 
+debian-no-libdrm:
+  extends:
+    - .meson-arm
+  stage: build-only
+  needs:
+    - !reference [.meson-arm, needs]
+    - !reference [.build-for-tests-jobs]
+  variables:
+    VULKAN_DRIVERS: freedreno
+    GALLIUM_DRIVERS: "zink,llvmpipe"
+    BUILDTYPE: release
+    C_ARGS: >
+      -Wno-error=array-bounds
+      -Wno-error=stringop-truncation
+      -Wno-error=stringop-overread
+    EXTRA_OPTION: >
+      -D freedreno-kmds=kgsl
+      -D glx=disabled
+      -D gbm=disabled
+      -D egl=disabled
+
 debian-clang:
   extends: .meson-build
   needs:
@@ -609,7 +635,6 @@ debian-clang:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
-      -D gallium-omx=bellagio
       -D gallium-va=enabled
       -D gallium-xa=enabled
       -D gallium-nine=true
@@ -647,7 +672,6 @@ debian-clang-release:
     GALLIUM_ST: >
       -D gallium-extra-hud=true
       -D gallium-vdpau=enabled
-      -D gallium-omx=bellagio
       -D gallium-va=enabled
       -D gallium-xa=enabled
       -D gallium-nine=true
@@ -693,7 +717,6 @@ debian-vulkan:
       -D osmesa=false
     GALLIUM_ST: >
       -D gallium-vdpau=disabled
-      -D gallium-omx=disabled
       -D gallium-va=disabled
       -D gallium-xa=disabled
       -D gallium-nine=false
@@ -774,3 +797,18 @@ debian-ppc64el:
     VULKAN_DRIVERS: "amd,swrast"
     DRI_LOADERS:
       -D glvnd=disabled
+
+# This job tests our Python scripts, and also emits our scripts into
+# artifacts, so they can be reused for job submission to hardware devices.
+python-test:
+  stage: build-for-tests
+  extends:
+    - .use-debian/x86_64_pyutils
+    - .build-common
+  variables:
+    GIT_STRATEGY: fetch
+    S3_ARTIFACT_NAME: mesa-python-test
+  timeout: 10m
+  script:
+    - .gitlab-ci/run-pytest.sh
+    - .gitlab-ci/prepare-artifacts-python.sh

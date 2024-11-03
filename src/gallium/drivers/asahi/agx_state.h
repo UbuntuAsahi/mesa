@@ -579,7 +579,9 @@ struct asahi_blit_key {
    enum pipe_format src_format, dst_format;
    bool array;
    bool aligned;
+   bool pad[2];
 };
+static_assert(sizeof(struct asahi_blit_key) == 12, "packed");
 
 DERIVE_HASH_TABLE(asahi_blit_key);
 
@@ -607,9 +609,9 @@ struct agx_oq_heap;
 
 struct agx_context {
    struct pipe_context base;
-   struct agx_compiled_shader *vs, *fs, *gs, *tcs, *tes;
+   struct agx_compiled_shader *vs, *fs, *gs, *tcs;
    struct {
-      struct agx_linked_shader *vs, *tcs, *tes, *gs, *fs;
+      struct agx_linked_shader *vs, *fs;
    } linked;
    uint32_t dirty;
 
@@ -689,7 +691,6 @@ struct agx_context {
    bool is_noop;
 
    bool in_tess;
-   bool in_generated_vdm;
 
    struct blitter_context *blitter;
    struct asahi_blitter compute_blitter;

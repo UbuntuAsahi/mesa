@@ -435,6 +435,14 @@ ail_is_view_compatible(struct ail_layout *layout, enum pipe_format view)
           ail_formats_compatible(layout->format, view);
 }
 
+/* Fake values, pending UAPI upstreaming */
+#ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED
+#define DRM_FORMAT_MOD_APPLE_TWIDDLED (2)
+#endif
+#ifndef DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED
+#define DRM_FORMAT_MOD_APPLE_TWIDDLED_COMPRESSED (3)
+#endif
+
 /*
  * We generally use ail enums instead of DRM format modifiers. This helper
  * bridges the gap.

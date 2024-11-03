@@ -202,6 +202,8 @@ optimizations = [
    # floating point instruction, they should flush any input denormals and we
    # can replace -0.0 with 0.0 if the float execution mode allows it.
    (('fadd(is_only_used_as_float,nsz)', 'a', 0.0), a),
+   (('fadd(is_only_used_as_float)', a, '#b(is_negative_zero)'), a),
+   (('fadd', ('fneg', a), '#b(is_negative_zero)'), ('fneg', a)),
    (('iadd', a, 0), a),
    (('iadd_sat', a, 0), a),
    (('isub_sat', a, 0), a),
@@ -432,7 +434,7 @@ optimizations.extend([
    (('ftrunc@16', a), ('bcsel', ('flt', a, 0.0), ('fneg', ('ffloor', ('fabs', a))), ('ffloor', ('fabs', a))), 'options->lower_ftrunc'),
    (('ftrunc@32', a), ('bcsel', ('flt', a, 0.0), ('fneg', ('ffloor', ('fabs', a))), ('ffloor', ('fabs', a))), 'options->lower_ftrunc'),
    (('ftrunc@64', a), ('bcsel', ('flt', a, 0.0), ('fneg', ('ffloor', ('fabs', a))), ('ffloor', ('fabs', a))),
-    '(options->lower_ftrunc || (options->lower_doubles_options & nir_lower_dtrunc)) && !(options->lower_doubles_options & nir_lower_dfloor)'),
+    '(options->lower_ftrunc || (options->lower_doubles_options & nir_lower_dtrunc)) && (!(options->lower_doubles_options & nir_lower_dfloor) || !(options->lower_doubles_options & nir_lower_dfract))'),
 
    (('ffloor@16', a), ('fsub', a, ('ffract', a)), 'options->lower_ffloor'),
    (('ffloor@32', a), ('fsub', a, ('ffract', a)), 'options->lower_ffloor'),
@@ -538,7 +540,42 @@ for size, mask in ((8, 0xff), (16, 0xffff), (32, 0xffffffff), (64, 0xfffffffffff
        (('ushr', ('ishl', a_sz, '#b'), b), ('iand', a, ('ushr', mask, b))),
     ])
 
+# Collapses ubfe(ubfe(a, b, c), d, e) when b, c, d, e are constants.
+def ubfe_ubfe(a, b, c, d, e):
+    inner_offset = ('iand', b, 0x1f)
+    inner_bits = ('umin', ('iand', c, 0x1f), ('isub', 32, inner_offset))
+    outer_offset = ('iand', d, 0x1f)
+    outer_bits = ('iand', e, 0x1f)
+
+    offset = ('iadd', inner_offset, outer_offset)
+    bits = ('umin', outer_bits, ('imax', ('isub', inner_bits, outer_offset), 0))
+    collapsed = ('ubfe', a, offset, bits)
+    offset_out_of_range = ('ilt', 31, offset)
+
+    # This will be constant-folded to either 0 or the collapsed ubfe,
+    # whose offset and bits operands will also be constant folded.
+    return ('bcsel', offset_out_of_range, 0, collapsed)
+
 optimizations.extend([
+    # Create bitfield extract from right-shift + and pattern.
+    (('iand@32', ('ushr@32(is_used_once)', a, b), '#c(is_const_bitmask)'),
+     ('ubfe', a, b, ('bit_count', c)),
+     'options->has_bfe && !options->avoid_ternary_with_two_constants'),
+
+    (('iand@32', ('ushr@32', a, b), ('bfm', c, 0)),
+     ('ubfe', a, b, c), 'options->has_bfe'),
+
+    (('ushr', ('iand', a, ('bfm', c, b)), b),
+     ('ubfe', a, b, c), 'options->has_bfe'),
+
+    # Collapse two bitfield extracts with constant operands into a single one.
+    (('ubfe', ('ubfe', a, '#b', '#c'), '#d', '#e'),
+     ubfe_ubfe(a, b, c, d, e)),
+
+    # Collapse non-zero right-shift into bitfield extract.
+    (('ushr@32', ('ubfe', a, '#b', '#c'), '#d(is_5lsb_not_zero)'),
+     ubfe_ubfe(a, b, c, d, 31)),
+
     (('iand', ('ishl', 'a@32', '#b(is_first_5_bits_uge_2)'), -4), ('ishl', a, b)),
     (('iand', ('imul', a, '#b(is_unsigned_multiple_of_4)'), -4), ('imul', a, b)),
 ])
@@ -719,7 +756,9 @@ optimizations.extend([
    (('ine', ('iadd', a, b), a), ('ine', b, 0)),
 
    (('feq', ('b2f', 'a@1'), 0.0), ('inot', a)),
+   (('fge', 0.0, ('b2f', 'a@1')), ('inot', a)),
    (('fneu', ('b2f', 'a@1'), 0.0), a),
+   (('flt',  0.0, ('b2f', 'a@1')), a),
    (('ieq', ('b2i', 'a@1'), 0),   ('inot', a)),
    (('ine', ('b2i', 'a@1'), 0),   a),
    (('ieq', 'a@1', False), ('inot', a)),
@@ -1486,7 +1525,9 @@ optimizations.extend([
    (('ior', ('ishl', 'b@32', 24), ('ushr', a, 8)), ('shfr', b, a, 8), 'options->has_shfr32'),
    (('ior', ('ishl', 'b@32', 16), ('extract_u16', a, 1)), ('shfr', b, a, 16), 'options->has_shfr32'),
    (('ior', ('ishl', 'b@32', 8), ('extract_u8', a, 3)), ('shfr', b, a, 24), 'options->has_shfr32'),
-   (('ior', ('ishl', 'b@32', ('iadd', 32, ('ineg', c))), ('ushr@32', a, c)), ('shfr', b, a, c), 'options->has_shfr32'),
+   (('bcsel', ('ieq', c, 0), a, ('ior', ('ishl', 'b@32', ('iadd', 32, ('ineg', c))), ('ushr@32', a, c))), ('shfr', b, a, c), 'options->has_shfr32'),
+   (('bcsel', ('ine', c, 0), ('ior', ('ishl', 'b@32', ('iadd', 32, ('ineg', c))), ('ushr@32', a, c)), a), ('shfr', b, a, c), 'options->has_shfr32'),
+   (('ior', ('ishl', 'a@32', ('iadd', 32, ('ineg', b))), ('ushr@32', a, b)), ('shfr', a, a, b), 'options->has_shfr32 && !options->has_rotate32'),
 
    # bfi(X, a, b) = (b & ~X) | (a & X)
    # If X = ~0: (b & 0) | (a & 0xffffffff) = a
@@ -1914,6 +1955,16 @@ optimizations.extend([
    # Reduce intermediate precision with int64.
    (('u2u32', ('iadd(is_used_once)', 'a@64', b)),
     ('iadd', ('u2u32', a), ('u2u32', b))),
+
+   # Redundant trip through 8-bit
+   (('i2i16', ('u2u8', ('iand', 'a@16', 1))), ('iand', 'a@16', 1)),
+   (('u2u16', ('u2u8', ('iand', 'a@16', 1))), ('iand', 'a@16', 1)),
+
+   # Reduce 16-bit integers to 1-bit booleans, hit with OpenCL. In turn, this
+   # lets iand(b2i1(...), 1) get simplified. Backends can usually fuse iand/inot
+   # so this should be no worse when it isn't strictly better.
+   (('bcsel', a, 0, ('b2i16', 'b@1')), ('b2i16', ('iand', ('inot', a), b))),
+   (('bcsel', a, ('b2i16', 'b@1'), ('b2i16', 'c@1')), ('b2i16', ('bcsel', a, b, c))),
 
    # Lowered pack followed by lowered unpack, for the high bits
    (('u2u32', ('ushr', ('ior', ('ishl', a, 32), ('u2u64', b)), 32)), ('u2u32', a)),
@@ -2757,6 +2808,16 @@ optimizations += [
    (('ldexp@64', 'x', 'exp'), ldexp('x', 'exp', 64), 'options->lower_ldexp'),
 ]
 
+# XCOM 2 (OpenGL) open-codes bitfieldReverse()
+def bitfield_reverse_xcom2(u):
+    step1 = ('iadd', ('ishl', u, 16), ('ushr', u, 16))
+    step2 = ('iadd', ('iand', ('ishl', step1, 1), 0xaaaaaaaa), ('iand', ('ushr', step1, 1), 0x55555555))
+    step3 = ('iadd', ('iand', ('ishl', step2, 2), 0xcccccccc), ('iand', ('ushr', step2, 2), 0x33333333))
+    step4 = ('iadd', ('iand', ('ishl', step3, 4), 0xf0f0f0f0), ('iand', ('ushr', step3, 4), 0x0f0f0f0f))
+    step5 = ('iadd(many-comm-expr)', ('iand', ('ishl', step4, 8), 0xff00ff00), ('iand', ('ushr', step4, 8), 0x00ff00ff))
+
+    return step5
+
 # Unreal Engine 4 demo applications open-codes bitfieldReverse()
 def bitfield_reverse_ue4(u):
     step1 = ('ior', ('ishl', u, 16), ('ushr', u, 16))
@@ -2777,6 +2838,7 @@ def bitfield_reverse_cp2077(u):
 
     return step5
 
+optimizations += [(bitfield_reverse_xcom2('x@32'), ('bitfield_reverse', 'x'), '!options->lower_bitfield_reverse')]
 optimizations += [(bitfield_reverse_ue4('x@32'), ('bitfield_reverse', 'x'), '!options->lower_bitfield_reverse')]
 optimizations += [(bitfield_reverse_cp2077('x@32'), ('bitfield_reverse', 'x'), '!options->lower_bitfield_reverse')]
 
@@ -2878,18 +2940,6 @@ for op in ['fadd', 'fmul', 'fmulz', 'iadd', 'imul']:
    optimizations += [
       ((op, ('bcsel(is_used_once)', a, '#b', c), '#d'), ('bcsel', a, (op, b, d), (op, c, d)))
    ]
-
-# For derivatives in compute shaders, GLSL_NV_compute_shader_derivatives
-# states:
-#
-#     If neither layout qualifier is specified, derivatives in compute shaders
-#     return zero, which is consistent with the handling of built-in texture
-#     functions like texture() in GLSL 4.50 compute shaders.
-for op in ['fddx', 'fddx_fine', 'fddx_coarse',
-           'fddy', 'fddy_fine', 'fddy_coarse']:
-   optimizations += [
-      ((op, 'a'), 0.0, 'info->stage == MESA_SHADER_COMPUTE && info->derivative_group == DERIVATIVE_GROUP_NONE')
-]
 
 # Some optimizations for ir3-specific instructions.
 optimizations += [

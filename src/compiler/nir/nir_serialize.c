@@ -479,10 +479,10 @@ read_src(read_ctx *ctx, nir_src *src)
 union packed_def {
    uint8_t u8;
    struct {
-      uint8_t _pad : 1;
       uint8_t num_components : 3;
       uint8_t bit_size : 3;
       uint8_t divergent : 1;
+      uint8_t loop_invariant : 1;
    };
 };
 
@@ -525,8 +525,8 @@ union packed_instr {
       unsigned no_signed_wrap : 1;
       unsigned no_unsigned_wrap : 1;
       unsigned padding : 1;
-      /* Reg: writemask; SSA: swizzles for 2 srcs */
-      unsigned writemask_or_two_swizzles : 4;
+      /* Swizzles for 2 srcs */
+      unsigned two_swizzles : 4;
       unsigned op : 9;
       unsigned packed_src_ssa_16bit : 1;
       /* Scalarized ALUs always have the same header. */
@@ -537,8 +537,8 @@ union packed_instr {
       unsigned instr_type : 4;
       unsigned deref_type : 3;
       unsigned cast_type_same_as_last : 1;
-      unsigned modes : 5; /* See (de|en)code_deref_modes() */
-      unsigned _pad : 9;
+      unsigned modes : 6; /* See (de|en)code_deref_modes() */
+      unsigned _pad : 8;
       unsigned in_bounds : 1;
       unsigned packed_src_ssa_16bit : 1; /* deref_var redefines this */
       unsigned def : 8;
@@ -608,6 +608,7 @@ write_def(write_ctx *ctx, const nir_def *def, union packed_instr header,
       encode_num_components_in_3bits(def->num_components);
    pdef.bit_size = encode_bit_size_3bits(def->bit_size);
    pdef.divergent = def->divergent;
+   pdef.loop_invariant = def->loop_invariant;
    header.any.def = pdef.u8;
 
    /* Check if the current ALU instruction has the same header as the previous
@@ -670,6 +671,7 @@ read_def(read_ctx *ctx, nir_def *def, nir_instr *instr,
       num_components = decode_num_components_in_3bits(pdef.num_components);
    nir_def_init(instr, def, num_components, bit_size);
    def->divergent = pdef.divergent;
+   def->loop_invariant = pdef.loop_invariant;
    read_add_object(ctx, def);
 }
 
@@ -690,7 +692,7 @@ is_alu_src_ssa_16bit(write_ctx *ctx, const nir_alu_instr *alu)
 
       for (unsigned chan = 0; chan < src_components; chan++) {
          /* The swizzles for src0.x and src1.x are stored
-          * in writemask_or_two_swizzles for SSA ALUs.
+          * in two_swizzles for SSA ALUs.
           */
          if (i < 2 && chan == 0 && alu->src[i].swizzle[chan] < 4)
             continue;
@@ -722,9 +724,9 @@ write_alu(write_ctx *ctx, const nir_alu_instr *alu)
 
    if (header.alu.packed_src_ssa_16bit) {
       /* For packed srcs of SSA ALUs, this field stores the swizzles. */
-      header.alu.writemask_or_two_swizzles = alu->src[0].swizzle[0];
+      header.alu.two_swizzles = alu->src[0].swizzle[0];
       if (num_srcs > 1)
-         header.alu.writemask_or_two_swizzles |= alu->src[1].swizzle[0] << 2;
+         header.alu.two_swizzles |= alu->src[1].swizzle[0] << 2;
    }
 
    write_def(ctx, &alu->def, header, alu->instr.type);
@@ -823,16 +825,16 @@ read_alu(read_ctx *ctx, union packed_instr header)
    }
 
    if (header.alu.packed_src_ssa_16bit) {
-      alu->src[0].swizzle[0] = header.alu.writemask_or_two_swizzles & 0x3;
+      alu->src[0].swizzle[0] = header.alu.two_swizzles & 0x3;
       if (num_srcs > 1)
-         alu->src[1].swizzle[0] = header.alu.writemask_or_two_swizzles >> 2;
+         alu->src[1].swizzle[0] = header.alu.two_swizzles >> 2;
    }
 
    return alu;
 }
 
 #define NUM_GENERIC_MODES 4
-#define MODE_ENC_GENERIC_BIT (1 << 4)
+#define MODE_ENC_GENERIC_BIT (1 << 5)
 
 static nir_variable_mode
 decode_deref_modes(unsigned modes)
@@ -853,7 +855,7 @@ encode_deref_modes(nir_variable_mode modes)
     * case, we need the full bitfield.  Fortunately, there are only 4 of
     * these.  For all other modes, we can only have one mode at a time so we
     * can compress them by only storing the bit position.  This, plus one bit
-    * to select encoding, lets us pack the entire bitfield in 5 bits.
+    * to select encoding, lets us pack the entire bitfield in 6 bits.
     */
 
    /* Assert that the modes we are compressing fit along with the generic bit
@@ -1254,6 +1256,7 @@ read_load_const(read_ctx *ctx, union packed_instr header)
       nir_load_const_instr_create(ctx->nir, header.load_const.last_component + 1,
                                   decode_bit_size_3bits(header.load_const.bit_size));
    lc->def.divergent = false;
+   lc->def.loop_invariant = true;
 
    switch (header.load_const.packing) {
    case load_const_scalar_hi_19bits:
@@ -1348,6 +1351,7 @@ read_ssa_undef(read_ctx *ctx, union packed_instr header)
                              decode_bit_size_3bits(header.undef.bit_size));
 
    undef->def.divergent = false;
+   undef->def.loop_invariant = true;
 
    read_add_object(ctx, &undef->def);
    return undef;
@@ -1824,7 +1828,8 @@ static void
 write_loop(write_ctx *ctx, nir_loop *loop)
 {
    blob_write_uint8(ctx->blob, loop->control);
-   blob_write_uint8(ctx->blob, loop->divergent);
+   blob_write_uint8(ctx->blob, loop->divergent_continue);
+   blob_write_uint8(ctx->blob, loop->divergent_break);
    bool has_continue_construct = nir_loop_has_continue_construct(loop);
    blob_write_uint8(ctx->blob, has_continue_construct);
 
@@ -1842,7 +1847,8 @@ read_loop(read_ctx *ctx, struct exec_list *cf_list)
    nir_cf_node_insert_end(cf_list, &loop->cf_node);
 
    loop->control = blob_read_uint8(ctx->blob);
-   loop->divergent = blob_read_uint8(ctx->blob);
+   loop->divergent_continue = blob_read_uint8(ctx->blob);
+   loop->divergent_break = blob_read_uint8(ctx->blob);
    bool has_continue_construct = blob_read_uint8(ctx->blob);
 
    read_cf_list(ctx, &loop->body);
@@ -1963,6 +1969,8 @@ write_function(write_ctx *ctx, const nir_function *fxn)
       flags |= 0x20;
    if (fxn->is_subroutine)
       flags |= 0x40;
+   if (fxn->is_tmp_globals_wrapper)
+      flags |= 0x80;
    blob_write_uint32(ctx->blob, flags);
    if (fxn->name)
       blob_write_string(ctx->blob, fxn->name);
@@ -1981,6 +1989,8 @@ write_function(write_ctx *ctx, const nir_function *fxn)
          ((uint32_t)fxn->params[i].num_components) |
          ((uint32_t)fxn->params[i].bit_size) << 8;
       blob_write_uint32(ctx->blob, val);
+      encode_type_to_blob(ctx->blob, fxn->params[i].type);
+      blob_write_uint32(ctx->blob, encode_deref_modes(fxn->params[i].mode));
    }
 
    /* At first glance, it looks like we should write the function_impl here.
@@ -2014,6 +2024,8 @@ read_function(read_ctx *ctx)
       uint32_t val = blob_read_uint32(ctx->blob);
       fxn->params[i].num_components = val & 0xff;
       fxn->params[i].bit_size = (val >> 8) & 0xff;
+      fxn->params[i].type = decode_type_from_blob(ctx->blob);
+      fxn->params[i].mode = decode_deref_modes(blob_read_uint32(ctx->blob));
    }
 
    fxn->is_entrypoint = flags & 0x1;
@@ -2023,6 +2035,7 @@ read_function(read_ctx *ctx)
    fxn->should_inline = flags & 0x10;
    fxn->dont_inline = flags & 0x20;
    fxn->is_subroutine = flags & 0x40;
+   fxn->is_tmp_globals_wrapper = flags & 0x80;
 }
 
 static void

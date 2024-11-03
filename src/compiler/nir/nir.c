@@ -503,6 +503,7 @@ nir_function_create(nir_shader *shader, const char *name)
    func->dont_inline = false;
    func->should_inline = false;
    func->is_subroutine = false;
+   func->is_tmp_globals_wrapper = false;
    func->subroutine_index = 0;
    func->num_subroutine_types = 0;
    func->subroutine_types = NULL;
@@ -644,7 +645,8 @@ nir_loop_create(nir_shader *shader)
 
    cf_init(&loop->cf_node, nir_cf_node_loop);
    /* Assume that loops are divergent until proven otherwise */
-   loop->divergent = true;
+   loop->divergent_break = true;
+   loop->divergent_continue = true;
 
    nir_block *body = nir_block_create(shader);
    exec_list_make_empty(&loop->body);
@@ -1553,6 +1555,7 @@ nir_def_init(nir_instr *instr, nir_def *def,
    def->num_components = num_components;
    def->bit_size = bit_size;
    def->divergent = true; /* This is the safer default */
+   def->loop_invariant = false;
 
    if (instr->block) {
       nir_function_impl *impl =
@@ -2198,7 +2201,7 @@ bool
 nir_shader_supports_implicit_lod(nir_shader *shader)
 {
    return (shader->info.stage == MESA_SHADER_FRAGMENT ||
-           (shader->info.stage == MESA_SHADER_COMPUTE &&
+           (gl_shader_stage_uses_workgroup(shader->info.stage) &&
             shader->info.derivative_group != DERIVATIVE_GROUP_NONE));
 }
 
@@ -3499,3 +3502,61 @@ nir_static_workgroup_size(const nir_shader *s)
    return s->info.workgroup_size[0] * s->info.workgroup_size[1] *
           s->info.workgroup_size[2];
 }
+
+bool
+nir_block_contains_work(nir_block *block)
+{
+   if (!nir_cf_node_is_last(&block->cf_node))
+      return true;
+
+   nir_foreach_instr(instr, block) {
+      if (instr->type == nir_instr_type_phi)
+         continue;
+      if (instr->type != nir_instr_type_alu ||
+          !nir_op_is_vec_or_mov(nir_instr_as_alu(instr)->op))
+         return true;
+   }
+
+   return false;
+}
+
+nir_op
+nir_atomic_op_to_alu(nir_atomic_op op)
+{
+   switch (op) {
+   case nir_atomic_op_iadd:
+      return nir_op_iadd;
+   case nir_atomic_op_imin:
+      return nir_op_imin;
+   case nir_atomic_op_umin:
+      return nir_op_umin;
+   case nir_atomic_op_imax:
+      return nir_op_imax;
+   case nir_atomic_op_umax:
+      return nir_op_umax;
+   case nir_atomic_op_iand:
+      return nir_op_iand;
+   case nir_atomic_op_ior:
+      return nir_op_ior;
+   case nir_atomic_op_ixor:
+      return nir_op_ixor;
+   case nir_atomic_op_fadd:
+      return nir_op_fadd;
+   case nir_atomic_op_fmin:
+      return nir_op_fmin;
+   case nir_atomic_op_fmax:
+      return nir_op_fmax;
+
+   /* We don't handle exchanges or wraps */
+   case nir_atomic_op_xchg:
+   case nir_atomic_op_cmpxchg:
+   case nir_atomic_op_fcmpxchg:
+   case nir_atomic_op_inc_wrap:
+   case nir_atomic_op_dec_wrap:
+   case nir_atomic_op_ordered_add_gfx12_amd:
+      return nir_num_opcodes;
+   }
+
+   unreachable("Invalid nir_atomic_op");
+}
+

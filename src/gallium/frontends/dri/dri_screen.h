@@ -127,23 +127,9 @@ struct dri_screen
    opencl_dri_event_get_fence_t opencl_dri_event_get_fence;
 
    /* kopper */
-   struct pipe_screen *unwrapped_screen;
    bool has_dmabuf;
    bool is_sw;
 };
-
-/** cast wrapper */
-static inline struct dri_screen *
-dri_screen(__DRIscreen * sPriv)
-{
-   return (struct dri_screen *)sPriv;
-}
-
-static inline __DRIscreen *
-opaque_dri_screen(struct dri_screen *screen)
-{
-   return (__DRIscreen *)screen;
-}
 
 static inline const __DRIkopperLoaderExtension *
 dri_screen_get_kopper(struct dri_screen *screen)
@@ -151,7 +137,7 @@ dri_screen_get_kopper(struct dri_screen *screen)
    return screen->kopper_loader;
 }
 
-struct __DRIimageRec {
+struct dri_image {
    struct pipe_resource *texture;
    unsigned level;
    unsigned layer;
@@ -199,7 +185,7 @@ dri_fill_st_visual(struct st_visual *stvis,
 void
 dri_init_options(struct dri_screen *screen);
 
-const __DRIconfig **
+const struct dri_config **
 dri_init_screen(struct dri_screen *screen,
                 struct pipe_screen *pscreen,
                 bool has_multibuffer);

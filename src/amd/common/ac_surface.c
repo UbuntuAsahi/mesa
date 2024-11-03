@@ -816,6 +816,7 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib, const struct ac_surf_config *
    struct legacy_surf_level *surf_level;
    struct legacy_surf_dcc_level *dcc_level;
    ADDR_E_RETURNCODE ret;
+   bool mode_has_htile = false;
 
    AddrSurfInfoIn->mipLevel = level;
    AddrSurfInfoIn->width = u_minify(config->info.width, level);
@@ -986,8 +987,14 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib, const struct ac_surf_config *
       }
    }
 
+   if (surf_level->mode == RADEON_SURF_MODE_2D)
+      mode_has_htile = true;
+   else if (surf_level->mode == RADEON_SURF_MODE_1D &&
+            !(surf->flags & RADEON_SURF_TC_COMPATIBLE_HTILE))
+      mode_has_htile = true;
+
    /* HTILE. */
-   if (!is_stencil && AddrSurfInfoIn->flags.depth && surf_level->mode == RADEON_SURF_MODE_2D &&
+   if (!is_stencil && AddrSurfInfoIn->flags.depth && mode_has_htile &&
        level == 0 && !(surf->flags & RADEON_SURF_NO_HTILE)) {
       AddrHtileIn->flags.tcCompatible = AddrSurfInfoOut->tcCompatible;
       AddrHtileIn->pitch = AddrSurfInfoOut->pitch;
@@ -1548,7 +1555,7 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib, const struct radeon_info *i
     */
    if (!(surf->flags & RADEON_SURF_Z_OR_SBUFFER) && surf->meta_size && config->info.levels > 1) {
       /* The smallest miplevels that are never compressed by DCC
-       * still read the DCC buffer via TC if the base level uses DCC,
+       * still read the DCC buffer from memory if the base level uses DCC,
        * and for some reason the DCC buffer needs to be larger if
        * the miptree uses non-zero tile_swizzle. Otherwise there are
        * VM faults.
@@ -2192,7 +2199,7 @@ static int gfx9_compute_miptree(struct ac_addrlib *addrlib, const struct radeon_
           *
           * Alternative solutions that also work but are worse:
           * - Disable DCC entirely.
-          * - Flush TC L2 after rendering.
+          * - Flush the L2 cache after rendering.
           */
          for (unsigned i = 0; i < in->numMipLevels; i++) {
             surf->u.gfx9.meta_levels[i].offset = meta_mip_info[i].offset;
@@ -3265,9 +3272,8 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
                                     (surf->flags & RADEON_SURF_Z_OR_SBUFFER ||
                                      config->info.samples > 1 ||
                                      ((supports_display_dcc || !(surf->flags & RADEON_SURF_SCANOUT)) &&
-                                      /* These two are not strictly necessary. */
-                                      surf->u.gfx9.swizzle_mode != ADDR3_LINEAR &&
-                                      surf->surf_size >= 4096)));
+                                      /* This one is not strictly necessary. */
+                                      surf->u.gfx9.swizzle_mode != ADDR3_LINEAR)));
 
    surf->has_stencil = !!(surf->flags & RADEON_SURF_SBUFFER);
    surf->is_linear = surf->u.gfx9.swizzle_mode == ADDR3_LINEAR;

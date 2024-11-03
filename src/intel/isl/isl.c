@@ -29,6 +29,7 @@
 #include "dev/intel_debug.h"
 #include "genxml/genX_bits.h"
 #include "util/log.h"
+#include "util/u_math.h"
 
 #include "isl.h"
 #include "isl_gfx4.h"
@@ -1743,11 +1744,45 @@ isl_choose_miptail_start_level(const struct isl_device *dev,
       return 15;
    }
 
+   if (info->dim == ISL_SURF_DIM_3D &&
+       isl_tiling_is_std_y(tile_info->tiling) &&
+       _isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
+      /* From the workarounds section in the SKL PRM:
+       *
+       *    "RCC cacheline is composed of X-adjacent 64B fragments instead of
+       *     memory adjacent. This causes a single 128B cacheline to straddle
+       *     multiple LODs inside the TYF MIPtail for 3D surfaces (beyond a
+       *     certain slot number), leading to corruption when CCS is enabled
+       *     for these LODs and RT is later bound as texture. WA: If
+       *     RENDER_SURFACE_STATE.Surface Type = 3D and
+       *     RENDER_SURFACE_STATE.Auxiliary Surface Mode != AUX_NONE and
+       *     RENDER_SURFACE_STATE.Tiled ResourceMode is TYF or TYS, Set the
+       *     value of RENDER_SURFACE_STATE.Mip Tail Start LOD to a mip that
+       *     larger than those present in the surface (i.e. 15)"
+       *
+       * Referred to as Wa_1207137018 on ICL+. Disable miptails as suggested.
+       */
+      return 15;
+   }
+
    assert(isl_tiling_is_64(tile_info->tiling) ||
           isl_tiling_is_std_y(tile_info->tiling));
    assert(info->samples == 1);
 
    uint32_t max_miptail_levels = tile_info->max_miptail_levels;
+
+   if (max_miptail_levels > 11 &&
+       _isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
+      /* SKL PRMs, Volume 5: Memory Views, Tiling and Mip Tails for 2D
+       * Surfaces:
+       *
+       *    "Lossless compression must not be used on surfaces which have MIP
+       *     Tail which contains MIPs for Slots greater than 11."
+       *
+       * Reduce the slot consumption to keep compression enabled.
+       */
+      max_miptail_levels = 11;
+   }
 
    /* Start with the minimum number of levels that will fit in the tile */
    uint32_t min_miptail_start =
@@ -2909,6 +2944,9 @@ isl_surf_get_hiz_surf(const struct isl_device *dev,
    if (INTEL_DEBUG(DEBUG_NO_HIZ))
       return false;
 
+   if (surf->usage & ISL_SURF_USAGE_DISABLE_AUX_BIT)
+      return false;
+
    /* HiZ support does not exist prior to Gfx5 */
    if (ISL_GFX_VER(dev) < 5)
       return false;
@@ -3092,44 +3130,6 @@ isl_surf_supports_ccs(const struct isl_device *dev,
     */
    if (ISL_GFX_VER(dev) >= 9 && surf->tiling == ISL_TILING_X)
       return false;
-
-   /* SKL PRMs, Volume 5: Memory Views, Tiling and Mip Tails for 2D Surfaces:
-    *
-    *    "Lossless compression must not be used on surfaces which have MIP
-    *     Tail which contains MIPs for Slots greater than 11."
-    */
-   if (surf->miptail_start_level < surf->levels) {
-      const uint32_t miptail_levels = surf->levels - surf->miptail_start_level;
-      if (miptail_levels + isl_get_miptail_base_row(surf->tiling) > 11) {
-         assert(isl_tiling_is_64(surf->tiling) ||
-                isl_tiling_is_std_y(surf->tiling));
-         return false;
-      }
-   }
-
-   /* From the workarounds section in the SKL PRM:
-    *
-    *    "RCC cacheline is composed of X-adjacent 64B fragments instead of
-    *     memory adjacent. This causes a single 128B cacheline to straddle
-    *     multiple LODs inside the TYF MIPtail for 3D surfaces (beyond a
-    *     certain slot number), leading to corruption when CCS is enabled
-    *     for these LODs and RT is later bound as texture. WA: If
-    *     RENDER_SURFACE_STATE.Surface Type = 3D and
-    *     RENDER_SURFACE_STATE.Auxiliary Surface Mode != AUX_NONE and
-    *     RENDER_SURFACE_STATE.Tiled ResourceMode is TYF or TYS, Set the
-    *     value of RENDER_SURFACE_STATE.Mip Tail Start LOD to a mip that
-    *     larger than those present in the surface (i.e. 15)"
-    *
-    * We simply disallow CCS on 3D surfaces with miptails.
-    *
-    * Referred to as Wa_1207137018 on ICL+
-    */
-   if (ISL_GFX_VERX10(dev) <= 120 &&
-       surf->dim == ISL_SURF_DIM_3D &&
-       surf->miptail_start_level < surf->levels) {
-      assert(isl_tiling_is_std_y(surf->tiling));
-      return false;
-   }
 
    /* TODO: add CCS support for Ys/Yf */
    if (isl_tiling_is_std_y(surf->tiling))
@@ -3375,6 +3375,9 @@ isl_surf_get_ccs_surf(const struct isl_device *dev,
       break;                                       \
    case 200:                                       \
       isl_gfx20_##func(__VA_ARGS__);               \
+      break;                                       \
+   case 300:                                       \
+      isl_gfx30_##func(__VA_ARGS__);               \
       break;                                       \
    default:                                        \
       assert(!"Unknown hardware generation");      \
@@ -3839,10 +3842,15 @@ isl_surf_get_image_range_B_tile(const struct isl_surf *surf,
                                       &z_offset_el,
                                       &array_slice);
 
+   struct isl_tile_info tile_info;
+   isl_surf_get_tile_info(surf, &tile_info);
+
    /* We want the range we return to be exclusive but the tile containing the
-    * last pixel (what we just calculated) is inclusive.  Add one.
+    * last pixel (what we just calculated) is inclusive. Add one and round up
+    * to the tile size.
     */
-   (*end_tile_B)++;
+   *end_tile_B = ALIGN_NPOT(*end_tile_B + 1, tile_info.phys_extent_B.w *
+                                             tile_info.phys_extent_B.h);
 
    assert(*end_tile_B <= surf->size_B);
 }

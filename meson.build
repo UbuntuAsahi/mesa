@@ -17,6 +17,11 @@ project(
   ],
 )
 
+if host_machine.system() == 'darwin'
+  add_languages('objc', native : false)
+  add_project_arguments('-fobjc-arc', language : 'objc')
+endif
+
 cc = meson.get_compiler('c')
 cpp = meson.get_compiler('cpp')
 
@@ -85,10 +90,6 @@ with_imgui = with_intel_tools or with_vulkan_overlay_layer
 dri_drivers_path = get_option('dri-drivers-path')
 if dri_drivers_path == ''
   dri_drivers_path = join_paths(get_option('prefix'), get_option('libdir'), 'dri')
-endif
-dri_search_path = get_option('dri-search-path')
-if dri_search_path == ''
-  dri_search_path = dri_drivers_path
 endif
 
 gbm_backends_path = get_option('gbm-backends-path')
@@ -241,7 +242,7 @@ elif _vulkan_drivers.contains('all')
    _vulkan_drivers = ['amd', 'intel', 'intel_hasvk', 'swrast',
                       'freedreno', 'panfrost', 'virtio', 'broadcom',
                       'imagination-experimental', 'microsoft-experimental',
-                      'nouveau', 'asahi']
+                      'nouveau', 'asahi', 'gfxstream-experimental']
 endif
 
 with_intel_vk = _vulkan_drivers.contains('intel')
@@ -257,6 +258,7 @@ with_imagination_srv = get_option('imagination-srv')
 with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_nouveau_vk = _vulkan_drivers.contains('nouveau')
 with_asahi_vk = _vulkan_drivers.contains('asahi')
+with_gfxstream_vk = _vulkan_drivers.contains('gfxstream-experimental')
 with_any_vk = _vulkan_drivers.length() != 0
 
 if with_any_vk and host_machine.system() == 'windows' and meson.version().version_compare('< 1.3')
@@ -382,12 +384,14 @@ _platforms = get_option('platforms')
 if _platforms.contains('auto')
   if system_has_kms_drm
     _platforms = ['x11', 'wayland']
-  elif ['darwin', 'cygwin'].contains(host_machine.system())
+  elif host_machine.system() == 'cygwin'
     _platforms = ['x11']
-  elif ['haiku'].contains(host_machine.system())
+  elif host_machine.system() == 'haiku'
     _platforms = ['haiku']
   elif host_machine.system() == 'windows'
     _platforms = ['windows']
+  elif host_machine.system() == 'darwin'
+    _platforms = ['x11', 'macos']
   else
     error('Unknown OS @0@. Please pass -Dplatforms to set platforms. Patches gladly accepted to fix this.'.format(
           host_machine.system()))
@@ -400,6 +404,7 @@ with_platform_xcb = _platforms.contains('xcb')
 with_platform_wayland = _platforms.contains('wayland')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
+with_platform_macos = _platforms.contains('macos')
 
 with_glx = get_option('glx')
 if with_glx == 'auto'
@@ -487,6 +492,7 @@ if with_platform_android and get_option('platform-sdk-version') >= 29
   # ELF TLS, even when building targeting newer API levels.  Make it actually do
   # ELF TLS instead.
   c_cpp_args += '-fno-emulated-tls'
+  add_project_link_arguments('-Wl,-plugin-opt=-emulated-tls=0', language: ['c', 'cpp'])
 endif
 
 # -mtls-dialect=gnu2 speeds up non-initial-exec TLS significantly but requires
@@ -580,7 +586,7 @@ if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk
   dep_dxheaders = dependency('directx-headers', required : false)
   if not dep_dxheaders.found()
     dep_dxheaders = dependency('DirectX-Headers',
-      version : '>= 1.613.0',
+      version : '>= 1.614.1',
       fallback : ['DirectX-Headers', 'dep_dxheaders'],
       required : with_gallium_d3d12 or with_microsoft_vk
     )
@@ -639,85 +645,6 @@ if prog_glslang.found()
     glslang_quiet = ['--quiet']
   else
     glslang_quiet = []
-  endif
-endif
-
-dep_xv = null_dep
-_omx = get_option('gallium-omx')
-if not system_has_kms_drm
-  if ['auto', 'disabled'].contains(_omx)
-    _omx = 'disabled'
-  else
-    error('OMX state tracker can only be built on unix-like OSes.')
-  endif
-elif not (with_gallium_r600 or with_gallium_radeonsi or with_gallium_nouveau)
-  if ['auto', 'disabled'].contains(_omx)
-    _omx = 'disabled'
-  else
-    error('OMX state tracker requires at least one of the following gallium drivers: r600, radeonsi, nouveau.')
-  endif
-endif
-with_gallium_omx = _omx
-dep_omx = null_dep
-dep_omx_other = []
-if ['auto', 'bellagio'].contains(_omx)
-  dep_omx = dependency(
-    'libomxil-bellagio', required : _omx == 'bellagio'
-  )
-  if dep_omx.found()
-    with_gallium_omx = 'bellagio'
-  endif
-endif
-if ['auto', 'tizonia'].contains(_omx)
-  if with_dri and with_egl
-    dep_omx = dependency(
-      'libtizonia', version : '>= 0.10.0',
-      required : _omx == 'tizonia',
-    )
-    dep_omx_other = [
-      dependency('libtizplatform', required : _omx == 'tizonia'),
-      dependency('tizilheaders', required : _omx == 'tizonia'),
-    ]
-    if dep_omx.found() and dep_omx_other[0].found() and dep_omx_other[1].found()
-      with_gallium_omx = 'tizonia'
-    endif
-  elif _omx == 'tizonia'
-    error('OMX-Tizonia state tracker requires dri and egl')
-  endif
-endif
-if _omx == 'auto'
-  with_gallium_omx = 'disabled'
-else
-  with_gallium_omx = _omx
-endif
-
-pre_args += '-DENABLE_ST_OMX_BELLAGIO=@0@'.format((with_gallium_omx == 'bellagio').to_int())
-pre_args += '-DENABLE_ST_OMX_TIZONIA=@0@'.format((with_gallium_omx == 'tizonia').to_int())
-
-
-omx_drivers_path = get_option('omx-libs-path')
-
-if with_gallium_omx != 'disabled'
-  # Figure out where to put the omx driver.
-  # FIXME: this could all be vastly simplified by adding a 'defined_variable'
-  # argument to meson's get_variable method.
-  if omx_drivers_path == ''
-    _omx_libdir = dep_omx.get_variable(pkgconfig : 'libdir')
-    _omx_drivers_dir = dep_omx.get_variable(pkgconfig : 'pluginsdir')
-    if _omx_libdir == get_option('libdir')
-      omx_drivers_path = _omx_drivers_dir
-    else
-      _omx_base_dir = []
-      # This will fail on windows. Does OMX run on windows?
-      _omx_libdir = _omx_libdir.split('/')
-      _omx_drivers_dir = _omx_drivers_dir.split('/')
-      foreach o : _omx_drivers_dir
-        if not _omx_libdir.contains(o)
-          _omx_base_dir += o
-        endif
-      endforeach
-      omx_drivers_path = join_paths(get_option('libdir'), _omx_base_dir)
-    endif
   endif
 endif
 
@@ -932,11 +859,13 @@ if with_libbacktrace
 endif
 
 if with_platform_android
+  dep_android_ui = null_dep
   dep_android_mapper4 = null_dep
   if not with_android_stub
     dep_android = [
       dependency('cutils'),
       dependency('hardware'),
+      dependency('log'),
       dependency('sync'),
     ]
     if with_libbacktrace
@@ -947,6 +876,9 @@ if with_platform_android
     endif
     if get_option('platform-sdk-version') >= 30
       dep_android_mapper4 = dependency('android.hardware.graphics.mapper', version : '>= 4.0', required : false)
+    endif
+    if get_option('platform-sdk-version') >= 35
+      dep_android_ui = dependency('ui', required : false)
     endif
   endif
   pre_args += '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
@@ -1738,7 +1670,7 @@ with_gallium_drisw_kms = false
 if system_has_kms_drm
   dep_libdrm = dependency(
     'libdrm', version : '>=' + _drm_ver,
-    required : with_dri2 or with_dri
+    required : with_dri2 or with_dri or with_gbm
   )
 else
   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
@@ -1923,7 +1855,7 @@ if dep_spirv_tools.found()
 endif
 
 dep_clang = null_dep
-if with_clc
+if with_clc or with_gallium_clover
   llvm_libdir = dep_llvm.get_variable(cmake : 'LLVM_LIBRARY_DIR', configtool: 'libdir')
 
   dep_clang = cpp.find_library('clang-cpp', dirs : llvm_libdir, required : false)
@@ -1938,7 +1870,7 @@ if with_clc
     if dep_llvm.version().version_compare('>= 15.0')
       clang_modules += 'clangSupport'
     endif
-    if dep_llvm.version().version_compare('>= 16.0')
+    if dep_llvm.version().version_compare('>= 16.0') or with_gallium_clover
       clang_modules += 'clangASTMatchers'
     endif
     if dep_llvm.version().version_compare('>= 18.0')
@@ -2055,12 +1987,6 @@ else
   prog_flex_cpp = prog_flex
 endif
 
-dep_selinux = null_dep
-if get_option('selinux')
-  dep_selinux = dependency('libselinux')
-  pre_args += '-DMESA_SELINUX'
-endif
-
 _libunwind = get_option('libunwind') \
   .require(not with_platform_android, error_message : 'Android requires the use of the backtrace library, not libunwind')
 if host_machine.system() == 'darwin'
@@ -2145,7 +2071,6 @@ if host_machine.cpu_family() == 'x86_64' and cc.get_id() == 'gcc'
   endif
 endif
 
-with_dri3_modifiers = false
 with_dri3_explicit_sync = false
 with_xcb_keysyms = false
 if with_platform_x11
@@ -2165,8 +2090,7 @@ if with_platform_x11
     dep_x11 = dependency('x11')
   endif
   if (with_any_vk or with_glx == 'dri' or with_egl or
-       (with_gallium_vdpau or with_gallium_va or
-        with_gallium_omx != 'disabled'))
+       (with_gallium_vdpau or with_gallium_va))
     dep_xcb = dependency('xcb')
     dep_xcb_keysyms = dependency('xcb-keysyms', required : false)
     with_xcb_keysyms = dep_xcb_keysyms.found()
@@ -2182,13 +2106,8 @@ if with_platform_x11
   if with_dri_platform == 'drm'
     dep_xcb_dri2 = dependency('xcb-dri2', version : '>= 1.8', required : with_x11_dri2)
 
-    dep_xcb_dri3 = dependency('xcb-dri3')
-    dep_xcb_present = dependency('xcb-present')
-    # until xcb-dri3 has been around long enough to make a hard-dependency:
-    if (dep_xcb_dri3.version().version_compare('>= 1.13') and
-        dep_xcb_present.version().version_compare('>= 1.13'))
-      with_dri3_modifiers = true
-    endif
+    dep_xcb_dri3 = dependency('xcb-dri3', version : '>= 1.13')
+    dep_xcb_present = dependency('xcb-present', version : '>= 1.13')
     if (dep_xcb_dri3.version().version_compare('>= 1.17') and
         dep_xcb_present.version().version_compare('>= 1.17'))
       with_dri3_explicit_sync = true
@@ -2210,9 +2129,9 @@ if with_platform_x11
     endif
   endif
   if (with_egl or
+      with_dri or
       with_any_vk or
-      with_gallium_vdpau or with_gallium_xa or
-      with_gallium_omx != 'disabled')
+      with_gallium_vdpau or with_gallium_xa)
     dep_xcb_xfixes = dependency('xcb-xfixes')
   endif
   if with_xlib_lease or with_any_vk
@@ -2231,9 +2150,6 @@ if with_dri2
 endif
 if with_x11_dri2
   pre_args += '-DHAVE_X11_DRI2'
-endif
-if with_dri3_modifiers
-  pre_args += '-DHAVE_DRI3_MODIFIERS'
 endif
 if with_dri3_explicit_sync
   pre_args += '-DHAVE_DRI3_EXPLICIT_SYNC'
@@ -2446,9 +2362,6 @@ endif
 if with_gallium_xa
   video_apis += 'xa'
 endif
-if with_gallium_omx != 'disabled'
-  video_apis += 'omx'
-endif
 video_summary += {'APIs': video_apis.length() != 0 ? video_apis : false}
 summary(video_summary, section: 'Video', bool_yn: true, list_sep: ' ')
 
@@ -2469,9 +2382,6 @@ if with_gallium
   endif
   if with_gallium_vdpau
     gallium_frontends += 'vdpau'
-  endif
-  if with_gallium_omx != 'disabled'
-    gallium_frontends += 'omx' + with_gallium_omx
   endif
   if with_gallium_va
     gallium_frontends += 'va'

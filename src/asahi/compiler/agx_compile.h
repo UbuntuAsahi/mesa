@@ -11,10 +11,10 @@
 
 struct agx_cf_binding {
    /* Base coefficient register */
-   unsigned cf_base;
+   uint8_t cf_base;
 
    /* Slot being bound */
-   gl_varying_slot slot;
+   gl_varying_slot slot : 8;
 
    /* First component bound.
     *
@@ -30,6 +30,8 @@ struct agx_cf_binding {
 
    /* Perspective correct interpolation */
    bool perspective : 1;
+
+   uint8_t pad;
 };
 
 /* Conservative bound, * 4 due to offsets (TODO: maybe worth eliminating
@@ -64,6 +66,7 @@ static_assert(sizeof(struct agx_interp_info) == 16, "packed");
 
 struct agx_shader_info {
    enum pipe_shader_type stage;
+   uint32_t binary_size;
 
    union agx_varyings varyings;
 
@@ -132,16 +135,24 @@ struct agx_shader_info {
    /* Output mask set during driver lowering */
    uint64_t outputs;
 
-   /* Immediate data that must be uploaded and mapped as uniform registers */
-   unsigned immediate_base_uniform;
-   unsigned immediate_size_16;
-   uint16_t immediates[512];
+   /* There may be constants in the binary. The driver must map these to uniform
+    * registers as specified hre.
+    */
+   struct {
+      /* Offset in the binary */
+      uint32_t offset;
+
+      /* Base uniform to map constants */
+      uint16_t base_uniform;
+
+      /* Number of 16-bit constants to map contiguously there */
+      uint16_t size_16;
+   } rodata;
 };
 
 struct agx_shader_part {
    struct agx_shader_info info;
    void *binary;
-   size_t binary_size;
 };
 
 #define AGX_MAX_RTS (8)
@@ -326,6 +337,5 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_fquantize2f16 = true,
    .compact_arrays = true,
    .discard_is_demote = true,
-   .has_ddx_intrinsics = true,
    .scalarize_ddx = true,
 };

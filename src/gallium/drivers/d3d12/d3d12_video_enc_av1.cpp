@@ -1218,7 +1218,8 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
    struct pipe_av1_enc_picture_desc *pAV1Pic = (struct pipe_av1_enc_picture_desc *) picture;
 
    // Output param bUsedAsReference
-   bUsedAsReference = (pAV1Pic->refresh_frame_flags != 0);
+   pD3D12Enc->m_currentEncodeConfig.m_bUsedAsReference = (pAV1Pic->refresh_frame_flags != 0);
+   bUsedAsReference = pD3D12Enc->m_currentEncodeConfig.m_bUsedAsReference;
 
    // D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAGS Flags;
    picParams.pAV1PicData->Flags = D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_NONE;
@@ -1607,6 +1608,9 @@ d3d12_video_encoder_update_current_frame_pic_params_info_av1(struct d3d12_video_
          }
       }
    }
+
+   pD3D12Enc->m_upDPBManager->begin_frame(picParams, bUsedAsReference, picture);
+   pD3D12Enc->m_upDPBManager->get_current_frame_picture_control_data(picParams);
 
    // Save state snapshot from record time to resolve headers at get_feedback time
    uint64_t current_metadata_slot = (pD3D12Enc->m_fenceValue % D3D12_VIDEO_ENC_METADATA_BUFFERS_COUNT);

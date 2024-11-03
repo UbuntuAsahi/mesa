@@ -104,9 +104,15 @@ etna_emit_output(struct etna_compile *c, nir_variable *var, struct etna_inst_src
 
    if (is_fs(c)) {
       switch (var->data.location) {
-      case FRAG_RESULT_COLOR:
-      case FRAG_RESULT_DATA0: /* DATA0 is used by gallium shaders for color */
-         c->variant->ps_color_out_reg = src.reg;
+      case FRAG_RESULT_DATA0:
+      case FRAG_RESULT_DATA1:
+      case FRAG_RESULT_DATA2:
+      case FRAG_RESULT_DATA3:
+      case FRAG_RESULT_DATA4:
+      case FRAG_RESULT_DATA5:
+      case FRAG_RESULT_DATA6:
+      case FRAG_RESULT_DATA7:
+         c->variant->ps_color_out_reg[var->data.location - FRAG_RESULT_DATA0] = src.reg;
          break;
       case FRAG_RESULT_DEPTH:
          c->variant->ps_depth_out_reg = src.reg;
@@ -287,7 +293,7 @@ const_src(struct etna_compile *c, nir_const_value *value, unsigned num_component
 static const uint8_t
 reg_swiz[NUM_REG_TYPES] = {
    [REG_TYPE_VEC4] = INST_SWIZ_IDENTITY,
-   [REG_TYPE_VIRT_SCALAR_X] = INST_SWIZ_IDENTITY,
+   [REG_TYPE_VIRT_SCALAR_X] = SWIZZLE(X, X, X, X),
    [REG_TYPE_VIRT_SCALAR_Y] = SWIZZLE(Y, Y, Y, Y),
    [REG_TYPE_VIRT_VEC2_XY] = INST_SWIZ_IDENTITY,
    [REG_TYPE_VIRT_VEC2T_XY] = INST_SWIZ_IDENTITY,
@@ -369,6 +375,8 @@ get_src(struct etna_compile *c, nir_src *src)
       case nir_intrinsic_load_uniform:
       case nir_intrinsic_load_ubo:
       case nir_intrinsic_load_reg:
+      case nir_intrinsic_ddx:
+      case nir_intrinsic_ddy:
          return ra_src(c, src);
       case nir_intrinsic_load_front_face:
          return (hw_src) { .use = 1, .rgroup = ISA_REG_GROUP_INTERNAL };
@@ -569,6 +577,42 @@ emit_intrinsic(struct etna_compile *c, nir_intrinsic_instr * intr)
    case nir_intrinsic_terminate:
       etna_emit_discard(c, SRC_DISABLE);
       break;
+   case nir_intrinsic_ddx: {
+      unsigned dst_swiz;
+      struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);
+      struct etna_inst_src src = get_src(c, &intr->src[0]);
+
+      src = src_swizzle(src, dst_swiz);
+
+      struct etna_inst inst = {
+         .dst = dst,
+         .opcode = ISA_OPC_DSX,
+         .cond = ISA_COND_TRUE,
+         .type = ISA_TYPE_F32,
+         .src[0] = src,
+         .src[1] = src,
+      };
+
+      emit_inst(c, &inst);
+   } break;
+   case nir_intrinsic_ddy: {
+      unsigned dst_swiz;
+      struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);
+      struct etna_inst_src src = get_src(c, &intr->src[0]);
+
+      src = src_swizzle(src, dst_swiz);
+
+      struct etna_inst inst = {
+         .dst = dst,
+         .opcode = ISA_OPC_DSY,
+         .type = ISA_TYPE_F32,
+         .cond = ISA_COND_TRUE,
+         .src[0] = src,
+         .src[1] = src,
+      };
+
+      emit_inst(c, &inst);
+   } break;
    case nir_intrinsic_load_uniform: {
       unsigned dst_swiz;
       struct etna_inst_dst dst = ra_def(c, &intr->def, &dst_swiz);
@@ -1063,6 +1107,18 @@ etna_compile_check_limits(struct etna_shader_variant *v)
       return false;
    }
 
+   if (v->stage == MESA_SHADER_VERTEX) {
+      int num_outputs = v->vs_pointsize_out_reg >= 0 ? 2 : 1;
+
+      num_outputs += v->outfile.num_reg;
+
+      if (num_outputs > specs->max_vs_outputs) {
+         DBG("Number of VS outputs (%zu) exceeds maximum %d",
+             v->outfile.num_reg, specs->max_vs_outputs);
+         return false;
+      }
+   }
+
    return true;
 }
 
@@ -1130,8 +1186,10 @@ etna_compile_shader(struct etna_shader_variant *v)
    v->vs_id_in_reg = -1;
    v->vs_pos_out_reg = -1;
    v->vs_pointsize_out_reg = -1;
-   v->ps_color_out_reg = 0; /* 0 for shader that doesn't write fragcolor.. */
    v->ps_depth_out_reg = -1;
+
+   if (s->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS_V(s, nir_lower_fragcolor, specs->num_rts);
 
    /*
     * Lower glTexCoord, fixes e.g. neverball point sprite (exit cylinder stars)
@@ -1317,7 +1375,7 @@ etna_link_shader(struct etna_shader_link_info *info,
     * binary search could be used because the vs outputs are sorted by their
     * semantic index and grouped by semantic type by fill_in_vs_outputs.
     */
-   assert(fs->infile.num_reg < ETNA_NUM_INPUTS);
+   assert(fs->infile.num_reg <= ETNA_NUM_INPUTS);
    info->pcoord_varying_comp_ofs = -1;
 
    for (int idx = 0; idx < fs->infile.num_reg; ++idx) {

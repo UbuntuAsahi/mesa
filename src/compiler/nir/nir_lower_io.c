@@ -2750,6 +2750,7 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_task_payload:
    case nir_intrinsic_load_uniform:
+   case nir_intrinsic_load_constant:
    case nir_intrinsic_load_push_constant:
    case nir_intrinsic_load_kernel_input:
    case nir_intrinsic_load_global:
@@ -2775,6 +2776,7 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_load_per_vertex_output:
    case nir_intrinsic_load_per_primitive_output:
    case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_smem_amd:
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_shared:
    case nir_intrinsic_store_task_payload:
@@ -3016,16 +3018,17 @@ add_const_offset_to_base_block(nir_block *block, nir_builder *b,
              !nir_intrinsic_io_semantics(intrin).per_view) {
             unsigned off = nir_src_as_uint(*offset);
 
-            nir_intrinsic_set_base(intrin, nir_intrinsic_base(intrin) + off);
+            if (off) {
+               nir_intrinsic_set_base(intrin, nir_intrinsic_base(intrin) + off);
 
-            sem.location += off;
+               sem.location += off;
+               b->cursor = nir_before_instr(&intrin->instr);
+               nir_src_rewrite(offset, nir_imm_int(b, 0));
+               progress = true;
+            }
             /* non-indirect indexing should reduce num_slots */
             sem.num_slots = is_dual_slot(intrin) ? 2 : 1;
             nir_intrinsic_set_io_semantics(intrin, sem);
-
-            b->cursor = nir_before_instr(&intrin->instr);
-            nir_src_rewrite(offset, nir_imm_int(b, 0));
-            progress = true;
          }
       }
    }

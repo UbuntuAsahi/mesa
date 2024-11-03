@@ -1378,6 +1378,17 @@
     <imm name="offset" start="8" size="16" signed="true"/>
   </group>
 
+  <ins name="LEA_BUFFER" title="Load buffer effective address" message="attribute" opcode="0x6B" unit="LS">
+    <desc>
+      Load effective address of a simple buffer with an offset added.
+    </desc>
+    <sr write="true"/>
+    <sr_count count="2"/>
+    <slot/>
+    <src>Offset</src>
+    <src>Index</src>
+  </ins>
+
   <ins name="ST_CVT" title="Store with conversion" opcode="0x71" unused="true" unit="LS">
     <desc>
       Store to memory with data conversion. The address to store to is given in
@@ -2504,6 +2515,30 @@
     <sr read="true" flags="false"/>
     <src size="64">Image to read from</src>
     <src pseudo="true">Dummy source for IR</src>
+    <immediate name="sr_count" size="4" pseudo="true"/>
+  </ins>
+
+  <ins name="TEX_GRADIENT" title="Texture gradient" opcode="0x12A" message="tex" unit="T">
+    <desc>Texture sample with explicit gradient.</desc>
+    <slot/>
+    <skip/>
+    <register_type/>
+    <register_width/>
+    <write_mask/>
+    <dimension/>
+    <wide_indices/>
+    <force_delta_enable/>
+    <lod_bias_disable/>
+    <lod_clamp_disable/>
+    <derivative_enable/>
+
+    <sr_count/>
+    <sr_write_count/>
+
+    <sr write="true" flags="false"/>
+    <sr read="true" flags="false"/>
+    <src size="64">Image to read from</src>
+    <src pseudo="true">Dummy for IR</src>
     <immediate name="sr_count" size="4" pseudo="true"/>
   </ins>
 

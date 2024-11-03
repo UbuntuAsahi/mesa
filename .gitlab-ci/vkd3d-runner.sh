@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1091 # paths only become valid at runtime
+
+. "${SCRIPTS_DIR}/setup-test-env.sh"
 
 set -e
 
@@ -13,11 +16,6 @@ if [[ -z "$VK_DRIVER" ]]; then
 fi
 
 INSTALL=$(realpath -s "$PWD"/install)
-
-RESULTS=$(realpath -s "$PWD"/results)
-
-# Make sure the results folder exists
-mkdir -p "$RESULTS"
 
 # Set up the driver environment.
 # Modifiying here directly LD_LIBRARY_PATH may cause problems when
@@ -51,7 +49,7 @@ if ! vulkaninfo | grep driverInfo | tee /tmp/version.txt | grep -F "Mesa $MESA_V
 fi
 
 # Gather the list expected failures
-EXPECTATIONFILE="$RESULTS/$GPU_VERSION-vkd3d-fails.txt"
+EXPECTATIONFILE="$RESULTS_DIR/$GPU_VERSION-vkd3d-fails.txt"
 if [ -f "$INSTALL/$GPU_VERSION-vkd3d-fails.txt" ]; then
     grep -vE '^(#|$)' "$INSTALL/$GPU_VERSION-vkd3d-fails.txt" | sort > "$EXPECTATIONFILE"
 else
@@ -90,8 +88,8 @@ fi
 
 printf "%s\n" "Running vkd3d-proton testsuite..."
 
-LOGFILE="$RESULTS/vkd3d-proton-log.txt"
-TEST_LOGS="$PWD/test-logs"
+LOGFILE="$RESULTS_DIR/vkd3d-proton-log.txt"
+TEST_LOGS="$RESULTS_DIR/test-logs"
 (cd /vkd3d-proton-tests && tests/test-runner.sh x64/bin/d3d12 --jobs "${FDO_CI_CONCURRENT:-4}" --output-dir "$TEST_LOGS" | tee "$LOGFILE")
 
 printf '\n\n'

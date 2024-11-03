@@ -53,6 +53,7 @@ struct radv_instance {
       bool disable_shrink_image_store;
       bool disable_aniso_single_level;
       bool disable_trunc_coord;
+      bool disable_depth_storage;
       bool zero_vram;
       bool disable_sinking_load_input_fs;
       bool flush_before_query_copy;
@@ -65,7 +66,6 @@ struct radv_instance {
       bool legacy_sparse_binding;
       bool force_pstate_peak_gfx11_dgpu;
       bool clear_lds;
-      bool enable_dgc;
       bool enable_khr_present_wait;
       bool report_llvm9_version_string;
       bool vk_require_etc2;

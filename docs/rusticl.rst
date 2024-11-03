@@ -11,8 +11,8 @@ In order to use Rusticl on any platform the environment variable
 for any driver by default yet as doing so can impact system stability until
 remaining core issues are ironed out.
 
-Enable drivers by default
--------------------------
+Enabling drivers by default
+---------------------------
 
 Distributions and everybody building rusticl themselves can opt-in or opt-out
 certain drivers from being enabled by default. The

@@ -542,7 +542,7 @@ main(int argc, char **argv)
       agx_compile_shader_nir(b.shader, &key, NULL, &compiled);
 
       print_u32_data(fp, "libagx_g13", "helper", compiled.binary,
-                     compiled.binary_size);
+                     compiled.info.binary_size);
       free(compiled.binary);
       ralloc_free(b.shader);
 
@@ -556,7 +556,7 @@ main(int argc, char **argv)
    /* Serialize NIR for embedding */
    struct blob blob;
    blob_init(&blob);
-   nir_serialize(&blob, nir, false /* strip */);
+   nir_serialize(&blob, nir, true /* strip */);
    print_u32_data(fp, prefix, "nir", (const uint32_t *)blob.data, blob.size);
    blob_finish(&blob);
 

@@ -25,6 +25,7 @@
 #include "pipe/p_defines.h"
 #include "util/u_memory.h"
 #include "util/format/u_format.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_inlines.h"
 #include "util/u_resource.h"
 #include "util/u_surface.h"
@@ -101,10 +102,6 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
         struct pipe_screen *pscreen = prsc->screen;
         struct v3d_bo *bo;
 
-        /* never replace a mapped bo */
-        if (rsc->bo && rsc->bo->map)
-                return false;
-
         /* Buffers may be read using ldunifa, which prefetches the next
          * 4 bytes after a read. If the buffer's size is exactly a multiple
          * of a page size and the shader reads the last 4 bytes with ldunifa
@@ -177,6 +174,10 @@ rebind_sampler_views(struct v3d_context *v3d,
 
                         struct v3d_sampler_view *sview =
                                 v3d_sampler_view(psview);
+
+                        if (sview->serial_id == rsc->serial_id)
+                                continue;
+
                         struct v3d_device_info *devinfo =
                                 &v3d->screen->devinfo;
 
@@ -194,6 +195,8 @@ v3d_map_usage_prep(struct pipe_context *pctx,
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_resource *rsc = v3d_resource(prsc);
+
+        MESA_TRACE_FUNC();
 
         if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
                 if (v3d_resource_bo_alloc(rsc)) {

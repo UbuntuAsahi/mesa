@@ -570,12 +570,26 @@ static const char *const lsc_operation[] = {
    [LSC_OP_ATOMIC_XOR]      = "atomic_xor",
 };
 
+const char *
+brw_lsc_op_to_string(unsigned op)
+{
+   assert(op < ARRAY_SIZE(lsc_operation));
+   return lsc_operation[op];
+}
+
 static const char *const lsc_addr_surface_type[] = {
    [LSC_ADDR_SURFTYPE_FLAT] = "flat",
    [LSC_ADDR_SURFTYPE_BSS]  = "bss",
    [LSC_ADDR_SURFTYPE_SS]   = "ss",
    [LSC_ADDR_SURFTYPE_BTI]  = "bti",
 };
+
+const char *
+brw_lsc_addr_surftype_to_string(unsigned t)
+{
+   assert(t < ARRAY_SIZE(lsc_addr_surface_type));
+   return lsc_addr_surface_type[t];
+}
 
 static const char* const lsc_fence_scope[] = {
    [LSC_FENCE_THREADGROUP]     = "threadgroup",
@@ -617,6 +631,13 @@ static const char* const lsc_data_size[] = {
    [LSC_DATA_SIZE_D16U32]  = "d16u32",
    [LSC_DATA_SIZE_D16BF32] = "d16bf32",
 };
+
+const char *
+brw_lsc_data_size_to_string(unsigned s)
+{
+   assert(s < ARRAY_SIZE(lsc_data_size));
+   return lsc_data_size[s];
+}
 
 static const char* const lsc_vect_size_str[] = {
    [LSC_VECT_SIZE_V1] = "V1",
@@ -936,7 +957,7 @@ dest_3src(FILE *file, const struct intel_device_info *devinfo,
       subreg_nr = brw_inst_3src_a1_dst_subreg_nr(devinfo, inst);
    } else {
       type = brw_inst_3src_a16_dst_type(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_dst_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_dst_subreg_nr(devinfo, inst);
    }
    subreg_nr /= brw_type_size_bytes(type);
 
@@ -1243,7 +1264,7 @@ src0_3src(FILE *file, const struct intel_device_info *devinfo,
    } else {
       _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src0_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src0_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src0_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src0_rep_ctrl(devinfo, inst)) {
@@ -1309,7 +1330,7 @@ src1_3src(FILE *file, const struct intel_device_info *devinfo,
    } else {
       _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src1_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src1_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src1_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src1_rep_ctrl(devinfo, inst)) {
@@ -1392,7 +1413,7 @@ src2_3src(FILE *file, const struct intel_device_info *devinfo,
    } else {
       _file = FIXED_GRF;
       reg_nr = brw_inst_3src_src2_reg_nr(devinfo, inst);
-      subreg_nr = brw_inst_3src_a16_src2_subreg_nr(devinfo, inst) * 4;
+      subreg_nr = brw_inst_3src_a16_src2_subreg_nr(devinfo, inst);
       type = brw_inst_3src_a16_src_type(devinfo, inst);
 
       if (brw_inst_3src_a16_src2_rep_ctrl(devinfo, inst)) {

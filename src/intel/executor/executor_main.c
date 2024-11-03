@@ -117,8 +117,9 @@ print_help()
       "The following INTEL_DEBUG values (comma separated) are used:\n"
       "\n"
       " - bat             Dumps the batch buffer.\n"
-      " - color           Uses colore for the above.\n"
-      " - cs              Dumps the assembly after macro processing.\n"
+      " - color           Uses colors for the batch buffer dump.\n"
+      " - cs              Dumps the source after macro processing\n"
+      "                   the final assembly.\n"
       "\n"
       "EXAMPLE\n"
       "\n"
@@ -135,6 +136,7 @@ print_help()
       "      add(8)   g4<1>UD  g2<8,8,1>UD  g3<8,8,1>UD  { align1 @1 1Q };\n"
       "\n"
       "      @write   g3       g4\n"
+      "      @eot\n"
       "    ]]\n"
       "  }\n"
       "\n"
@@ -309,6 +311,7 @@ get_drm_device(struct intel_device_info *devinfo)
          break;
       }
    }
+   drmFreeDevices(devices, max_devices);
 
    return fd;
 }
@@ -435,6 +438,7 @@ executor_context_setup(executor_context *ec)
          }
       }
       assert(found_engine);
+      free(engines_info);
 
       struct drm_xe_exec_queue_create queue_create = {
          .vm_id          = ec->xe.vm_id,
@@ -649,14 +653,18 @@ l_execute(lua_State *L)
       const char *src = executor_apply_macros(&ec, params.original_src);
 
       FILE *f = fmemopen((void *)src, strlen(src), "r");
-      brw_assemble_result asm = brw_assemble(ec.mem_ctx, ec.devinfo, f, "", 0);
-      fclose(f);
 
-      if (INTEL_DEBUG(DEBUG_CS) || !asm.bin) {
+      brw_assemble_flags flags = 0;
+
+      if (INTEL_DEBUG(DEBUG_CS)) {
          printf("=== Processed assembly source ===\n"
                 "%s"
                 "=================================\n\n", src);
+         flags = BRW_ASSEMBLE_DUMP;
       }
+
+      brw_assemble_result asm = brw_assemble(ec.mem_ctx, ec.devinfo, f, "", flags);
+      fclose(f);
 
       if (!asm.bin)
          failf("assembler failure");

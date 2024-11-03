@@ -234,11 +234,12 @@ VAStatus vlVaMapBuffer2(VADriverContextP ctx, VABufferID buf_id,
 
             curr_buf_ptr = buf->data;
             for (size_t i = 0; i < buf->extended_metadata.codec_unit_metadata_count; i++) {
-               curr_buf_ptr->status |= VA_CODED_BUF_STATUS_SINGLE_NALU;
                curr_buf_ptr->size = buf->extended_metadata.codec_unit_metadata[i].size;
                curr_buf_ptr->buf = compressed_bitstream_data + buf->extended_metadata.codec_unit_metadata[i].offset;
                if (buf->extended_metadata.codec_unit_metadata[i].flags & PIPE_VIDEO_CODEC_UNIT_LOCATION_FLAG_MAX_SLICE_SIZE_OVERFLOW)
                   curr_buf_ptr->status |= VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK;
+               if (buf->extended_metadata.codec_unit_metadata[i].flags & PIPE_VIDEO_CODEC_UNIT_LOCATION_FLAG_SINGLE_NALU)
+                  curr_buf_ptr->status |= VA_CODED_BUF_STATUS_SINGLE_NALU;
 
                curr_buf_ptr = curr_buf_ptr->next;
             }
@@ -582,8 +583,8 @@ vlVaSyncBuffer(VADriverContextP ctx, VABufferID buf_id, uint64_t timeout_ns)
    vlVaSurface* surf = handle_table_get(drv->htab, buf->associated_encode_input_surf);
 
    if ((buf->feedback) && (context->decoder->entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE)) {
-      if (surf && context->decoder->get_feedback_fence &&
-          !context->decoder->get_feedback_fence(context->decoder, surf->fence, timeout_ns)) {
+      if (surf && context->decoder->fence_wait &&
+          !context->decoder->fence_wait(context->decoder, surf->fence, timeout_ns)) {
          mtx_unlock(&drv->mutex);
          return VA_STATUS_ERROR_TIMEDOUT;
       }

@@ -64,6 +64,8 @@ get_nir_options_for_stage(struct radv_physical_device *pdev, gl_shader_stage sta
    options->max_unroll_iterations_aggressive = 128;
    options->lower_doubles_options = nir_lower_drcp | nir_lower_dsqrt | nir_lower_drsq | nir_lower_ddiv;
    options->io_options |= nir_io_mediump_is_32bit;
+   options->varying_estimate_instr_cost = ac_nir_varying_estimate_instr_cost;
+   options->varying_expression_max_cost = ac_nir_varying_expression_max_cost;
 }
 
 void
@@ -195,6 +197,8 @@ radv_optimize_nir_algebraic(nir_shader *nir, bool opt_offsets, bool opt_mqsad)
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_cse);
       NIR_PASS(more_algebraic, nir, nir_opt_algebraic);
+      NIR_PASS(_, nir, nir_opt_generate_bfi);
+      NIR_PASS(_, nir, nir_opt_remove_phis);
       NIR_PASS(_, nir, nir_opt_dead_cf);
    }
 
@@ -203,6 +207,7 @@ radv_optimize_nir_algebraic(nir_shader *nir, bool opt_offsets, bool opt_mqsad)
          .uniform_max = 0,
          .buffer_max = ~0,
          .shared_max = ~0,
+         .shared_atomic_max = ~0,
       };
       NIR_PASS(_, nir, nir_opt_offsets, &offset_options);
    }
@@ -370,9 +375,6 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       free(spec_entries);
 
       radv_device_associate_nir(device, nir);
-
-      /* TODO: This can be removed once GCM (which is more general) is used. */
-      NIR_PASS(_, nir, nir_opt_reuse_constants);
 
       const struct nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
          .point_coord = true,
@@ -669,7 +671,7 @@ radv_consider_culling(const struct radv_physical_device *pdev, struct nir_shader
       max_ps_params = 12; /* GFX10.3 and newer discrete GPUs. */
 
    /* TODO: consider other heuristics here, such as PS execution time */
-   if (util_bitcount64(ps_inputs_read & ~VARYING_BIT_POS) > max_ps_params)
+   if (util_bitcount64(ps_inputs_read) > max_ps_params)
       return false;
 
    /* Only triangle culling is supported. */
@@ -884,13 +886,6 @@ radv_create_shader_arena(struct radv_device *device, struct radv_shader_free_lis
 
    if (replayable)
       flags |= RADEON_FLAG_REPLAYABLE;
-
-   /* vkCmdUpdatePipelineIndirectBufferNV() can be called on any queue supporting transfer
-    * operations and it's not required to call it on the same queue as DGC execute. To make sure the
-    * compute shader BO is part of the DGC execute submission, force all shaders to be local BOs.
-    */
-   if (device->vk.enabled_features.deviceGeneratedComputePipelines)
-      flags |= RADEON_FLAG_PREFER_LOCAL_BO;
 
    VkResult result;
    result = radv_bo_create(device, NULL, arena_size, RADV_SHADER_ALLOC_ALIGNMENT, RADEON_DOMAIN_VRAM, flags,
@@ -1284,8 +1279,10 @@ radv_init_shader_upload_queue(struct radv_device *device)
    for (unsigned i = 0; i < RADV_SHADER_UPLOAD_CS_COUNT; i++) {
       struct radv_shader_dma_submission *submission = calloc(1, sizeof(struct radv_shader_dma_submission));
       submission->cs = ws->cs_create(ws, AMD_IP_SDMA, false);
-      if (!submission->cs)
+      if (!submission->cs) {
+         free(submission);
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
       list_addtail(&submission->list, &device->shader_dma_submissions);
    }
 
@@ -1743,9 +1740,102 @@ radv_precompute_registers_hw_cs(struct radv_device *device, struct radv_shader_b
 }
 
 static void
+radv_precompute_registers_pgm(const struct radv_device *device, struct radv_shader_info *info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
+   enum ac_hw_stage hw_stage = radv_select_hw_stage(info, gfx_level);
+
+   /* Special case for merged shaders compiled separately with ESO on GFX9+. */
+   if (info->merged_shader_compiled_separately) {
+      if (info->stage == MESA_SHADER_VERTEX && info->next_stage == MESA_SHADER_TESS_CTRL) {
+         hw_stage = AC_HW_HULL_SHADER;
+      } else if ((info->stage == MESA_SHADER_VERTEX || info->stage == MESA_SHADER_TESS_EVAL) &&
+                 info->next_stage == MESA_SHADER_GEOMETRY) {
+         hw_stage = info->is_ngg ? AC_HW_NEXT_GEN_GEOMETRY_SHADER : AC_HW_LEGACY_GEOMETRY_SHADER;
+      }
+   }
+
+   switch (hw_stage) {
+   case AC_HW_NEXT_GEN_GEOMETRY_SHADER:
+      assert(gfx_level >= GFX10);
+      if (gfx_level >= GFX12) {
+         info->regs.pgm_lo = R_00B224_SPI_SHADER_PGM_LO_ES;
+      } else {
+         info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B228_SPI_SHADER_PGM_RSRC1_GS;
+      info->regs.pgm_rsrc2 = R_00B22C_SPI_SHADER_PGM_RSRC2_GS;
+      break;
+   case AC_HW_LEGACY_GEOMETRY_SHADER:
+      assert(gfx_level < GFX11);
+      if (gfx_level >= GFX10) {
+         info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      } else if (gfx_level >= GFX9) {
+         info->regs.pgm_lo = R_00B210_SPI_SHADER_PGM_LO_ES;
+      } else {
+         info->regs.pgm_lo = R_00B220_SPI_SHADER_PGM_LO_GS;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B228_SPI_SHADER_PGM_RSRC1_GS;
+      info->regs.pgm_rsrc2 = R_00B22C_SPI_SHADER_PGM_RSRC2_GS;
+      break;
+   case AC_HW_EXPORT_SHADER:
+      assert(gfx_level < GFX9);
+      info->regs.pgm_lo = R_00B320_SPI_SHADER_PGM_LO_ES;
+      info->regs.pgm_rsrc1 = R_00B328_SPI_SHADER_PGM_RSRC1_ES;
+      info->regs.pgm_rsrc2 = R_00B32C_SPI_SHADER_PGM_RSRC2_ES;
+      break;
+   case AC_HW_LOCAL_SHADER:
+      assert(gfx_level < GFX9);
+      info->regs.pgm_lo = R_00B520_SPI_SHADER_PGM_LO_LS;
+      info->regs.pgm_rsrc1 = R_00B528_SPI_SHADER_PGM_RSRC1_LS;
+      info->regs.pgm_rsrc2 = R_00B52C_SPI_SHADER_PGM_RSRC2_LS;
+      break;
+   case AC_HW_HULL_SHADER:
+      if (gfx_level >= GFX12) {
+         info->regs.pgm_lo = R_00B424_SPI_SHADER_PGM_LO_LS;
+      } else if (gfx_level >= GFX10) {
+         info->regs.pgm_lo = R_00B520_SPI_SHADER_PGM_LO_LS;
+      } else if (gfx_level >= GFX9) {
+         info->regs.pgm_lo = R_00B410_SPI_SHADER_PGM_LO_LS;
+      } else {
+         info->regs.pgm_lo = R_00B420_SPI_SHADER_PGM_LO_HS;
+      }
+
+      info->regs.pgm_rsrc1 = R_00B428_SPI_SHADER_PGM_RSRC1_HS;
+      info->regs.pgm_rsrc2 = R_00B42C_SPI_SHADER_PGM_RSRC2_HS;
+      break;
+   case AC_HW_VERTEX_SHADER:
+      assert(gfx_level < GFX11);
+      info->regs.pgm_lo = R_00B120_SPI_SHADER_PGM_LO_VS;
+      info->regs.pgm_rsrc1 = R_00B128_SPI_SHADER_PGM_RSRC1_VS;
+      info->regs.pgm_rsrc2 = R_00B12C_SPI_SHADER_PGM_RSRC2_VS;
+      break;
+   case AC_HW_PIXEL_SHADER:
+      info->regs.pgm_lo = R_00B020_SPI_SHADER_PGM_LO_PS;
+      info->regs.pgm_rsrc1 = R_00B028_SPI_SHADER_PGM_RSRC1_PS;
+      info->regs.pgm_rsrc2 = R_00B02C_SPI_SHADER_PGM_RSRC2_PS;
+      break;
+   case AC_HW_COMPUTE_SHADER:
+      info->regs.pgm_lo = R_00B830_COMPUTE_PGM_LO;
+      info->regs.pgm_rsrc1 = R_00B848_COMPUTE_PGM_RSRC1;
+      info->regs.pgm_rsrc2 = R_00B84C_COMPUTE_PGM_RSRC2;
+      info->regs.pgm_rsrc3 = R_00B8A0_COMPUTE_PGM_RSRC3;
+      break;
+   default:
+      unreachable("invalid hw stage");
+      break;
+   }
+}
+
+static void
 radv_precompute_registers(struct radv_device *device, struct radv_shader_binary *binary)
 {
    struct radv_shader_info *info = &binary->info;
+
+   radv_precompute_registers_pgm(device, info);
 
    switch (info->stage) {
    case MESA_SHADER_VERTEX:
@@ -2481,6 +2571,8 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
       goto out;
    }
    simple_mtx_init(&shader->replay_mtx, mtx_plain);
+
+   _mesa_blake3_compute(binary, binary->total_size, shader->hash);
 
    vk_pipeline_cache_object_init(&device->vk, &shader->base, &radv_shader_ops, shader->hash, sizeof(shader->hash));
 

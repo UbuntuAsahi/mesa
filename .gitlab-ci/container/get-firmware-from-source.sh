@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2046 # we want to arg-split FIRMWARE_FILES
+# shellcheck disable=SC2086 # as above
+# shellcheck disable=SC2116 # as above
 
 set -e
 
 ROOTFS=$1
 FIRMWARE_FILES=$2
-FIRMWARE=$(jq -s '.' $FIRMWARE_FILES)
 
-if [ -z "$FIRMWARE" ] || [ "$(echo "$FIRMWARE" | jq '. | length')" -eq 0 ]; then
-  echo "FIRMWARE is not set or is empty."
-  exit
+if [ -n "${FIRMWARE_FILES:-}" ]; then
+  FIRMWARE=$(jq -s '.' $(echo "$FIRMWARE_FILES"))
+else
+  FIRMWARE=""
 fi
 
 if ! echo "$FIRMWARE" | jq empty; then
   echo "FIRMWARE contains invalid JSON."
-  exit
 fi
 
 for item in $(echo "$FIRMWARE" | jq -c '.[]'); do

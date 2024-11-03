@@ -42,11 +42,11 @@
 
 #include "pan_afbc_cso.h"
 #include "pan_blend.h"
-#include "pan_blitter.h"
 #include "pan_bo.h"
 #include "pan_cmdstream.h"
 #include "pan_context.h"
 #include "pan_csf.h"
+#include "pan_fb_preload.h"
 #include "pan_format.h"
 #include "pan_indirect_dispatch.h"
 #include "pan_jm.h"
@@ -741,8 +741,8 @@ panfrost_emit_viewport(struct panfrost_batch *batch)
    maxx--;
    maxy--;
 
-   batch->minimum_z = rast->depth_clip_near ? minz : -INFINITY;
-   batch->maximum_z = rast->depth_clip_far ? maxz : +INFINITY;
+   batch->minimum_z = minz;
+   batch->maximum_z = maxz;
 
 #if PAN_ARCH <= 7
    struct panfrost_ptr T = pan_pool_alloc_desc(&batch->pool.base, VIEWPORT);
@@ -802,6 +802,12 @@ panfrost_emit_depth_stencil(struct panfrost_batch *batch)
       cfg.depth_units = panfrost_z_depth_offset(ctx, rast->base.offset_units);
       cfg.depth_factor = rast->base.offset_scale;
       cfg.depth_bias_clamp = rast->base.offset_clamp;
+
+      assert(rast->base.depth_clip_near == rast->base.depth_clip_far);
+      cfg.depth_cull_enable = rast->base.depth_clip_near;
+      cfg.depth_clamp_mode = rast->base.depth_clamp
+                                ? MALI_DEPTH_CLAMP_MODE_BOUNDS
+                                : MALI_DEPTH_CLAMP_MODE_0_1;
    }
 
    pan_merge(dynamic, zsa->desc, DEPTH_STENCIL);
@@ -849,6 +855,8 @@ panfrost_emit_vertex_buffers(struct panfrost_batch *batch)
    struct panfrost_ptr T =
       pan_pool_alloc_desc_array(&batch->pool.base, buffer_count, BUFFER);
    struct mali_buffer_packed *buffers = T.cpu;
+
+   memset(buffers, 0, sizeof(*buffers) * buffer_count);
 
    u_foreach_bit(i, ctx->vb_mask) {
       struct pipe_vertex_buffer vb = ctx->vertex_buffers[i];
@@ -911,17 +919,6 @@ panfrost_emit_images(struct panfrost_batch *batch, enum pipe_shader_type stage)
          .base = util_image_to_sampler_view(image),
          .pool = &batch->pool,
       };
-
-      /* If we specify a cube map, the hardware internally treat it as
-       * a 2D array. Since cube maps as images can confuse our common
-       * texturing code, explicitly use a 2D array.
-       *
-       * Similar concerns apply to 3D textures.
-       */
-      if (view.base.target == PIPE_BUFFER)
-         view.base.target = PIPE_BUFFER;
-      else
-         view.base.target = PIPE_TEXTURE_2D_ARRAY;
 
       panfrost_update_sampler_view(&view, &ctx->base);
       out[i] = view.bifrost_descriptor;
@@ -1348,6 +1345,41 @@ panfrost_emit_ubo(void *base, unsigned index, mali_ptr address, size_t size)
 #endif
 }
 
+#if PAN_ARCH >= 9
+static mali_ptr
+panfrost_emit_ssbos(struct panfrost_batch *batch, enum pipe_shader_type st)
+{
+   struct panfrost_context *ctx = batch->ctx;
+   unsigned ssbo_count = util_last_bit(ctx->ssbo_mask[st]);
+
+   if (!ssbo_count)
+      return 0;
+
+   struct panfrost_ptr ssbos =
+      pan_pool_alloc_desc_array(&batch->pool.base, ssbo_count, BUFFER);
+   struct mali_buffer_packed *bufs = ssbos.cpu;
+
+   memset(bufs, 0, sizeof(bufs[0]) * ssbo_count);
+
+   u_foreach_bit(ssbo_id, ctx->ssbo_mask[st]) {
+      struct pipe_shader_buffer sb = ctx->ssbo[st][ssbo_id];
+      struct panfrost_resource *rsrc = pan_resource(sb.buffer);
+      struct panfrost_bo *bo = rsrc->bo;
+
+      panfrost_batch_write_rsrc(batch, rsrc, st);
+
+      util_range_add(&rsrc->base, &rsrc->valid_buffer_range, sb.buffer_offset,
+                     sb.buffer_size);
+      pan_pack(&bufs[ssbo_id], BUFFER, cfg) {
+         cfg.size = sb.buffer_size;
+         cfg.address = bo->ptr.gpu + sb.buffer_offset;
+      }
+   }
+
+   return ssbos.gpu;
+}
+#endif
+
 static mali_ptr
 panfrost_emit_const_buf(struct panfrost_batch *batch,
                         enum pipe_shader_type stage, unsigned *buffer_count,
@@ -1374,14 +1406,18 @@ panfrost_emit_const_buf(struct panfrost_batch *batch,
    struct panfrost_compiled_shader *shader = ctx->prog[stage];
    unsigned ubo_count = shader->info.ubo_count - (sys_size ? 1 : 0);
    unsigned sysval_ubo = sys_size ? ubo_count : ~0;
+   unsigned desc_size;
    struct panfrost_ptr ubos = {0};
 
 #if PAN_ARCH >= 9
+   desc_size = sizeof(struct mali_buffer_packed);
    ubos = pan_pool_alloc_desc_array(&batch->pool.base, ubo_count + 1, BUFFER);
 #else
+   desc_size = sizeof(struct mali_uniform_buffer_packed);
    ubos = pan_pool_alloc_desc_array(&batch->pool.base, ubo_count + 1,
                                     UNIFORM_BUFFER);
 #endif
+   memset(ubos.cpu, 0, desc_size * (ubo_count + 1));
 
    if (buffer_count)
       *buffer_count = ubo_count + (sys_size ? 1 : 0);
@@ -2569,8 +2605,7 @@ emit_fbd(struct panfrost_batch *batch, struct pan_fb_info *fb)
       panfrost_sample_positions_offset(pan_sample_pattern(fb->nr_samples));
 #endif
 
-   batch->framebuffer.gpu |=
-      GENX(pan_emit_fbd)(fb, 0, &tls, &batch->tiler_ctx, batch->framebuffer.cpu);
+   JOBX(emit_fbds)(batch, fb, &tls);
 }
 
 /* Mark a surface as written */
@@ -2709,6 +2744,9 @@ panfrost_update_shader_state(struct panfrost_batch *batch,
       batch->images[st] =
          ctx->image_mask[st] ? panfrost_emit_images(batch, st) : 0;
    }
+
+   if (dirty & PAN_DIRTY_STAGE_SSBO)
+      batch->ssbos[st] = panfrost_emit_ssbos(batch, st);
 #endif
 
    if ((dirty & ss->dirty_shader) || (dirty_3d & ss->dirty_3d)) {
@@ -2839,12 +2877,16 @@ panfrost_launch_xfb(struct panfrost_batch *batch,
 static inline void
 panfrost_increase_vertex_count(struct panfrost_batch *batch, uint32_t increment)
 {
-   uint32_t sum = batch->tiler_ctx.vertex_count + increment;
+   uint32_t sum = batch->vertex_count + increment;
 
-   if (sum >= batch->tiler_ctx.vertex_count)
-      batch->tiler_ctx.vertex_count = sum;
+   if (sum >= batch->vertex_count)
+      batch->vertex_count = sum;
    else
-      batch->tiler_ctx.vertex_count = UINT32_MAX;
+      batch->vertex_count = UINT32_MAX;
+
+#if PAN_ARCH <= 5
+   batch->tiler_ctx.midgard.vertex_count = batch->vertex_count;
+#endif
 }
 
 /*
@@ -3316,6 +3358,7 @@ panfrost_create_rasterizer_state(struct pipe_context *pctx,
       cfg.multisample_enable = cso->multisample;
       cfg.fixed_function_near_discard = cso->depth_clip_near;
       cfg.fixed_function_far_discard = cso->depth_clip_far;
+      cfg.fixed_function_depth_range_fixed = !cso->depth_clamp;
       cfg.shader_depth_range_fixed = true;
    }
 
@@ -3508,7 +3551,9 @@ panfrost_create_depth_stencil_state(
    pan_pipe_to_stencil(&front, &so->stencil_front);
    pan_pipe_to_stencil(&back, &so->stencil_back);
 #else
-   pan_pack(&so->desc, DEPTH_STENCIL, cfg) {
+   /* Pack with nodefaults so only explicitly set fields affect pan_merge() when
+    * emitting depth stencil descriptor */
+   pan_pack_nodefaults(&so->desc, DEPTH_STENCIL, cfg) {
       cfg.front_compare_function = (enum mali_func)front.func;
       cfg.front_stencil_fail = pan_pipe_to_stencil_op(front.fail_op);
       cfg.front_depth_fail = pan_pipe_to_stencil_op(front.zfail_op);
@@ -3604,6 +3649,7 @@ panfrost_create_blend_state(struct pipe_context *pipe,
    so->pan.logicop_enable = blend->logicop_enable;
    so->pan.logicop_func = blend->logicop_func;
    so->pan.rt_count = blend->max_rt + 1;
+   so->pan.alpha_to_one = blend->alpha_to_one;
 
    for (unsigned c = 0; c < so->pan.rt_count; ++c) {
       unsigned g = blend->independent_blend_enable ? c : 0;
@@ -3777,7 +3823,7 @@ static void
 screen_destroy(struct pipe_screen *pscreen)
 {
    struct panfrost_device *dev = pan_device(pscreen);
-   GENX(pan_blitter_cache_cleanup)(&dev->blitter);
+   GENX(pan_fb_preload_cache_cleanup)(&dev->fb_preload_cache);
 }
 
 static void
@@ -3832,7 +3878,7 @@ batch_get_polygon_list(struct panfrost_batch *batch)
    if (!batch->tiler_ctx.midgard.polygon_list) {
       bool has_draws = batch->draw_count > 0;
       unsigned size = panfrost_tiler_get_polygon_list_size(
-         batch->key.width, batch->key.height, batch->tiler_ctx.vertex_count,
+         batch->key.width, batch->key.height, batch->vertex_count,
          !dev->model->quirks.no_hierarchical_tiling);
 
       /* Create the BO as invisible if we can. If there are no draws,
@@ -3901,6 +3947,16 @@ submit_batch(struct panfrost_batch *batch, struct pan_fb_info *fb)
    return JOBX(submit_batch)(batch);
 }
 
+static void
+emit_write_timestamp(struct panfrost_batch *batch,
+                     struct panfrost_resource *dst, unsigned offset)
+{
+   batch->need_job_req_cycle_count = true;
+   batch->has_time_query = true;
+
+   JOBX(emit_write_timestamp)(batch, dst, offset);
+}
+
 void
 GENX(panfrost_cmdstream_screen_init)(struct panfrost_screen *screen)
 {
@@ -3919,14 +3975,15 @@ GENX(panfrost_cmdstream_screen_init)(struct panfrost_screen *screen)
    screen->vtbl.compile_shader = GENX(pan_shader_compile);
    screen->vtbl.afbc_size = panfrost_afbc_size;
    screen->vtbl.afbc_pack = panfrost_afbc_pack;
+   screen->vtbl.emit_write_timestamp = emit_write_timestamp;
 
-   GENX(pan_blitter_cache_init)
-   (&dev->blitter, panfrost_device_gpu_id(dev), &dev->blend_shaders,
-    &screen->blitter.bin_pool.base, &screen->blitter.desc_pool.base);
+   GENX(pan_fb_preload_cache_init)
+   (&dev->fb_preload_cache, panfrost_device_gpu_id(dev), &dev->blend_shaders,
+    &screen->mempools.bin.base, &screen->mempools.desc.base);
 
 #if PAN_GPU_SUPPORTS_DISPATCH_INDIRECT
    pan_indirect_dispatch_meta_init(
       &dev->indirect_dispatch, panfrost_device_gpu_id(dev),
-      &screen->blitter.bin_pool.base, &screen->blitter.desc_pool.base);
+      &screen->mempools.bin.base, &screen->mempools.desc.base);
 #endif
 }

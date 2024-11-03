@@ -108,11 +108,14 @@ static const nir_shader_compiler_options ir3_base_options = {
    .lower_cs_local_index_to_id = true,
    .lower_wpos_pntc = true,
 
+   .lower_hadd = true,
+   .lower_hadd64 = true,
+   .lower_fisnormal = true,
+
    .lower_int64_options = (nir_lower_int64_options)~0,
    .lower_doubles_options = (nir_lower_doubles_options)~0,
 
    .divergence_analysis_options = nir_divergence_uniform_load_tears,
-   .has_ddx_intrinsics = true,
    .scalarize_ddx = true,
 };
 
@@ -176,11 +179,12 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
       /* Compute shaders don't share a const file with the FS. Instead they
        * have their own file, which is smaller than the FS one. On a7xx the size
-       * was doubled.
+       * was doubled, although this doesn't work on X1-85.
        *
        * TODO: is this true on earlier gen's?
        */
-      compiler->max_const_compute = compiler->gen >= 7 ? 512 : 256;
+      compiler->max_const_compute =
+         (compiler->gen >= 7 && !dev_info->a7xx.compute_constlen_quirk) ? 512 : 256;
 
       /* TODO: implement clip+cull distances on earlier gen's */
       compiler->has_clip_cull = true;
@@ -219,6 +223,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->fs_must_have_non_zero_constlen_quirk = dev_info->a7xx.fs_must_have_non_zero_constlen_quirk;
       compiler->has_early_preamble = dev_info->a6xx.has_early_preamble;
       compiler->has_rpt_bary_f = true;
+      compiler->has_shfl = true;
    } else {
       compiler->max_const_pipeline = 512;
       compiler->max_const_geom = 512;

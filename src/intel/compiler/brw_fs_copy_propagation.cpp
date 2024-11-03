@@ -1207,14 +1207,9 @@ try_constant_propagate_value(brw_reg val, brw_reg_type dst_type,
    case SHADER_OPCODE_TG4_OFFSET_BIAS_LOGICAL:
    case SHADER_OPCODE_SAMPLEINFO_LOGICAL:
    case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
-   case SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL:
-   case SHADER_OPCODE_UNTYPED_SURFACE_READ_LOGICAL:
-   case SHADER_OPCODE_UNTYPED_SURFACE_WRITE_LOGICAL:
-   case SHADER_OPCODE_TYPED_ATOMIC_LOGICAL:
-   case SHADER_OPCODE_TYPED_SURFACE_READ_LOGICAL:
-   case SHADER_OPCODE_TYPED_SURFACE_WRITE_LOGICAL:
-   case SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL:
-   case SHADER_OPCODE_BYTE_SCATTERED_READ_LOGICAL:
+   case SHADER_OPCODE_MEMORY_LOAD_LOGICAL:
+   case SHADER_OPCODE_MEMORY_STORE_LOGICAL:
+   case SHADER_OPCODE_MEMORY_ATOMIC_LOGICAL:
    case FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD:
    case FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_LOGICAL:
    case SHADER_OPCODE_BROADCAST:
@@ -1224,17 +1219,6 @@ try_constant_propagate_value(brw_reg val, brw_reg_type dst_type,
    case SHADER_OPCODE_SHUFFLE:
       inst->src[arg] = val;
       progress = true;
-      break;
-
-   case SHADER_OPCODE_UNALIGNED_OWORD_BLOCK_READ_LOGICAL:
-      /* The address of the send message cannot be immediate (see the
-       * assertions in brw_set_src0 in brw_eu_emit.c). There is no mechanism
-       * to legalize it later, so do not generate the invalid thing here.
-       */
-      if (arg != SURFACE_LOGICAL_SRC_ADDRESS) {
-         inst->src[arg] = val;
-         progress = true;
-      }
       break;
 
    default:
@@ -1334,7 +1318,7 @@ opt_copy_propagation_local(const brw_compiler *compiler, linear_ctx *lin_ctx,
 
    foreach_inst_in_block(fs_inst, inst, block) {
       /* Try propagating into this instruction. */
-      bool instruction_progress = false;
+      bool constant_progress = false;
       for (int i = inst->sources - 1; i >= 0; i--) {
          if (inst->src[i].file != VGRF)
             continue;
@@ -1344,22 +1328,23 @@ opt_copy_propagation_local(const brw_compiler *compiler, linear_ctx *lin_ctx,
               ++iter) {
             if ((*iter)->src.file == IMM) {
                if (try_constant_propagate(inst, *iter, i)) {
-                  instruction_progress = true;
+                  constant_progress = true;
                   break;
                }
             } else {
                if (try_copy_propagate(compiler, inst, *iter, i, alloc,
                                       max_polygons)) {
-                  instruction_progress = true;
+                  progress = true;
                   break;
                }
             }
          }
       }
 
-      if (instruction_progress) {
-         progress = true;
+      if (constant_progress) {
          commute_immediates(inst);
+         brw_constant_fold_instruction(compiler->devinfo, inst);
+         progress = true;
       }
 
       /* kill the destination from the ACP */
@@ -1819,7 +1804,7 @@ brw_fs_opt_copy_propagation_defs(fs_visitor &s)
 
    foreach_block_and_inst_safe(block, fs_inst, inst, s.cfg) {
       /* Try propagating into this instruction. */
-      bool instruction_progress = false;
+      bool constant_progress = false;
 
       for (int i = inst->sources - 1; i >= 0; i--) {
          fs_inst *def = defs.get(inst->src[i]);
@@ -1838,7 +1823,7 @@ brw_fs_opt_copy_propagation_defs(fs_visitor &s)
                                          inst, i, s.max_polygons);
 
                if (source_progress) {
-                  instruction_progress = true;
+                  progress = true;
                   ++uses_deleted[def->dst.nr];
                   if (defs.get_use_count(def->dst) == uses_deleted[def->dst.nr])
                      def->remove(defs.get_block(def->dst), true);
@@ -1852,8 +1837,10 @@ brw_fs_opt_copy_propagation_defs(fs_visitor &s)
             find_value_for_offset(def, inst->src[i], inst->size_read(i));
 
          if (val.file == IMM) {
-            source_progress =
-               try_constant_propagate_def(def, val, inst, i);
+            if (try_constant_propagate_def(def, val, inst, i)) {
+               source_progress = true;
+               constant_progress = true;
+            }
          } else if (val.file == VGRF ||
                     val.file == ATTR || val.file == UNIFORM ||
                     (val.file == FIXED_GRF && val.is_contiguous())) {
@@ -1863,16 +1850,25 @@ brw_fs_opt_copy_propagation_defs(fs_visitor &s)
          }
 
          if (source_progress) {
-            instruction_progress = true;
+            progress = true;
             ++uses_deleted[def->dst.nr];
-            if (defs.get_use_count(def->dst) == uses_deleted[def->dst.nr])
+
+            /* We can copy propagate through an instruction like
+             *
+             *    mov.nz.f0.0(8) %2:D, -%78:D
+             *
+             * but deleting the instruction may alter the program.
+             */
+            if (def->conditional_mod == BRW_CONDITIONAL_NONE &&
+                defs.get_use_count(def->dst) == uses_deleted[def->dst.nr]) {
                def->remove(defs.get_block(def->dst), true);
+            }
          }
       }
 
-      if (instruction_progress) {
-         progress = true;
+      if (constant_progress) {
          commute_immediates(inst);
+         brw_constant_fold_instruction(s.compiler->devinfo, inst);
       }
    }
 

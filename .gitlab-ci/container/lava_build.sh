@@ -2,11 +2,15 @@
 # shellcheck disable=SC1091 # The relative paths in this file only become valid at runtime.
 # shellcheck disable=SC2034 # Variables are used in scripts called from here
 # shellcheck disable=SC2086 # we want word splitting
+# shellcheck disable=SC2016 # non-expanded variables are intentional
 # When changing this file, you need to bump the following
 # .gitlab-ci/image-tags.yml tags:
 # KERNEL_ROOTFS_TAG
 
 set -e
+
+. .gitlab-ci/setup-test-env.sh
+
 set -o xtrace
 
 export DEBIAN_FRONTEND=noninteractive
@@ -36,7 +40,6 @@ if [[ "$DEBIAN_ARCH" = "arm64" ]]; then
     BUILD_VK="ON"
     GCC_ARCH="aarch64-linux-gnu"
     KERNEL_ARCH="arm64"
-    SKQP_ARCH="arm64"
     DEFCONFIG="arch/arm64/configs/defconfig"
     DEVICE_TREES="rk3399-gru-kevin.dtb"
     DEVICE_TREES+=" meson-g12b-a311d-khadas-vim3.dtb"
@@ -59,7 +62,6 @@ elif [[ "$DEBIAN_ARCH" = "armhf" ]]; then
     BUILD_VK="OFF"
     GCC_ARCH="arm-linux-gnueabihf"
     KERNEL_ARCH="arm"
-    SKQP_ARCH="arm"
     DEFCONFIG="arch/arm/configs/multi_v7_defconfig"
     DEVICE_TREES="rk3288-veyron-jaq.dtb"
     DEVICE_TREES+=" sun8i-h3-libretech-all-h3-cc.dtb"
@@ -85,7 +87,6 @@ else
     BUILD_VK="ON"
     GCC_ARCH="x86_64-linux-gnu"
     KERNEL_ARCH="x86_64"
-    SKQP_ARCH="x64"
     DEFCONFIG="arch/x86/configs/x86_64_defconfig"
     DEVICE_TREES=""
     KERNEL_IMAGE_NAME="bzImage"
@@ -248,21 +249,6 @@ mmdebstrap \
 ############### Install mold
 . .gitlab-ci/container/build-mold.sh
 
-############### Setuping
-if [ "$DEBIAN_ARCH" = "amd64" ]; then
-  . .gitlab-ci/container/setup-wine.sh "/dxvk-wine64"
-  . .gitlab-ci/container/install-wine-dxvk.sh
-  mv /dxvk-wine64 $ROOTFS
-fi
-
-############### Installing
-if [ "$DEBIAN_ARCH" = "amd64" ]; then
-  . .gitlab-ci/container/install-wine-apitrace.sh
-  mkdir -p "$ROOTFS/apitrace-msvc-win64"
-  mv /apitrace-msvc-win64/bin "$ROOTFS/apitrace-msvc-win64"
-  rm -rf /apitrace-msvc-win64
-fi
-
 ############### Building
 STRIP_CMD="${GCC_ARCH}-strip"
 mkdir -p $ROOTFS/usr/lib/$GCC_ARCH
@@ -295,7 +281,7 @@ rm -rf /apitrace
 ############### Build ANGLE
 if [[ "$DEBIAN_ARCH" = "amd64" ]]; then
   . .gitlab-ci/container/build-angle.sh
-  mv /angle /lava-files/rootfs-${DEBIAN_ARCH}/.
+  mv /angle $ROOTFS/.
   rm -rf /angle
 fi
 
@@ -364,7 +350,7 @@ fi
 ############### Build ci-kdl
 section_start kdl "Prepare a venv for kdl"
 . .gitlab-ci/container/build-kdl.sh
-mv ci-kdl.venv $ROOTFS
+mv /ci-kdl $ROOTFS/
 section_end kdl
 
 ############### Build local stuff for use by igt and kernel testing, which

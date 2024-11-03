@@ -112,6 +112,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_non_semantic_info = true,
+      .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_extended_types = true,
       .KHR_shader_subgroup_rotate = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
@@ -584,6 +585,9 @@ hk_get_device_features(
 
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = false,
+
+      /* VK_KHR_shader_relaxed_extended_instruction */
+      .shaderRelaxedExtendedInstruction = true,
    };
 }
 
@@ -922,14 +926,8 @@ hk_get_device_properties(const struct agx_device *dev,
           vk_shaderModuleIdentifierAlgorithmUUID,
           sizeof(properties->shaderModuleIdentifierAlgorithmUUID));
 
-   const struct {
-      uint16_t vendor_id;
-      uint16_t device_id;
-      uint8_t pad[12];
-   } dev_uuid = {
-      .vendor_id = 0,
-      .device_id = 0,
-   };
+   uint8_t dev_uuid[VK_UUID_SIZE];
+   agx_get_device_uuid(dev, &dev_uuid);
    static_assert(sizeof(dev_uuid) == VK_UUID_SIZE);
    memcpy(properties->deviceUUID, &dev_uuid, VK_UUID_SIZE);
    static_assert(sizeof(instance->driver_build_sha) >= VK_UUID_SIZE);
@@ -1039,8 +1037,11 @@ hk_physical_device_free_disk_cache(struct hk_physical_device *pdev)
 #define SYSMEM_HEAP_FRACTION(x) (x * 1 / 2)
 
 static uint64_t
-hk_get_sysmem_heap_size(void)
+hk_get_sysmem_heap_size(struct hk_physical_device *pdev)
 {
+   if (pdev->sysmem)
+      return pdev->sysmem;
+
    uint64_t sysmem_size_B = 0;
    if (!os_get_total_physical_memory(&sysmem_size_B))
       return 0;
@@ -1051,6 +1052,16 @@ hk_get_sysmem_heap_size(void)
 static uint64_t
 hk_get_sysmem_heap_available(struct hk_physical_device *pdev)
 {
+   if (pdev->sysmem) {
+      uint64_t total_used = 0;
+      for (unsigned i = 0; i < pdev->mem_heap_count; i++) {
+         const struct hk_memory_heap *heap = &pdev->mem_heaps[i];
+         uint64_t used = p_atomic_read(&heap->used);
+         total_used += used;
+      }
+      return pdev->sysmem - total_used;
+   }
+
    uint64_t sysmem_size_B = 0;
    if (!os_get_available_system_memory(&sysmem_size_B)) {
       vk_loge(VK_LOG_OBJS(pdev), "Failed to query available system memory");
@@ -1153,7 +1164,15 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    hk_physical_device_init_pipeline_cache(pdev);
 
-   uint64_t sysmem_size_B = hk_get_sysmem_heap_size();
+   const char *hk_sysmem = getenv("HK_SYSMEM");
+   if (hk_sysmem) {
+      uint64_t sysmem = strtoll(hk_sysmem, NULL, 10);
+      if (sysmem != LLONG_MIN && sysmem != LLONG_MAX) {
+         pdev->sysmem = sysmem;
+      }
+   }
+
+   uint64_t sysmem_size_B = hk_get_sysmem_heap_size(pdev);
    if (sysmem_size_B == 0) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                          "Failed to query total system memory");
