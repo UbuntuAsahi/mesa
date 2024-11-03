@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241101-1asahi1.24.04) noble; urgency=medium
+
+  * Bump to asahi-20241101
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 03 Nov 2024 07:42:00 +0200
+
 mesa (24.3.0~pre20241006-1asahi3.24.04) noble; urgency=medium
 
   * Sync debian/ from ubuntu/oracular
