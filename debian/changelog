@@ -1,4 +1,4 @@
-mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) UNRELEASED; urgency=medium
+mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) experimental; urgency=medium
 
   * New asahi release (asahi-20241101)
   * d/patches:
@@ -10,7 +10,7 @@ mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) UNRELEASED; urgency=medium
   * d/control: package dri_gbm.so in libgl1-mesa-dri
   * d/libglx-mesa0.symbols: update
 
- -- NoisyCoil <noisycoil@tutanota.com>  Sun, 03 Nov 2024 18:10:04 +0100
+ -- NoisyCoil <noisycoil@tutanota.com>  Sun, 03 Nov 2024 21:54:44 +0100
 
 mesa-asahi (24.3.0~git20241006.6e004ce-1) unstable; urgency=medium
 
