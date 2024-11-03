@@ -5,6 +5,8 @@ mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) UNRELEASED; urgency=medium
     - delete fix-armhf-build.diff, clc-find-opencl-headers.diff,
       nak-bindings-drm-rs-ioctl-nouveau-exec.diff
     - refresh other patches
+  * d/rules: don't use dri-search-path and gallium-omx confflags (removed by
+    upstream as unused)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sun, 03 Nov 2024 18:10:04 +0100
 
