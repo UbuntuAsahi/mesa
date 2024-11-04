@@ -394,7 +394,7 @@ struct agx_batch {
    struct agx_tilebuffer_layout tilebuffer_layout;
 
    /* PIPE_CLEAR_* bitmask */
-   uint32_t clear, draw, load, resolve;
+   uint32_t clear, draw, load, resolve, feedback;
    bool initialized;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
@@ -1244,3 +1244,6 @@ agx_texture_buffer_size_el(enum pipe_format format, uint32_t size)
 
    return MIN2(AGX_TEXTURE_BUFFER_MAX_SIZE, size / blocksize);
 }
+
+void agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
+                            const char *reason);

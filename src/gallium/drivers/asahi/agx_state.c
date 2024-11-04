@@ -3236,7 +3236,9 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
          /* The tilebuffer is already in sRGB space if needed. Do not convert */
          view.format = util_format_linear(view.format);
 
-         agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false, false);
+         bool no_compress = batch->feedback & (PIPE_CLEAR_COLOR0 << rt);
+         agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false,
+                              no_compress);
 
          agx_usc_pack(&b, TEXTURE, cfg) {
             cfg.start = rt;
@@ -3463,40 +3465,7 @@ agx_batch_init_state(struct agx_batch *batch)
             continue;
 
          if (true || (rsrc->base.bind & PIPE_BIND_SHARED)) {
-            struct agx_context *ctx = batch->ctx;
-            struct agx_device *dev = agx_device(ctx->base.screen);
-
-            perf_debug(dev, "Decompressing in-place");
-
-            if (!batch->cdm.bo)
-               batch->cdm = agx_encoder_allocate(batch, dev);
-
-            struct agx_ptr data = agx_pool_alloc_aligned(
-               &batch->pool, sizeof(struct libagx_decompress_push), 64);
-            struct libagx_decompress_push *push = data.cpu;
-            agx_fill_decompress_push(push, layout, surf->u.tex.first_layer,
-                                     level, agx_map_texture_gpu(rsrc, 0));
-
-            struct pipe_sampler_view sampler_view =
-               sampler_view_for_surface(surf);
-            sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
-            struct pipe_image_view view = image_view_for_surface(surf);
-            agx_pack_texture(&push->compressed, rsrc, surf->format,
-                             &sampler_view);
-            agx_batch_upload_pbe(batch, &push->uncompressed, &view, false, true,
-                                 true, true);
-
-            struct agx_grid grid = agx_grid_direct(
-               ail_metadata_width_tl(layout, level) * 32,
-               ail_metadata_height_tl(layout, level),
-               surf->u.tex.last_layer - surf->u.tex.first_layer + 1, 32, 1, 1);
-
-            struct agx_decompress_key key = {
-               .nr_samples = layout->sample_count_sa,
-            };
-
-            agx_launch_with_uploaded_data(batch, &grid, agx_nir_decompress,
-                                          &key, sizeof(key), data.gpu);
+            agx_decompress_inplace(batch, surf, "Render target spilled");
          } else {
             agx_decompress(batch->ctx, rsrc, "Render target spilled");
          }
@@ -4883,10 +4852,26 @@ agx_legalize_feedback_loops(struct agx_context *ctx)
 
                if (rsrc->layout.tiling == AIL_TILING_TWIDDLED_COMPRESSED) {
                   /* Decompress if we can and shadow if we can't. */
-                  if (rsrc->base.bind & PIPE_BIND_SHARED)
-                     unreachable("TODO");
-                  else
+                  if (rsrc->base.bind & PIPE_BIND_SHARED) {
+                     struct agx_batch *batch = agx_get_batch(ctx);
+
+                     /* If we already did in-place decompression for this one */
+                     if (batch->feedback & (PIPE_CLEAR_COLOR0 << i))
+                        continue;
+
+                     /* Use our current context batch. If it already touched
+                      * this buffer, that will have been flushed above.
+                      */
+                     agx_decompress_inplace(batch, ctx->framebuffer.cbufs[cb],
+                                            "Texture feedback loop");
+
+                     /* Mark it as a feedback cbuf, so it will be written to
+                      * uncompressed despite having a compressed layout.
+                      */
+                     batch->feedback |= PIPE_CLEAR_COLOR0 << i;
+                  } else {
                      agx_decompress(ctx, rsrc, "Texture feedback loop");
+                  }
                }
 
                /* Not required by the spec, just for debug */
@@ -5600,6 +5585,47 @@ agx_set_global_binding(struct pipe_context *pipe, unsigned first,
 }
 
 void agx_init_state_functions(struct pipe_context *ctx);
+
+void
+agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
+                       const char *reason)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   struct agx_resource *rsrc = agx_resource(surf->texture);
+   struct ail_layout *layout = &rsrc->layout;
+   unsigned level = surf->u.tex.level;
+
+   perf_debug(dev, "Decompressing in-place due to: %s", reason);
+
+   if (!batch->cdm.bo)
+      batch->cdm = agx_encoder_allocate(batch, dev);
+
+   struct agx_ptr data = agx_pool_alloc_aligned(
+      &batch->pool, sizeof(struct libagx_decompress_push), 64);
+   struct libagx_decompress_push *push = data.cpu;
+   agx_fill_decompress_push(push, layout, surf->u.tex.first_layer, level,
+                            agx_map_texture_gpu(rsrc, 0));
+
+   struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
+   sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
+   struct pipe_image_view view = image_view_for_surface(surf);
+   agx_pack_texture(&push->compressed, rsrc, surf->format, &sampler_view);
+   agx_batch_upload_pbe(batch, &push->uncompressed, &view, false, true, true,
+                        true);
+
+   struct agx_grid grid = agx_grid_direct(
+      ail_metadata_width_tl(layout, level) * 32,
+      ail_metadata_height_tl(layout, level),
+      surf->u.tex.last_layer - surf->u.tex.first_layer + 1, 32, 1, 1);
+
+   struct agx_decompress_key key = {
+      .nr_samples = layout->sample_count_sa,
+   };
+
+   agx_launch_with_uploaded_data(batch, &grid, agx_nir_decompress, &key,
+                                 sizeof(key), data.gpu);
+}
 
 void
 agx_init_state_functions(struct pipe_context *ctx)
