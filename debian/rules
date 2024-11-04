@@ -16,6 +16,9 @@ DEB_HOST_ARCH_CPU  ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 LLVM_VERSION = 18
 export PATH:=/usr/lib/llvm-$(LLVM_VERSION)/bin/:$(PATH)
 
+# use specific rustc path
+export RUSTC:=/usr/bin/rustc-1.80
+
 export DEB_BUILD_MAINT_OPTIONS=optimize=-lto
 
 DEB_CFLAGS_MAINT_APPEND := -Wall
@@ -155,6 +158,10 @@ endif
 ifeq ($(DEB_HOST_ARCH), i386)
 	confflags_SSE2 = -Dsse2=false
 endif
+
+# Ubuntu Asahi: override all this mess above
+GALLIUM_DRIVERS = asahi virgl softpipe llvmpipe
+VULKAN_DRIVERS = asahi swrast virtio
 
 empty:=
 space := $(empty) $(empty)

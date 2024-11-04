@@ -1,3 +1,10 @@
+mesa (24.3.0~pre20241104-1asahi3.24.04) noble; urgency=medium
+
+  * Override GALLIUM_DRIVERS and VULKAN_DRIVERS
+  * Use rustc-1.80
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Tue, 05 Nov 2024 00:02:00 +0200
+
 mesa (24.3.0~pre20241104-1asahi2.24.04) noble; urgency=medium
 
   * Remove unsupported build options
