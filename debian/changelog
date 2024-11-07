@@ -1,28 +1,34 @@
+mesa (24.3.0~pre20241104-1asahi4.24.04) noble; urgency=medium
+
+  * Disable wine
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 07 Nov 2024 22:27:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi3.24.04) noble; urgency=medium
 
   * Override GALLIUM_DRIVERS and VULKAN_DRIVERS
   * Use rustc-1.80
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Tue, 05 Nov 2024 00:02:00 +0200
+ -- Andreas Schröder <andreas@kernelpanik.net>  Tue, 05 Nov 2024 00:02:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi2.24.04) noble; urgency=medium
 
   * Remove unsupported build options
   * Add new symbols
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 04 Nov 2024 09:06:00 +0200
+ -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 04 Nov 2024 09:06:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi1.24.04) noble; urgency=medium
 
   * Bump to asahi-20241104
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 04 Nov 2024 08:51:00 +0200
+ -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 04 Nov 2024 08:51:00 +0100
 
 mesa (24.3.0~pre20241101-1asahi1.24.04) noble; urgency=medium
 
   * Bump to asahi-20241101
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 03 Nov 2024 07:42:00 +0200
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 03 Nov 2024 07:42:00 +0100
 
 mesa (24.3.0~pre20241006-1asahi3.24.04) noble; urgency=medium
 

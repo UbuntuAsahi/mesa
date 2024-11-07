@@ -58,7 +58,8 @@ LLVM_ARCHS     = amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc
 RUSTICL_ARCHS  = amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x x32
 NVK_ARCHS      =
 VALGRIND_ARCHS = amd64 arm64 armhf i386 mips64el powerpc ppc64 ppc64el s390x
-WINE_ARCHS     = amd64 arm64 armel armhf i386
+# WINE_ARCHS     = amd64 arm64 armel armhf i386
+WINE_ARCHS     = armel armhf
 
 # hurd doesn't do direct rendering
 ifeq ($(DEB_HOST_ARCH_OS), hurd)
@@ -195,7 +196,8 @@ confflags += \
 	$(confflags_OSMESA) \
 	$(confflags_SSE2) \
 	$(confflags_VALGRIND) \
-	$(confflags_TEFLON)
+	$(confflags_TEFLON) \
+	# --wrap-mode=default
 
 
 rewrite_wrap_files:
