@@ -163,6 +163,8 @@ endif
 # Ubuntu Asahi: override all this mess above
 GALLIUM_DRIVERS = asahi virgl softpipe llvmpipe
 VULKAN_DRIVERS = asahi swrast virtio
+confflags_GALLIUM += -Dgallium-xa=disabled
+confflags_GALLIUM += -Dintel-clc=auto
 
 empty:=
 space := $(empty) $(empty)

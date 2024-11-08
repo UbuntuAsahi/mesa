@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241104-1asahi6.24.04) noble; urgency=medium
+
+  * Disable Gallium XA and Intel CLC for amd64
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 08 Nov 2024 08:52:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi5.24.04) noble; urgency=medium
 
   * Remove reference to radv specific config file 
