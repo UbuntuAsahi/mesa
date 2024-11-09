@@ -1,21 +1,28 @@
+mesa (24.3.0~pre20241104-1asahi9.24.04) noble; urgency=medium
+
+  * Disable LLVM for i386
+  * libllvm18:i386 and libllvm18:amd64 use same path for libLLVM.so.18.1 and can't be installed in parallel
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sat, 09 Nov 2024 20:12:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi8.24.04) noble; urgency=medium
 
   * Disable Rust for i386, as rustc-1.80 package is not available
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 08 Nov 2024 09:33:00 +0100
+ -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 09:33:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi7.24.04) noble; urgency=medium
 
   * Add dri_gbm.so and its symbols
   * Disable libxatracker packages
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 08 Nov 2024 09:21:00 +0100
+ -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 09:21:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi6.24.04) noble; urgency=medium
 
   * Disable Gallium XA and Intel CLC for amd64
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 08 Nov 2024 08:52:00 +0100
+ -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 08:52:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi5.24.04) noble; urgency=medium
 
