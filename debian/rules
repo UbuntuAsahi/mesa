@@ -167,7 +167,7 @@ VULKAN_DRIVERS = virtio
 # enable asahi OpenGL and Vulkan drivers only on amd64 & arm64
 ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64))
 	GALLIUM_DRIVERS += asahi llvmpipe
-	VULKAN_DRIVERS += asahi llvmpipe swrast
+	VULKAN_DRIVERS += asahi swrast
 endif
 confflags_GALLIUM += -Dgallium-xa=disabled
 # confflags_GALLIUM += -Dintel-clc=auto
