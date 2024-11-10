@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241104-1asahi10.24.04) noble; urgency=medium
+
+  * Disable asahi driver for i386, in order to get rid of LLVM dependency
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 10 Nov 2024 17:46:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi9.24.04) noble; urgency=medium
 
   * Disable LLVM for i386

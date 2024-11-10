@@ -147,6 +147,7 @@ else
 	endif
   else
 	confflags_GALLIUM += -Dllvm=disabled
+	confflags_GALLIUM += -Dgallium-opencl=disabled
   endif
 
   ifeq (,$(filter pkg.mesa.nolibva,$(DEB_BUILD_PROFILES)))
@@ -161,10 +162,15 @@ ifeq ($(DEB_HOST_ARCH), i386)
 endif
 
 # Ubuntu Asahi: override all this mess above
-GALLIUM_DRIVERS = asahi virgl softpipe llvmpipe
-VULKAN_DRIVERS = asahi swrast virtio
+GALLIUM_DRIVERS = virgl softpipe llvmpipe
+VULKAN_DRIVERS = swrast virtio
+# enable asahi OpenGL and Vulkan drivers only on amd64 & arm64
+ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64))
+	GALLIUM_DRIVERS += asahi
+	VULKAN_DRIVERS += asahi
+endif
 confflags_GALLIUM += -Dgallium-xa=disabled
-confflags_GALLIUM += -Dintel-clc=auto
+# confflags_GALLIUM += -Dintel-clc=auto
 
 empty:=
 space := $(empty) $(empty)
