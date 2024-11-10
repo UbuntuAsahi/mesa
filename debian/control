@@ -41,6 +41,7 @@ Build-Depends:
  python3-ply,
  python3-pycparser [arm64 armhf],
  python3-setuptools,
+ python3-yaml,
  flex,
  bison,
  libelf-dev [amd64 arm64 armel armhf loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],

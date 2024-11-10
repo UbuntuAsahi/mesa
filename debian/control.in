@@ -41,6 +41,7 @@ Build-Depends:
  python3-ply,
  python3-pycparser [arm64 armhf],
  python3-setuptools,
+ python3-yaml,
  flex,
  bison,
  libelf-dev [@LLVM_ARCHS@],
