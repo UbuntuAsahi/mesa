@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241104-1asahi14.24.04) noble; urgency=medium
+
+  * Disable mesa-drm-shim package for i386
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 11 Nov 2024 09:19:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi13.24.04) noble; urgency=medium
 
   * Remove llvmpipe from Vulkan driver list
