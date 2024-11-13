@@ -1,3 +1,15 @@
+mesa (24.3.0~pre20241104-1asahi15.24.04) oracular; urgency=medium
+
+  * Enable everything for i386 again
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 14 Nov 2024 00:24:00 +0100
+
+mesa (24.3.0~pre20241104-1asahi15.24.04) noble; urgency=medium
+
+  * Enable everything for i386 again
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 14 Nov 2024 00:24:00 +0100
+
 mesa (24.3.0~pre20241104-1asahi14.24.04) noble; urgency=medium
 
   * Disable mesa-drm-shim package for i386
