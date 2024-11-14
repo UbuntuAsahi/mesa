@@ -270,9 +270,6 @@ override_dh_install:
 	install -m755 -d debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/dri/
 	mv debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/dri/*_dri.so \
 	   debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/dri/
-	install -m755 -d debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/gbm/
-	mv debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/gbm/dri_*.so \
-	   debian/libgl1-mesa-dri/usr/lib/${DEB_HOST_MULTIARCH}/gbm/
 
   ifneq ($(DEB_HOST_ARCH_OS), hurd)
 	# Copy the hardlinked vdpau drivers correctly.
