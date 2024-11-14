@@ -138,6 +138,10 @@ Depends:
  ${misc:Depends},
  mesa-libgallium (= ${binary:Version}),
 Pre-Depends: ${misc:Pre-Depends}
+Breaks:
+ libgl1-mesa-dri (<< 24.3.0~git20241111.5b912d7-3~)
+Replaces:
+ libgl1-mesa-dri (<< 24.3.0~git20241111.5b912d7-3~)
 Multi-Arch: same
 Description: generic buffer management API -- runtime
  This package contains the GBM buffer management library.  It provides a
