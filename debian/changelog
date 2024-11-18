@@ -1,89 +1,26 @@
-mesa (24.3.0~pre20241104-1asahi15.24.04) oracular; urgency=medium
+mesa (24.3.0~pre20241104-1asahi21.24.04) noble; urgency=medium
 
-  * Enable everything for i386 again
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 14 Nov 2024 00:24:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi15.24.04) noble; urgency=medium
-
-  * Enable everything for i386 again
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 14 Nov 2024 00:24:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi14.24.04) noble; urgency=medium
-
-  * Disable mesa-drm-shim package for i386
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 11 Nov 2024 09:19:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi13.24.04) noble; urgency=medium
-
-  * Remove llvmpipe from Vulkan driver list
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 10 Nov 2024 23:49:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi12.24.04) noble; urgency=medium
-
-  * Disable llvmpipe and swrast on i386
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 10 Nov 2024 23:34:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi11.24.04) noble; urgency=medium
-
-  * Add python3-yaml, which is required for building, but not installed on i386 build hosts
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 10 Nov 2024 22:20:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi10.24.04) noble; urgency=medium
-
-  * Disable asahi driver for i386, in order to get rid of LLVM dependency
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 10 Nov 2024 17:46:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi9.24.04) noble; urgency=medium
-
-  * Disable LLVM for i386
-  * libllvm18:i386 and libllvm18:amd64 use same path for libLLVM.so.18.1 and can't be installed in parallel
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Sat, 09 Nov 2024 20:12:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi8.24.04) noble; urgency=medium
-
-  * Disable Rust for i386, as rustc-1.80 package is not available
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 09:33:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi7.24.04) noble; urgency=medium
-
-  * Add dri_gbm.so and its symbols
-  * Disable libxatracker packages
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 09:21:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi6.24.04) noble; urgency=medium
-
-  * Disable Gallium XA and Intel CLC for amd64
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Fri, 08 Nov 2024 08:52:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi5.24.04) noble; urgency=medium
-
-  * Remove reference to radv specific config file 
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 07 Nov 2024 22:58:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi4.24.04) noble; urgency=medium
-
-  * Disable wine
-
- -- Andreas Schröder <andreas@kernelpanik.net>  Thu, 07 Nov 2024 22:27:00 +0100
-
-mesa (24.3.0~pre20241104-1asahi3.24.04) noble; urgency=medium
-
-  * Override GALLIUM_DRIVERS and VULKAN_DRIVERS
+  * Build for noble
   * Use rustc-1.80
+  * Disable broadcom and other Vulkan drivers
+  * Disable RustICL for i386
+  * Disable d3d12, r600
+  * Add python3-yaml, which is required for building, but not installed on i386 build hosts
+  * Add dri_gbm.so and its symbols
 
- -- Andreas Schröder <andreas@kernelpanik.net>  Tue, 05 Nov 2024 00:02:00 +0100
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 17 Nov 2024 18:20:00 +0100
+
+mesa (24.3.0~pre20241104-1asahi20.24.10) oracular; urgency=medium
+
+  * Build for oracular
+  * Use rustc-1.80
+  * Disable broadcom and other Vulkan drivers
+  * Disable RustICL for i386
+  * Disable d3d12, r600
+  * Add python3-yaml, which is required for building, but not installed on i386 build hosts
+  * Add dri_gbm.so and its symbols
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sun, 17 Nov 2024 01:03:00 +0100
 
 mesa (24.3.0~pre20241104-1asahi2.24.04) noble; urgency=medium
 

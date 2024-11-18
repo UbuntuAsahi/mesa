@@ -12,6 +12,7 @@ Build-Depends:
  meson (>= 1.3.1),
  quilt (>= 0.63-8.2~),
  pkg-config,
+ libarchive-dev,
  libdrm-dev (>= 2.4.119),
  libx11-dev,
  libxxf86vm-dev,
