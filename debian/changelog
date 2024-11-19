@@ -1,3 +1,9 @@
+mesa (24.3.0~pre20241006-1asahi3.22.04) jammy; urgency=medium
+
+  * Build for jammy
+
+ -- Tobias Heider <tobias.heider@canonical.com>  Sun, 03 Nov 2024 14:39:30 +0100
+
 mesa (24.3.0~pre20241006-1asahi3.24.04) noble; urgency=medium
 
   * Sync debian/ from ubuntu/oracular
