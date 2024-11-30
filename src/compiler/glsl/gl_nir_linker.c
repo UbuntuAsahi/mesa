@@ -1470,7 +1470,8 @@ prelink_lowering(const struct gl_constants *consts,
        * - shader_info::clip_distance_array_size
        * - shader_info::cull_distance_array_size
        */
-      if (consts->CombinedClipCullDistanceArrays)
+      if (!(nir->options->io_options &
+            nir_io_separate_clip_cull_distance_arrays))
          NIR_PASS(_, nir, nir_lower_clip_cull_distance_arrays);
    }
 
@@ -1482,6 +1483,22 @@ get_varying_nir_var_mask(nir_shader *nir)
 {
    return (nir->info.stage != MESA_SHADER_VERTEX ? nir_var_shader_in : 0) |
           (nir->info.stage != MESA_SHADER_FRAGMENT ? nir_var_shader_out : 0);
+}
+
+static nir_opt_varyings_progress
+optimize_varyings(nir_shader *producer, nir_shader *consumer, bool spirv,
+                  unsigned max_uniform_comps, unsigned max_ubos)
+{
+   nir_opt_varyings_progress progress =
+      nir_opt_varyings(producer, consumer, spirv, max_uniform_comps,
+                       max_ubos);
+
+   if (progress & nir_progress_producer)
+      gl_nir_opts(producer);
+   if (progress & nir_progress_consumer)
+      gl_nir_opts(consumer);
+
+   return progress;
 }
 
 /**
@@ -1497,6 +1514,7 @@ gl_nir_lower_optimize_varyings(const struct gl_constants *consts,
    unsigned num_shaders = 0;
    unsigned max_ubos = UINT_MAX;
    unsigned max_uniform_comps = UINT_MAX;
+   bool optimize_io = !debug_get_bool_option("MESA_GLSL_DISABLE_IO_OPT", false);
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; i++) {
       struct gl_linked_shader *shader = prog->_LinkedShaders[i];
@@ -1506,11 +1524,8 @@ gl_nir_lower_optimize_varyings(const struct gl_constants *consts,
 
       nir_shader *nir = shader->Program->nir;
 
-      if (nir->info.stage == MESA_SHADER_COMPUTE)
-         return;
-
-      if (!(nir->options->io_options & nir_io_glsl_lower_derefs) ||
-          !(nir->options->io_options & nir_io_glsl_opt_varyings))
+      if (nir->info.stage == MESA_SHADER_COMPUTE ||
+          !(nir->options->io_options & nir_io_has_intrinsics))
          return;
 
       shaders[num_shaders] = nir;
@@ -1518,14 +1533,15 @@ gl_nir_lower_optimize_varyings(const struct gl_constants *consts,
                                consts->Program[i].MaxUniformComponents);
       max_ubos = MIN2(max_ubos, consts->Program[i].MaxUniformBlocks);
       num_shaders++;
+      optimize_io &= !(nir->options->io_options & nir_io_dont_optimize);
    }
 
    /* Lower IO derefs to load and store intrinsics. */
-   for (unsigned i = 0; i < num_shaders; i++) {
-      nir_shader *nir = shaders[i];
+   for (unsigned i = 0; i < num_shaders; i++)
+      nir_lower_io_passes(shaders[i], true);
 
-      nir_lower_io_passes(nir, true);
-   }
+   if (!optimize_io)
+      return;
 
    /* There is nothing to optimize for only 1 shader. */
    if (num_shaders == 1) {
@@ -1569,36 +1585,17 @@ gl_nir_lower_optimize_varyings(const struct gl_constants *consts,
     */
    unsigned highest_changed_producer = 0;
    for (unsigned i = 0; i < num_shaders - 1; i++) {
-      nir_shader *producer = shaders[i];
-      nir_shader *consumer = shaders[i + 1];
-
-      nir_opt_varyings_progress progress =
-         nir_opt_varyings(producer, consumer, spirv, max_uniform_comps,
-                          max_ubos);
-
-      if (progress & nir_progress_producer) {
-         gl_nir_opts(producer);
+      if (optimize_varyings(shaders[i], shaders[i + 1], spirv,
+                            max_uniform_comps, max_ubos) & nir_progress_producer)
          highest_changed_producer = i;
-      }
-      if (progress & nir_progress_consumer)
-         gl_nir_opts(consumer);
    }
 
    /* Optimize varyings from the highest changed producer to the first
     * shader.
     */
    for (unsigned i = highest_changed_producer; i > 0; i--) {
-      nir_shader *producer = shaders[i - 1];
-      nir_shader *consumer = shaders[i];
-
-      nir_opt_varyings_progress progress =
-         nir_opt_varyings(producer, consumer, spirv, max_uniform_comps,
-                          max_ubos);
-
-      if (progress & nir_progress_producer)
-         gl_nir_opts(producer);
-      if (progress & nir_progress_consumer)
-         gl_nir_opts(consumer);
+      optimize_varyings(shaders[i - 1], shaders[i], spirv, max_uniform_comps,
+                        max_ubos);
    }
 
    /* Final cleanups. */

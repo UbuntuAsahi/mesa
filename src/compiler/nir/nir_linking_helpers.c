@@ -1202,9 +1202,18 @@ nir_clone_deref_instr(nir_builder *b, nir_variable *var,
     */
    switch (deref->deref_type) {
    case nir_deref_type_array: {
-      nir_load_const_instr *index =
-         nir_instr_as_load_const(deref->arr.index.ssa->parent_instr);
-      return nir_build_deref_array_imm(b, parent, index->value->i64);
+      if (b->shader ==
+          nir_cf_node_get_function(&deref->instr.block->cf_node)->function->shader) {
+         /* Cloning within the same shader. */
+         return nir_build_deref_array(b, parent, deref->arr.index.ssa);
+      } else {
+         /* Cloning to a different shader. The index must be constant because
+          * we don't implement cloning the index SSA here.
+          */
+         nir_load_const_instr *index =
+            nir_instr_as_load_const(deref->arr.index.ssa->parent_instr);
+         return nir_build_deref_array_imm(b, parent, index->value->i64);
+      }
    }
    case nir_deref_type_ptr_as_array: {
       nir_load_const_instr *index =
@@ -1401,7 +1410,7 @@ nir_link_opt_varyings(nir_shader *producer, nir_shader *consumer)
 
       nir_scalar uni_scalar;
       if (is_direct_uniform_load(ssa, &uni_scalar)) {
-         if (consumer->options->lower_varying_from_uniform) {
+         if (consumer->options->max_varying_expression_cost >= 2) {
             progress |= replace_varying_input_by_uniform_load(consumer, intr,
                                                               &uni_scalar);
             continue;

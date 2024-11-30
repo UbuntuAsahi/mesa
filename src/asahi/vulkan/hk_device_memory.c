@@ -52,7 +52,6 @@ hk_memory_type_flags(const VkMemoryType *type,
 static void
 hk_add_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
 {
-
    uint32_t id = bo->vbo_res_id;
 
    unsigned count = util_dynarray_num_elements(&dev->external_bos.list,
@@ -80,12 +79,11 @@ hk_add_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
 static void
 hk_add_ext_bo(struct hk_device *dev, struct agx_bo *bo)
 {
-   if (!dev->dev.is_virtio)
-      return;
-
-   u_rwlock_wrlock(&dev->external_bos.lock);
-   hk_add_ext_bo_locked(dev, bo);
-   u_rwlock_wrunlock(&dev->external_bos.lock);
+   if (dev->dev.is_virtio) {
+      u_rwlock_wrlock(&dev->external_bos.lock);
+      hk_add_ext_bo_locked(dev, bo);
+      u_rwlock_wrunlock(&dev->external_bos.lock);
+   }
 }
 
 static void
@@ -117,12 +115,11 @@ hk_remove_ext_bo_locked(struct hk_device *dev, struct agx_bo *bo)
 static void
 hk_remove_ext_bo(struct hk_device *dev, struct agx_bo *bo)
 {
-   if (!dev->dev.is_virtio)
-      return;
-
-   u_rwlock_wrlock(&dev->external_bos.lock);
-   hk_remove_ext_bo_locked(dev, bo);
-   u_rwlock_wrunlock(&dev->external_bos.lock);
+   if (dev->dev.is_virtio) {
+      u_rwlock_wrlock(&dev->external_bos.lock);
+      hk_remove_ext_bo_locked(dev, bo);
+      u_rwlock_wrunlock(&dev->external_bos.lock);
+   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

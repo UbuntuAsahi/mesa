@@ -79,4 +79,5 @@ log2_tile_size(uint32_t size)
 uint32_t
 v3d_compute_rt_row_row_stride_128_bits(uint32_t tile_width,
                                        uint32_t bpp);
+
 #endif

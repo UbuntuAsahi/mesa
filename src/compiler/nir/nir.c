@@ -507,6 +507,9 @@ nir_function_create(nir_shader *shader, const char *name)
    func->subroutine_index = 0;
    func->num_subroutine_types = 0;
    func->subroutine_types = NULL;
+   func->workgroup_size[0] = 0;
+   func->workgroup_size[1] = 0;
+   func->workgroup_size[2] = 0;
 
    /* Only meaningful for shader libraries, so don't export by default. */
    func->is_exported = false;
@@ -1148,10 +1151,24 @@ nir_instr_move(nir_cursor cursor, nir_instr *instr)
    /* If the cursor happens to refer to this instruction (either before or
     * after), don't do anything.
     */
-   if ((cursor.option == nir_cursor_before_instr ||
-        cursor.option == nir_cursor_after_instr) &&
-       cursor.instr == instr)
-      return false;
+   switch (cursor.option) {
+   case nir_cursor_before_instr:
+      if (cursor.instr == instr || nir_instr_prev(cursor.instr) == instr)
+         return false;
+      break;
+   case nir_cursor_after_instr:
+      if (cursor.instr == instr || nir_instr_next(cursor.instr) == instr)
+         return false;
+      break;
+   case nir_cursor_before_block:
+      if (cursor.block == instr->block && nir_instr_is_first(instr))
+         return false;
+      break;
+   case nir_cursor_after_block:
+      if (cursor.block == instr->block && nir_instr_is_last(instr))
+         return false;
+      break;
+   }
 
    nir_instr_remove(instr);
    nir_instr_insert(cursor, instr);
@@ -1351,9 +1368,11 @@ nir_instr_def(nir_instr *instr)
    case nir_instr_type_undef:
       return &nir_instr_as_undef(instr)->def;
 
+   case nir_instr_type_debug_info:
+      return &nir_instr_as_debug_info(instr)->def;
+
    case nir_instr_type_call:
    case nir_instr_type_jump:
-   case nir_instr_type_debug_info:
       return NULL;
    }
 
@@ -1703,6 +1722,33 @@ nir_def_all_uses_are_fsat(const nir_def *def)
          return false;
    }
 
+   return true;
+}
+
+bool
+nir_def_all_uses_ignore_sign_bit(const nir_def *def)
+{
+   nir_foreach_use(use, def) {
+      if (nir_src_is_if(use))
+         return false;
+      nir_instr *instr = nir_src_parent_instr(use);
+
+      if (instr->type != nir_instr_type_alu)
+         return false;
+
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if (alu->op == nir_op_fabs) {
+         continue;
+      } else if (alu->op == nir_op_fmul || alu->op == nir_op_ffma) {
+         nir_alu_src *alu_src = list_entry(use, nir_alu_src, src);
+         unsigned src_index = alu_src - alu->src;
+         /* a * a doesn't care about sign of a. */
+         if (src_index < 2 && nir_alu_srcs_equal(alu, alu, 0, 1))
+            continue;
+      }
+
+      return false;
+   }
    return true;
 }
 
@@ -2229,6 +2275,8 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_invocation_id;
    case SYSTEM_VALUE_FRAG_COORD:
       return nir_intrinsic_load_frag_coord;
+   case SYSTEM_VALUE_PIXEL_COORD:
+      return nir_intrinsic_load_pixel_coord;
    case SYSTEM_VALUE_POINT_COORD:
       return nir_intrinsic_load_point_coord;
    case SYSTEM_VALUE_LINE_COORD:
@@ -2394,6 +2442,8 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
       return SYSTEM_VALUE_INVOCATION_ID;
    case nir_intrinsic_load_frag_coord:
       return SYSTEM_VALUE_FRAG_COORD;
+   case nir_intrinsic_load_pixel_coord:
+      return SYSTEM_VALUE_PIXEL_COORD;
    case nir_intrinsic_load_point_coord:
       return SYSTEM_VALUE_POINT_COORD;
    case nir_intrinsic_load_line_coord:
@@ -3493,6 +3543,19 @@ nir_remove_non_exported(nir_shader *nir)
    nir_foreach_function_safe(func, nir) {
       if (!func->is_exported)
          exec_node_remove(&func->node);
+   }
+}
+
+/*
+ * After precompiling entrypoints from a kernel library, we want to garbage
+ * collect the NIR entrypoints but leave the exported library functions. This
+ * helper does that.
+ */
+void
+nir_remove_entrypoints(nir_shader *nir)
+{
+   nir_foreach_entrypoint_safe(func, nir) {
+      exec_node_remove(&func->node);
    }
 }
 

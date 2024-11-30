@@ -48,7 +48,6 @@
 #include "vk_shader_module.h"
 
 #include "compiler/bifrost_nir.h"
-#include "util/pan_lower_framebuffer.h"
 #include "pan_shader.h"
 
 #include "vk_log.h"
@@ -338,7 +337,7 @@ panvk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir)
       .lower_txs_lod = true,
       .lower_txp = ~0,
       .lower_tg4_broadcom_swizzle = true,
-      .lower_txd = true,
+      .lower_txd_cube_map = true,
       .lower_invalid_implicit_lod = true,
    };
    NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
@@ -365,7 +364,13 @@ panvk_hash_graphics_state(struct vk_physical_device *device,
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
 
-   /* We don't need to do anything here yet */
+   /* This doesn't impact the shader compile but it does go in the
+    * panvk_shader and gets [de]serialized along with the binary so
+    * we need to hash it.
+    */
+   bool sample_shading_enable = state->ms && state->ms->sample_shading_enable;
+   _mesa_blake3_update(&blake3_ctx, &sample_shading_enable,
+                       sizeof(sample_shading_enable));
 
    _mesa_blake3_final(&blake3_ctx, blake3_out);
 }
@@ -486,6 +491,20 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
                  nir_address_format_32bit_offset);
    }
 
+   if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+      /* Align everything up to 16 bytes to take advantage of load store
+       * vectorization. */
+      nir->info.shared_size = align(nir->info.shared_size, 16);
+      NIR_PASS(_, nir, nir_zero_initialize_shared_memory, nir->info.shared_size,
+               16);
+
+      /* We need to call lower_compute_system_values again because
+       * nir_zero_initialize_shared_memory generates load_invocation_id which
+       * has to be lowered to load_invocation_index.
+       */
+      NIR_PASS(_, nir, nir_lower_compute_system_values, NULL);
+   }
+
    if (stage == MESA_SHADER_VERTEX) {
       /* We need the driver_location to match the vertex attribute location,
        * so we can use the attribute layout described by
@@ -517,7 +536,10 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
 
    pan_shader_preprocess(nir, compile_input->gpu_id);
 
-   if (stage == MESA_SHADER_VERTEX)
+   /* since valhall, panvk_per_arch(nir_lower_descriptors) separates the
+    * driver set and the user sets, and does not need pan_lower_image_index
+    */
+   if (PAN_ARCH < 9 && stage == MESA_SHADER_VERTEX)
       NIR_PASS_V(nir, pan_lower_image_index, MAX_VS_ATTRIBS);
 
    NIR_PASS_V(nir, nir_shader_instructions_pass, panvk_lower_sysvals,
@@ -832,6 +854,10 @@ panvk_compile_shader(struct panvk_device *dev,
       panvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
       return result;
    }
+
+   if (info->stage == MESA_SHADER_FRAGMENT && state != NULL &&
+       state->ms != NULL && state->ms->sample_shading_enable)
+      shader->info.fs.sample_shading = true;
 
    *shader_out = &shader->vk;
 
@@ -1161,6 +1187,7 @@ panvk_shader_get_executable_internal_representations(
    return incomplete_text ? VK_INCOMPLETE : vk_outarray_status(&out);
 }
 
+#if PAN_ARCH <= 7
 static mali_pixel_format
 get_varying_format(gl_shader_stage stage, gl_varying_slot loc,
                    enum pipe_format pfmt)
@@ -1297,14 +1324,6 @@ panvk_per_arch(link_shaders)(struct panvk_pool *desc_pool,
    assert(vs);
    assert(vs->info.stage == MESA_SHADER_VERTEX);
 
-   if (PAN_ARCH >= 9) {
-      /* No need to calculate varying stride if there's no fragment shader. */
-      if (fs)
-         link->buf_strides[PANVK_VARY_BUF_GENERAL] =
-            MAX2(fs->info.varyings.input_count, vs->info.varyings.output_count);
-      return VK_SUCCESS;
-   }
-
    collect_varyings_info(vs->info.varyings.output,
                          vs->info.varyings.output_count, &out_vars);
 
@@ -1380,6 +1399,7 @@ panvk_per_arch(link_shaders)(struct panvk_pool *desc_pool,
    memcpy(link->buf_strides, buf_strides, sizeof(link->buf_strides));
    return VK_SUCCESS;
 }
+#endif
 
 static const struct vk_shader_ops panvk_shader_ops = {
    .destroy = panvk_shader_destroy,
@@ -1396,22 +1416,22 @@ panvk_cmd_bind_shader(struct panvk_cmd_buffer *cmd, const gl_shader_stage stage,
 {
    switch (stage) {
    case MESA_SHADER_COMPUTE:
-      cmd->state.compute.shader = shader;
-      memset(&cmd->state.compute.cs.desc, 0,
-             sizeof(cmd->state.compute.cs.desc));
+      if (cmd->state.compute.shader != shader) {
+         cmd->state.compute.shader = shader;
+         compute_state_set_dirty(cmd, CS);
+      }
       break;
    case MESA_SHADER_VERTEX:
-      cmd->state.gfx.vs.shader = shader;
-      cmd->state.gfx.linked = false;
-      memset(&cmd->state.gfx.vs.desc, 0, sizeof(cmd->state.gfx.vs.desc));
+      if (cmd->state.gfx.vs.shader != shader) {
+         cmd->state.gfx.vs.shader = shader;
+         gfx_state_set_dirty(cmd, VS);
+      }
       break;
    case MESA_SHADER_FRAGMENT:
-      cmd->state.gfx.fs.shader = shader;
-      cmd->state.gfx.linked = false;
-#if PAN_ARCH <= 7
-      cmd->state.gfx.fs.rsd = 0;
-#endif
-      memset(&cmd->state.gfx.fs.desc, 0, sizeof(cmd->state.gfx.fs.desc));
+      if (cmd->state.gfx.fs.shader != shader) {
+         cmd->state.gfx.fs.shader = shader;
+         gfx_state_set_dirty(cmd, FS);
+      }
       break;
    default:
       assert(!"Unsupported stage");

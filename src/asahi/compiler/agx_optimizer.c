@@ -254,7 +254,6 @@ agx_supports_zext(agx_instr *I, unsigned s)
    switch (I->op) {
    case AGX_OPCODE_IADD:
    case AGX_OPCODE_IMAD:
-   case AGX_OPCODE_ASR:
    case AGX_OPCODE_ICMP:
    case AGX_OPCODE_INTL:
    case AGX_OPCODE_FFS:
@@ -563,7 +562,7 @@ agx_optimizer_forward(agx_context *ctx)
          agx_optimizer_ballot(ctx, defs, I);
       } else if (I->op == AGX_OPCODE_BITOP) {
          agx_optimizer_bitop(defs, I);
-      } else if (I->op == AGX_OPCODE_IADD) {
+      } else if (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD) {
          agx_optimizer_signext(defs, I);
       }
    }

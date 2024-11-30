@@ -130,6 +130,7 @@ static int r300_get_param(struct pipe_screen* pscreen, enum pipe_cap param)
         case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
         case PIPE_CAP_LEGACY_MATH_RULES:
         case PIPE_CAP_TGSI_TEXCOORD:
+        case PIPE_CAP_CALL_FINALIZE_NIR_IN_LINKER:
             return 1;
 
         case PIPE_CAP_TEXTURE_TRANSFER_MODES:
@@ -487,8 +488,7 @@ static int r300_get_video_param(struct pipe_screen *screen,
    .lower_insert_word = true,                 \
    .lower_uniforms_to_ubo = true,             \
    .lower_vector_cmp = true,                  \
-   .no_integers = true,                       \
-   .use_interpolated_input_intrinsics = true
+   .no_integers = true
 
 static const nir_shader_compiler_options r500_vs_compiler_options = {
    COMMON_NIR_OPTIONS,
@@ -839,6 +839,11 @@ struct pipe_screen* r300_screen_create(struct radeon_winsys *rws,
         r300screen->caps.hiz_ram = 0;
     if (SCREEN_DBG_ON(r300screen, DBG_NO_TCL))
         r300screen->caps.has_tcl = false;
+
+    if (SCREEN_DBG_ON(r300screen, DBG_IEEEMATH))
+        r300screen->options.ieeemath = true;
+    if (SCREEN_DBG_ON(r300screen, DBG_FFMATH))
+        r300screen->options.ffmath = true;
 
     r300screen->rws = rws;
     r300screen->screen.destroy = r300_destroy_screen;

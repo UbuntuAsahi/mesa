@@ -69,6 +69,8 @@ hk_deps = [
   idep_vulkan_wsi,
   idep_vulkan_wsi_headers,
   idep_agx_pack,
+  idep_libagx,
+  idep_libagx_shaders_h,
 ]
 
 libhk = static_library(
@@ -76,7 +78,6 @@ libhk = static_library(
   [
     hk_entrypoints,
     hk_files,
-    libagx_shaders,
     sha1_h,
   ],
   include_directories : [

@@ -22,9 +22,11 @@ use spirv::SpirvKernelInfo;
 use std::cmp;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::ffi::CStr;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::ops::Index;
+use std::ops::Not;
 use std::os::raw::c_void;
 use std::ptr;
 use std::slice;
@@ -58,8 +60,10 @@ pub enum KernelArgType {
 
 impl KernelArgType {
     fn deserialize(blob: &mut blob_reader) -> Option<Self> {
-        Some(match unsafe { blob_read_uint8(blob) } {
+        // SAFETY: we get 0 on an overrun, but we verify that later and act accordingly.
+        let res = match unsafe { blob_read_uint8(blob) } {
             0 => {
+                // SAFETY: same here
                 let size = unsafe { blob_read_uint16(blob) };
                 KernelArgType::Constant(size)
             }
@@ -71,7 +75,9 @@ impl KernelArgType {
             6 => KernelArgType::MemConstant,
             7 => KernelArgType::MemLocal,
             _ => return None,
-        })
+        };
+
+        blob.overrun.not().then_some(res)
     }
 
     fn serialize(&self, blob: &mut blob) {
@@ -192,24 +198,24 @@ impl KernelArg {
     }
 
     fn deserialize(blob: &mut blob_reader) -> Option<Vec<Self>> {
-        unsafe {
-            let len = blob_read_uint16(blob) as usize;
-            let mut res = Vec::with_capacity(len);
+        // SAFETY: we check the overrun status, blob_read returns 0 in such a case.
+        let len = unsafe { blob_read_uint16(blob) } as usize;
+        let mut res = Vec::with_capacity(len);
 
-            for _ in 0..len {
-                let spirv = spirv::SPIRVKernelArg::deserialize(blob)?;
-                let dead = blob_read_uint8(blob) != 0;
-                let kind = KernelArgType::deserialize(blob)?;
+        for _ in 0..len {
+            let spirv = spirv::SPIRVKernelArg::deserialize(blob)?;
+            // SAFETY: we check the overrun status
+            let dead = unsafe { blob_read_uint8(blob) } != 0;
+            let kind = KernelArgType::deserialize(blob)?;
 
-                res.push(Self {
-                    spirv: spirv,
-                    kind: kind,
-                    dead: dead,
-                });
-            }
-
-            Some(res)
+            res.push(Self {
+                spirv: spirv,
+                kind: kind,
+                dead: dead,
+            });
         }
+
+        blob.overrun.not().then_some(res)
     }
 }
 
@@ -781,7 +787,7 @@ fn compile_nir_variant(
                        var_loc: &mut usize,
                        kind: CompiledKernelArgType,
                        glsl_type: *const glsl_type,
-                       name: &str| {
+                       name| {
         *var_loc = compiled_args.len();
         compiled_args.push(CompiledKernelArg {
             kind: kind,
@@ -803,7 +809,7 @@ fn compile_nir_variant(
             &mut lower_state.base_global_invoc_id_loc,
             CompiledKernelArgType::GlobalWorkOffsets,
             unsafe { glsl_vector_type(address_bits_base_type, 3) },
-            "base_global_invocation_id",
+            c"base_global_invocation_id",
         )
     }
 
@@ -813,7 +819,7 @@ fn compile_nir_variant(
             &mut lower_state.global_size_loc,
             CompiledKernelArgType::GlobalWorkSize,
             unsafe { glsl_vector_type(address_bits_base_type, 3) },
-            "global_size",
+            c"global_size",
         )
     }
 
@@ -824,7 +830,7 @@ fn compile_nir_variant(
             &mut lower_state.base_workgroup_id_loc,
             CompiledKernelArgType::WorkGroupOffsets,
             unsafe { glsl_vector_type(address_bits_base_type, 3) },
-            "base_workgroup_id",
+            c"base_workgroup_id",
         );
     }
 
@@ -834,7 +840,7 @@ fn compile_nir_variant(
             &mut lower_state.num_workgroups_loc,
             CompiledKernelArgType::NumWorkgroups,
             unsafe { glsl_vector_type(glsl_base_type::GLSL_TYPE_UINT, 3) },
-            "num_workgroups",
+            c"num_workgroups",
         );
     }
 
@@ -844,7 +850,7 @@ fn compile_nir_variant(
             &mut lower_state.const_buf_loc,
             CompiledKernelArgType::ConstantBuffer,
             address_bits_ptr_type,
-            "constant_buffer_addr",
+            c"constant_buffer_addr",
         );
     }
     if nir.has_printf() {
@@ -853,7 +859,7 @@ fn compile_nir_variant(
             &mut lower_state.printf_buf_loc,
             CompiledKernelArgType::PrintfBuffer,
             address_bits_ptr_type,
-            "printf_buffer_addr",
+            c"printf_buffer_addr",
         );
     }
 
@@ -865,7 +871,7 @@ fn compile_nir_variant(
             &mut lower_state.format_arr_loc,
             CompiledKernelArgType::FormatArray,
             unsafe { glsl_array_type(glsl_int16_t_type(), count as u32, 2) },
-            "image_formats",
+            c"image_formats",
         );
 
         add_var(
@@ -873,7 +879,7 @@ fn compile_nir_variant(
             &mut lower_state.order_arr_loc,
             CompiledKernelArgType::OrderArray,
             unsafe { glsl_array_type(glsl_int16_t_type(), count as u32, 2) },
-            "image_orders",
+            c"image_orders",
         );
     }
 
@@ -883,7 +889,7 @@ fn compile_nir_variant(
             &mut lower_state.work_dim_loc,
             CompiledKernelArgType::WorkDim,
             unsafe { glsl_uint8_t_type() },
-            "work_dim",
+            c"work_dim",
         );
     }
 
@@ -939,7 +945,7 @@ fn compile_nir_variant(
         shared_address_format,
     );
 
-    if nir_options.lower_int64_options.0 != 0 {
+    if nir_options.lower_int64_options.0 != 0 && !nir_options.late_lower_int64 {
         nir_pass!(nir, nir_lower_int64);
     }
 
@@ -1080,18 +1086,16 @@ impl SPIRVToNirResult {
         let args = KernelArg::deserialize(&mut reader)?;
         let default_build = CompilationResult::deserialize(&mut reader, d)?;
 
+        // SAFETY: on overrun this returns 0
         let optimized = match unsafe { blob_read_uint8(&mut reader) } {
             0 => None,
             _ => Some(CompilationResult::deserialize(&mut reader, d)?),
         };
 
-        Some(SPIRVToNirResult::new(
-            d,
-            kernel_info,
-            args,
-            default_build,
-            optimized,
-        ))
+        reader
+            .overrun
+            .not()
+            .then(|| SPIRVToNirResult::new(d, kernel_info, args, default_build, optimized))
     }
 
     // we can't use Self here as the nir shader might be compiled to a cso already and we can't
@@ -1291,7 +1295,8 @@ impl Kernel {
                 && grid[0] <= hw_max_grid[0]
                 && grid[1] <= hw_max_grid[1]
                 && grid[2] <= hw_max_grid[2]
-                && block == kernel_info.work_group_size_hint
+                && (kernel_info.work_group_size_hint == [0; 3]
+                    || block == kernel_info.work_group_size_hint)
             {
                 NirKernelVariant::Optimized
             } else {
@@ -1688,12 +1693,14 @@ impl Kernel {
         self.kernel_info.subgroup_size
     }
 
-    pub fn arg_name(&self, idx: cl_uint) -> &String {
-        &self.kernel_info.args[idx as usize].spirv.name
+    pub fn arg_name(&self, idx: cl_uint) -> Option<&CStr> {
+        let name = &self.kernel_info.args[idx as usize].spirv.name;
+        name.is_empty().not().then_some(name)
     }
 
-    pub fn arg_type_name(&self, idx: cl_uint) -> &String {
-        &self.kernel_info.args[idx as usize].spirv.type_name
+    pub fn arg_type_name(&self, idx: cl_uint) -> Option<&CStr> {
+        let type_name = &self.kernel_info.args[idx as usize].spirv.type_name;
+        type_name.is_empty().not().then_some(type_name)
     }
 
     pub fn priv_mem_size(&self, dev: &Device) -> cl_ulong {

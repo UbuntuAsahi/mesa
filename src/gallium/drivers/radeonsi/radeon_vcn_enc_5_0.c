@@ -91,10 +91,8 @@ static void radeon_enc_encode_params(struct radeon_encoder *enc)
       }
    }
 
-   if (enc->luma->meta_offset) {
-      RVID_ERR("DCC surfaces not supported.\n");
-      assert(false);
-   }
+   if (enc->luma->meta_offset)
+      RADEON_ENC_ERR("DCC surfaces not supported.\n");
 
    enc->enc_pic.enc_params.input_pic_luma_pitch = enc->luma->u.gfx9.surf_pitch;
    enc->enc_pic.enc_params.input_pic_chroma_pitch = enc->chroma ?
@@ -343,7 +341,7 @@ static void radeon_enc_ctx_tier2(struct radeon_encoder *enc)
          continue;
       }
       struct rvid_buffer *pre = enc->enc_pic.dpb_bufs[i]->pre;
-      struct rvid_buffer *pre_fcb = enc->enc_pic.dpb_bufs[i]->fcb;
+      struct rvid_buffer *pre_fcb = enc->enc_pic.dpb_bufs[i]->pre_fcb;
       RADEON_ENC_READWRITE(pre->res->buf, pre->res->domains, 0);
       RADEON_ENC_CS(enc->enc_pic.ctx_buf.rec_luma_pitch);
       RADEON_ENC_READWRITE(pre->res->buf, pre->res->domains, enc->enc_pic.dpb_luma_size);
@@ -825,10 +823,10 @@ static void radeon_enc_av1_quantization_params(struct radeon_encoder *enc)
 
 static int32_t radeon_enc_av1_get_relative_dist(struct radeon_encoder *enc, uint32_t a, uint32_t b)
 {
-    uint32_t diff = a - b;
-    uint32_t m = 1 << (enc->enc_pic.av1.desc->seq.order_hint_bits - 1);
-    diff = (diff & (m - 1)) - (diff & m);
-    return diff;
+   uint32_t diff = a - b;
+   uint32_t m = 1 << (enc->enc_pic.av1.desc->seq.order_hint_bits - 1);
+   diff = (diff & (m - 1)) - (diff & m);
+   return diff;
 }
 
 bool radeon_enc_av1_skip_mode_allowed(struct radeon_encoder *enc, uint32_t frames[2])
@@ -840,7 +838,7 @@ bool radeon_enc_av1_skip_mode_allowed(struct radeon_encoder *enc, uint32_t frame
       return false;
 
    int32_t forward_idx = -1, backward_idx = -1;
-   uint32_t forward_hint, backward_hint;
+   uint32_t forward_hint = 0, backward_hint = 0;
 
    for (uint32_t i = 0; i < RENCODE_AV1_REFS_PER_FRAME; i++) {
       uint32_t ref_hint = enc->enc_pic.av1.desc->dpb[enc->enc_pic.av1.desc->dpb_ref_frame_idx[i]].order_hint;
@@ -961,55 +959,6 @@ static void radeon_enc_obu_instruction(struct radeon_encoder *enc)
 
 static void radeon_enc_session_init(struct radeon_encoder *enc)
 {
-   switch (u_reduce_video_profile(enc->base.profile)) {
-      case PIPE_VIDEO_FORMAT_MPEG4_AVC:
-         enc->enc_pic.session_init.encode_standard = RENCODE_ENCODE_STANDARD_H264;
-         enc->enc_pic.session_init.aligned_picture_width = align(enc->base.width, 16);
-         enc->enc_pic.session_init.aligned_picture_height = align(enc->base.height, 16);
-
-         enc->enc_pic.session_init.padding_width =
-            (enc->enc_pic.crop_left + enc->enc_pic.crop_right) * 2;
-         enc->enc_pic.session_init.padding_height =
-            (enc->enc_pic.crop_top + enc->enc_pic.crop_bottom) * 2;
-         break;
-      case PIPE_VIDEO_FORMAT_HEVC:
-         enc->enc_pic.session_init.encode_standard = RENCODE_ENCODE_STANDARD_HEVC;
-         enc->enc_pic.session_init.aligned_picture_width = align(enc->base.width, 64);
-         enc->enc_pic.session_init.aligned_picture_height = align(enc->base.height, 16);
-         enc->enc_pic.session_init.padding_width =
-            (enc->enc_pic.crop_left + enc->enc_pic.crop_right) * 2;
-         enc->enc_pic.session_init.padding_height =
-            (enc->enc_pic.crop_top + enc->enc_pic.crop_bottom) * 2;
-         break;
-      case PIPE_VIDEO_FORMAT_AV1:
-         enc->enc_pic.session_init.encode_standard = RENCODE_ENCODE_STANDARD_AV1;
-         enc->enc_pic.session_init.aligned_picture_width =
-                              align(enc->enc_pic.pic_width_in_luma_samples, 8);
-         enc->enc_pic.session_init.aligned_picture_height =
-                                 align(enc->enc_pic.pic_height_in_luma_samples, 2);
-
-         enc->enc_pic.av1.coded_width = enc->enc_pic.pic_width_in_luma_samples;
-         enc->enc_pic.av1.coded_height = enc->enc_pic.pic_height_in_luma_samples;
-
-         enc->enc_pic.session_init.padding_width =
-            enc->enc_pic.session_init.aligned_picture_width -
-            enc->enc_pic.pic_width_in_luma_samples;
-         enc->enc_pic.session_init.padding_height =
-            enc->enc_pic.session_init.aligned_picture_height -
-            enc->enc_pic.pic_height_in_luma_samples;
-
-         if (enc->enc_pic.enable_render_size)
-            enc->enc_pic.enable_render_size =
-                           (enc->enc_pic.session_init.aligned_picture_width !=
-                            enc->enc_pic.render_width) ||
-                           (enc->enc_pic.session_init.aligned_picture_height !=
-                            enc->enc_pic.render_height);
-         break;
-      default:
-         assert(0);
-         break;
-   }
-
    enc->enc_pic.session_init.slice_output_enabled = 0;
    enc->enc_pic.session_init.display_remote = 0;
    enc->enc_pic.session_init.pre_encode_mode = enc->enc_pic.quality_modes.pre_encode_mode;

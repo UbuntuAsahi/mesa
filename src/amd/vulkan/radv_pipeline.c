@@ -70,6 +70,22 @@ radv_pipeline_capture_shader_stats(const struct radv_device *device, VkPipelineC
           (instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
 }
 
+bool
+radv_pipeline_skip_shaders_cache(const struct radv_device *device, const struct radv_pipeline *pipeline)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   /* Skip the shaders cache when any of the below are true:
+    * - shaders are dumped for debugging (RADV_DEBUG=shaders)
+    * - shaders IR are captured (NIR, backend IR and ASM)
+    * - binaries are captured (driver shouldn't store data to an internal cache)
+    */
+   return (instance->debug_flags & RADV_DEBUG_DUMP_SHADERS) ||
+          (pipeline->create_flags &
+           (VK_PIPELINE_CREATE_2_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR | VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR));
+}
+
 void
 radv_pipeline_init(struct radv_device *device, struct radv_pipeline *pipeline, enum radv_pipeline_type type)
 {
@@ -375,29 +391,9 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
    };
    NIR_PASS(_, stage->nir, radv_nir_opt_tid_function, &tid_options);
 
-   enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
-      nir_lower_non_uniform_ubo_access | nir_lower_non_uniform_ssbo_access | nir_lower_non_uniform_texture_access |
-      nir_lower_non_uniform_image_access;
+   nir_divergence_analysis(stage->nir);
+   NIR_PASS(_, stage->nir, ac_nir_flag_smem_for_loads, gfx_level, use_llvm, false);
 
-   /* In practice, most shaders do not have non-uniform-qualified
-    * accesses (see
-    * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/17558#note_1475069)
-    * thus a cheaper and likely to fail check is run first.
-    */
-   if (nir_has_non_uniform_access(stage->nir, lower_non_uniform_access_types)) {
-      if (!stage->key.optimisations_disabled) {
-         NIR_PASS(_, stage->nir, nir_opt_non_uniform_access);
-      }
-
-      if (!radv_use_llvm_for_stage(pdev, stage->stage)) {
-         nir_lower_non_uniform_access_options options = {
-            .types = lower_non_uniform_access_types,
-            .callback = &non_uniform_access_callback,
-            .callback_data = NULL,
-         };
-         NIR_PASS(_, stage->nir, nir_lower_non_uniform_access, &options);
-      }
-   }
    NIR_PASS(_, stage->nir, nir_lower_memory_model);
 
    nir_load_store_vectorize_options vectorize_opts = {
@@ -435,10 +431,31 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
       }
    }
 
-   NIR_PASS(
-      _, stage->nir, ac_nir_lower_subdword_loads,
-      (ac_nir_lower_subdword_options){.modes_1_comp = nir_var_mem_ubo | nir_var_mem_push_const,
-                                      .modes_N_comps = nir_var_mem_ubo | nir_var_mem_push_const | nir_var_mem_ssbo});
+   enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
+      nir_lower_non_uniform_ubo_access | nir_lower_non_uniform_ssbo_access | nir_lower_non_uniform_texture_access |
+      nir_lower_non_uniform_image_access;
+
+   /* In practice, most shaders do not have non-uniform-qualified
+    * accesses (see
+    * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/17558#note_1475069)
+    * thus a cheaper and likely to fail check is run first.
+    */
+   if (nir_has_non_uniform_access(stage->nir, lower_non_uniform_access_types)) {
+      if (!stage->key.optimisations_disabled) {
+         NIR_PASS(_, stage->nir, nir_opt_non_uniform_access);
+      }
+
+      if (!radv_use_llvm_for_stage(pdev, stage->stage)) {
+         nir_lower_non_uniform_access_options options = {
+            .types = lower_non_uniform_access_types,
+            .callback = &non_uniform_access_callback,
+            .callback_data = NULL,
+         };
+         NIR_PASS(_, stage->nir, nir_lower_non_uniform_access, &options);
+      }
+   }
+
+   NIR_PASS(_, stage->nir, ac_nir_lower_mem_access_bit_sizes, gfx_level, use_llvm);
 
    progress = false;
    NIR_PASS(progress, stage->nir, nir_vk_lower_ycbcr_tex, ycbcr_conversion_lookup, &stage->layout);
@@ -562,9 +579,6 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
                .allow_fp16 = gfx_level >= GFX9,
             });
 
-   if (radv_use_llvm_for_stage(pdev, stage->stage))
-      NIR_PASS_V(stage->nir, nir_lower_io_to_scalar, nir_var_mem_global, NULL, NULL);
-
    NIR_PASS(_, stage->nir, ac_nir_lower_global_access);
    NIR_PASS_V(stage->nir, ac_nir_lower_intrinsics_to_args, gfx_level, radv_select_hw_stage(&stage->info, gfx_level),
               &stage->args.ac);
@@ -607,7 +621,16 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
          .opt_srcs_options_count = separate_g16 ? 2 : 1,
          .opt_srcs_options = opt_srcs_options,
       };
-      NIR_PASS(_, stage->nir, nir_opt_16bit_tex_image, &opt_16bit_options);
+      bool run_copy_prop = false;
+      NIR_PASS(run_copy_prop, stage->nir, nir_opt_16bit_tex_image, &opt_16bit_options);
+
+      /* Optimizing 16bit texture/image dests leaves scalar moves that stops
+       * nir_opt_vectorize from vectorzing the alu uses of them.
+       */
+      if (run_copy_prop) {
+         NIR_PASS(_, stage->nir, nir_copy_prop);
+         NIR_PASS(_, stage->nir, nir_opt_dce);
+      }
 
       if (!stage->key.optimisations_disabled &&
           ((stage->nir->info.bit_sizes_int | stage->nir->info.bit_sizes_float) & 16)) {
@@ -975,7 +998,7 @@ radv_GetPipelineExecutableStatisticsKHR(VkDevice _device, const VkPipelineExecut
          break;
 
       case MESA_SHADER_FRAGMENT:
-         s->value.u64 += shader->info.ps.num_interp + shader->info.ps.num_prim_interp;
+         s->value.u64 += shader->info.ps.num_inputs;
          break;
 
       default:

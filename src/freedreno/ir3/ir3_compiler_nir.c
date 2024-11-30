@@ -873,6 +873,29 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       dst = ir3_SHR_B_rpt(ctx->block, dst_sz, src[0], 0,
                           resize_shift_amount(ctx, dst_sz, src[1], bs[0]), 0);
       break;
+   case nir_op_shrm_ir3:
+      dst = ir3_SHRM_rpt(ctx->block, dst_sz,
+                         resize_shift_amount(ctx, dst_sz, src[1], bs[0]), 0,
+                         src[0], 0, src[2], 0);
+      break;
+   case nir_op_shlm_ir3:
+      dst = ir3_SHLM_rpt(ctx->block, dst_sz,
+                         resize_shift_amount(ctx, dst_sz, src[1], bs[0]), 0,
+                         src[0], 0, src[2], 0);
+      break;
+   case nir_op_shrg_ir3:
+      dst = ir3_SHRG_rpt(ctx->block, dst_sz,
+                         resize_shift_amount(ctx, dst_sz, src[1], bs[0]), 0,
+                         src[0], 0, src[2], 0);
+      break;
+   case nir_op_shlg_ir3:
+      dst = ir3_SHLG_rpt(ctx->block, dst_sz,
+                         resize_shift_amount(ctx, dst_sz, src[1], bs[0]), 0,
+                         src[0], 0, src[2], 0);
+      break;
+   case nir_op_andg_ir3:
+      dst = ir3_ANDG_rpt(ctx->block, dst_sz, src[0], 0, src[1], 0, src[2], 0);
+      break;
    case nir_op_ilt:
       dst = ir3_CMPS_S_rpt(b, dst_sz, src[0], 0, src[1], 0);
       set_cat2_condition(dst.rpts, dst_sz, IR3_COND_LT);
@@ -1085,6 +1108,7 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
       case nir_op_ixor:
       case nir_op_inot:
       case nir_op_bcsel:
+      case nir_op_andg_ir3:
          break;
       default:
          compile_assert(ctx, alu->def.bit_size != 1);
@@ -2869,6 +2893,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       break;
    case nir_intrinsic_load_sample_mask_in:
       if (!ctx->samp_mask_in) {
+         ctx->so->reads_smask = true;
          ctx->samp_mask_in =
             create_sysval_input(ctx, SYSTEM_VALUE_SAMPLE_MASK_IN, 0x1);
       }
@@ -2918,6 +2943,15 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
          }
       }
       break;
+   case nir_intrinsic_load_frag_shading_rate: {
+      if (!ctx->frag_shading_rate) {
+         ctx->so->reads_shading_rate = true;
+         ctx->frag_shading_rate =
+            create_sysval_input(ctx, SYSTEM_VALUE_FRAG_SHADING_RATE, 0x1);
+      }
+      dst[0] = ctx->frag_shading_rate;
+      break;
+   }
    case nir_intrinsic_load_base_workgroup_id:
       for (int i = 0; i < dest_components; i++) {
          dst[i] = create_driver_param(ctx, IR3_DP_CS(base_group_x) + i);
@@ -4493,6 +4527,32 @@ emit_if(struct ir3_context *ctx, nir_if *nif)
    emit_cf_list(ctx, &nif->else_list);
 }
 
+static bool
+has_nontrivial_continue(nir_loop *nloop)
+{
+   struct nir_block *nstart = nir_loop_first_block(nloop);
+
+   /* There's always one incoming edge from outside the loop, and if there
+    * is more than one backedge from inside the loop (so more than 2 total
+    * edges) then one must be a nontrivial continue.
+    */
+   if (nstart->predecessors->entries > 2)
+      return true;
+
+   /* Check whether the one backedge is a nontrivial continue. This can happen
+    * if the loop ends with a break.
+    */
+   set_foreach (nstart->predecessors, entry) {
+      nir_block *pred = (nir_block*)entry->key;
+      if (pred == nir_loop_last_block(nloop) ||
+          pred == nir_cf_node_as_block(nir_cf_node_prev(&nloop->cf_node)))
+         continue;
+      return true;
+   }
+
+   return false;
+}
+
 static void
 emit_loop(struct ir3_context *ctx, nir_loop *nloop)
 {
@@ -4502,12 +4562,11 @@ emit_loop(struct ir3_context *ctx, nir_loop *nloop)
    struct nir_block *nstart = nir_loop_first_block(nloop);
    struct ir3_block *continue_blk = NULL;
 
-   /* There's always one incoming edge from outside the loop, and if there
-    * is more than one backedge from inside the loop (so more than 2 total
-    * edges) then we need to create a continue block after the loop to ensure
-    * that control reconverges at the end of each loop iteration.
+   /* If the loop has a continue statement that isn't at the end, then we need to
+    * create a continue block in order to let control flow reconverge before
+    * entering the next iteration of the loop.
     */
-   if (nstart->predecessors->entries > 2) {
+   if (has_nontrivial_continue(nloop)) {
       continue_blk = create_continue_block(ctx, nstart);
    }
 
@@ -5000,6 +5059,9 @@ setup_output(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       case VARYING_SLOT_VIEWPORT:
          so->writes_viewport = true;
          break;
+      case VARYING_SLOT_PRIMITIVE_SHADING_RATE:
+         so->writes_shading_rate = true;
+         break;
       case VARYING_SLOT_PRIMITIVE_ID:
       case VARYING_SLOT_GS_VERTEX_FLAGS_IR3:
          assert(ctx->so->type == MESA_SHADER_GEOMETRY);
@@ -5427,6 +5489,12 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       so->local_size[1] = ctx->s->info.workgroup_size[1];
       so->local_size[2] = ctx->s->info.workgroup_size[2];
       so->local_size_variable = ctx->s->info.workgroup_size_variable;
+   }
+
+   if (so->type == MESA_SHADER_FRAGMENT && so->reads_shading_rate &&
+       !so->reads_smask &&
+       compiler->reading_shading_rate_requires_smask_quirk) {
+      create_sysval_input(ctx, SYSTEM_VALUE_SAMPLE_MASK_IN, 0x1);
    }
 
    /* Vertex shaders in a tessellation or geometry pipeline treat END as a

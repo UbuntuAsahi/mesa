@@ -546,8 +546,23 @@ is_only_used_as_float(const nir_alu_instr *instr)
 {
    nir_foreach_use(src, &instr->def) {
       const nir_instr *const user_instr = nir_src_parent_instr(src);
-      if (user_instr->type != nir_instr_type_alu)
+
+      if (user_instr->type != nir_instr_type_alu) {
+         if (user_instr->type == nir_instr_type_intrinsic) {
+            switch (nir_instr_as_intrinsic(user_instr)->intrinsic) {
+            case nir_intrinsic_ddx:
+            case nir_intrinsic_ddy:
+            case nir_intrinsic_ddx_fine:
+            case nir_intrinsic_ddy_fine:
+            case nir_intrinsic_ddx_coarse:
+            case nir_intrinsic_ddy_coarse:
+               continue;
+            default:
+               break;
+            }
+         }
          return false;
+      }
 
       const nir_alu_instr *const user_alu = nir_instr_as_alu(user_instr);
       assert(instr != user_alu);
@@ -584,7 +599,7 @@ is_only_used_by_fadd(const nir_alu_instr *instr)
 }
 
 static inline bool
-is_only_used_by_iadd(const nir_alu_instr *instr)
+is_only_used_by_alu_op(const nir_alu_instr *instr, nir_op op)
 {
    nir_foreach_use(src, &instr->def) {
       const nir_instr *const user_instr = nir_src_parent_instr(src);
@@ -594,11 +609,29 @@ is_only_used_by_iadd(const nir_alu_instr *instr)
       const nir_alu_instr *const user_alu = nir_instr_as_alu(user_instr);
       assert(instr != user_alu);
 
-      if (user_alu->op != nir_op_iadd)
+      if (user_alu->op != op)
          return false;
    }
 
    return true;
+}
+
+static inline bool
+is_only_used_by_iadd(const nir_alu_instr *instr)
+{
+   return is_only_used_by_alu_op(instr, nir_op_iadd);
+}
+
+static inline bool
+is_only_used_by_iand(const nir_alu_instr *instr)
+{
+   return is_only_used_by_alu_op(instr, nir_op_iand);
+}
+
+static inline bool
+is_only_used_by_ior(const nir_alu_instr *instr)
+{
+   return is_only_used_by_alu_op(instr, nir_op_ior);
 }
 
 static inline bool

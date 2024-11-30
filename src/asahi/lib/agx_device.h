@@ -13,8 +13,10 @@
 #include "util/timespec.h"
 #include "util/vma.h"
 #include "agx_bo.h"
+#include "agx_pack.h"
 #include "decode.h"
 #include "layout.h"
+#include "libagx_dgc.h"
 #include "unstable_asahi_drm.h"
 
 #include "vdrm.h"
@@ -90,6 +92,9 @@ struct agx_device {
    /* NIR library of AGX helpers/shaders. Immutable once created. */
    const struct nir_shader *libagx;
 
+   /* Precompiled libagx binary table */
+   const uint32_t **libagx_programs;
+
    char name[64];
    struct drm_asahi_params_global params;
    uint64_t next_global_id, last_global_id;
@@ -142,9 +147,20 @@ struct agx_device {
       uint64_t hits, misses;
    } bo_cache;
 
-   struct agx_bo *helper;
-
    struct agxdecode_ctx *agxdecode;
+
+   /* Prepacked USC Sampler word to bind the txf sampler, used for
+    * precompiled shaders on both drivers.
+    */
+   struct agx_usc_sampler_packed txf_sampler;
+
+   /* Simplified device selection */
+   enum agx_chip chip;
+
+   struct {
+      uint64_t num;
+      uint64_t den;
+   } timestamp_to_ns;
 };
 
 static inline bool
@@ -189,13 +205,16 @@ uint64_t agx_get_gpu_timestamp(struct agx_device *dev);
 static inline uint64_t
 agx_gpu_time_to_ns(struct agx_device *dev, uint64_t gpu_time)
 {
-   return (gpu_time * NSEC_PER_SEC) / dev->params.timer_frequency_hz;
+   return (gpu_time * dev->timestamp_to_ns.num) / dev->timestamp_to_ns.den;
 }
 
 void agx_get_device_uuid(const struct agx_device *dev, void *uuid);
 void agx_get_driver_uuid(void *uuid);
+unsigned agx_get_num_cores(const struct agx_device *dev);
 
-struct agx_va *agx_va_alloc(struct agx_device *dev, uint32_t size_B,
-                            uint32_t align_B, enum agx_va_flags flags,
+struct agx_device_key agx_gather_device_key(struct agx_device *dev);
+
+struct agx_va *agx_va_alloc(struct agx_device *dev, uint64_t size_B,
+                            uint64_t align_B, enum agx_va_flags flags,
                             uint64_t fixed_va);
 void agx_va_free(struct agx_device *dev, struct agx_va *va);

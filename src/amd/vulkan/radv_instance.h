@@ -42,6 +42,7 @@ struct radv_instance {
 
    uint64_t debug_flags;
    uint64_t perftest_flags;
+   uint64_t trap_excp_flags;
    enum radeon_ctx_pstate profile_pstate;
 
    struct {
@@ -70,6 +71,7 @@ struct radv_instance {
       bool report_llvm9_version_string;
       bool vk_require_etc2;
       bool vk_require_astc;
+      bool disable_dcc_mips;
       char *app_layer;
       uint8_t override_graphics_shader_version;
       uint8_t override_compute_shader_version;

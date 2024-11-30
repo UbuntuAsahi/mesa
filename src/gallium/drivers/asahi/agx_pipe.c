@@ -43,6 +43,7 @@
 #include "util/u_upload_mgr.h"
 #include "util/xmlconfig.h"
 #include "agx_bg_eot.h"
+#include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
 #include "agx_fence.h"
@@ -135,8 +136,7 @@ agx_resource_debug(struct agx_resource *res, const char *msg)
       res->bo->flags & AGX_BO_WRITEBACK ? "WB " : "",
       res->bo->flags & AGX_BO_SHAREABLE ? "SA " : "",
       res->bo->flags & AGX_BO_READONLY ? "RO " : "", res->bo->prime_fd, ino,
-      res->base.bind,
-      res);
+      res->base.bind, res);
 }
 
 static void
@@ -1529,12 +1529,12 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
       c->flags |= ASAHI_RENDER_VERTEX_SPILLS;
       c->vertex_helper_arg = batch->ctx->scratch_vs.buf->va->addr;
       c->vertex_helper_cfg = batch->vs_preamble_scratch << 16;
-      c->vertex_helper_program = dev->helper->va->addr | 1;
+      c->vertex_helper_program = agx_helper_program(&batch->ctx->bg_eot);
    }
    if (batch->fs_scratch) {
       c->fragment_helper_arg = batch->ctx->scratch_fs.buf->va->addr;
       c->fragment_helper_cfg = batch->fs_preamble_scratch << 16;
-      c->fragment_helper_program = dev->helper->va->addr | 1;
+      c->fragment_helper_program = agx_helper_program(&batch->ctx->bg_eot);
    }
 }
 
@@ -1656,7 +1656,7 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
       cmdbuf->helper_arg = ctx->scratch_cs.buf->va->addr;
       cmdbuf->helper_cfg = batch->cs_preamble_scratch << 16;
       // cmdbuf->helper_cfg |= 0x40;
-      cmdbuf->helper_program = dev->helper->va->addr | 1;
+      cmdbuf->helper_program = agx_helper_program(&batch->ctx->bg_eot);
    }
 }
 
@@ -2382,6 +2382,8 @@ static int
 agx_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
                       enum pipe_compute_cap param, void *ret)
 {
+   struct agx_device *dev = agx_device(pscreen);
+
 #define RET(x)                                                                 \
    do {                                                                        \
       if (ret)                                                                 \
@@ -2428,10 +2430,10 @@ agx_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
       RET((uint64_t[]){4096});
 
    case PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY:
-      RET((uint32_t[]){800 /* MHz -- TODO */});
+      RET((uint32_t[]){dev->params.max_frequency_khz / 1000});
 
    case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS:
-      RET((uint32_t[]){4 /* TODO */});
+      RET((uint32_t[]){agx_get_num_cores(dev)});
 
    case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
       RET((uint32_t[]){1});
@@ -2576,6 +2578,7 @@ agx_destroy_screen(struct pipe_screen *pscreen)
    if (screen->dev.ro)
       screen->dev.ro->destroy(screen->dev.ro);
 
+   agx_bo_unreference(&screen->dev, screen->rodata);
    u_transfer_helper_destroy(pscreen->transfer_helper);
    agx_close_device(&screen->dev);
    disk_cache_destroy(screen->disk_cache);
@@ -2738,6 +2741,22 @@ agx_screen_create(int fd, struct renderonly *ro,
          U_TRANSFER_HELPER_MSAA_MAP | U_TRANSFER_HELPER_Z24_IN_Z32F);
 
    agx_disk_cache_init(agx_screen);
+
+   /* TODO: Refactor readonly data? */
+   {
+      struct agx_bo *bo =
+         agx_bo_create(&agx_screen->dev, 16384, 0, 0, "Rodata");
+
+      agx_pack_txf_sampler((struct agx_sampler_packed *)bo->map);
+
+      agx_pack(&agx_screen->dev.txf_sampler, USC_SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = 1;
+         cfg.buffer = bo->va->addr;
+      }
+
+      agx_screen->rodata = bo;
+   }
 
    return screen;
 }

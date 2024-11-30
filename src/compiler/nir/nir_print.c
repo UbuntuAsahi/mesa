@@ -795,15 +795,22 @@ print_access(enum gl_access_qualifier access, print_state *state, const char *se
       const char *name;
    } modes[] = {
       { ACCESS_COHERENT, "coherent" },
-      { ACCESS_VOLATILE, "volatile" },
       { ACCESS_RESTRICT, "restrict" },
+      { ACCESS_VOLATILE, "volatile" },
       { ACCESS_NON_WRITEABLE, "readonly" },
       { ACCESS_NON_READABLE, "writeonly" },
+      { ACCESS_NON_UNIFORM, "non-uniform" },
       { ACCESS_CAN_REORDER, "reorderable" },
-      { ACCESS_CAN_SPECULATE, "speculatable" },
       { ACCESS_NON_TEMPORAL, "non-temporal" },
       { ACCESS_INCLUDE_HELPERS, "include-helpers" },
+      { ACCESS_IS_SWIZZLED_AMD, "is-swizzled-amd" },
+      { ACCESS_USES_FORMAT_AMD, "uses-format-amd" },
+      { ACCESS_FMASK_LOWERED_AMD, "fmask-lowered-amd" },
+      { ACCESS_CAN_SPECULATE, "speculatable" },
       { ACCESS_CP_GE_COHERENT_AMD, "cp-ge-coherent-amd" },
+      { ACCESS_IN_BOUNDS_AGX, "in-bounds-agx" },
+      { ACCESS_KEEP_SCALAR, "keep-scalar" },
+      { ACCESS_SMEM_AMD, "smem-amd" },
    };
 
    bool first = true;
@@ -830,8 +837,10 @@ print_var_decl(nir_variable *var, print_state *state)
    const char *const per_view = (var->data.per_view) ? "per_view " : "";
    const char *const per_primitive = (var->data.per_primitive) ? "per_primitive " : "";
    const char *const ray_query = (var->data.ray_query) ? "ray_query " : "";
-   fprintf(fp, "%s%s%s%s%s%s%s%s%s %s ",
-           bindless, cent, samp, patch, inv, per_view, per_primitive, ray_query,
+   const char *const fb_fetch = var->data.fb_fetch_output ? "fb_fetch_output " : "";
+   fprintf(fp, "%s%s%s%s%s%s%s%s%s%s %s ",
+           bindless, cent, samp, patch, inv, per_view, per_primitive,
+           ray_query, fb_fetch,
            get_variable_mode_str(var->data.mode, false),
            glsl_interp_mode_name(var->data.interpolation));
 
@@ -1386,6 +1395,9 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
          if (io.fb_fetch_output)
             fprintf(fp, " fbfetch");
 
+         if (io.fb_fetch_output_coherent)
+            fprintf(fp, " coherent");
+
          if (io.per_view)
             fprintf(fp, " perview");
 
@@ -1606,6 +1618,11 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
          fprintf(fp, "alu_op=%s", nir_op_infos[alu_op].name);
          break;
       }
+
+      case NIR_INTRINSIC_INTERP_MODE:
+         fprintf(fp, "interp_mode=%s",
+                 glsl_interp_mode_name(nir_intrinsic_interp_mode(instr)));
+         break;
 
       default: {
          unsigned off = info->index_map[idx] - 1;
@@ -1890,6 +1907,9 @@ print_call_instr(nir_call_instr *instr, print_state *state)
       if (i != 0)
          fprintf(fp, ", ");
 
+      if (instr->callee->params[i].name)
+         fprintf(fp, "%s ", instr->callee->params[i].name);
+
       print_src(&instr->params[i], state, nir_type_invalid);
    }
 }
@@ -2003,7 +2023,8 @@ print_instr(const nir_instr *instr, print_state *state, unsigned tabs)
 
    if (state->debug_info) {
       nir_debug_info_instr *di = state->debug_info[instr->index];
-      di->src_loc.column = (uint32_t)ftell(fp);
+      if (di)
+         di->src_loc.column = (uint32_t)ftell(fp);
    }
 
    print_indentation(tabs, fp);
@@ -2297,13 +2318,42 @@ print_function(nir_function *function, print_state *state)
 {
    FILE *fp = state->fp;
 
+   fprintf(fp, "decl_function %s (", function->name);
+
+   for (unsigned i = 0; i < function->num_params; ++i) {
+      if (i != 0) {
+         fprintf(fp, ", ");
+      }
+
+      nir_parameter param = function->params[i];
+
+      fprintf(fp, "%u", param.bit_size);
+      if (param.num_components != 1) {
+         fprintf(fp, "x%u", param.num_components);
+      }
+
+      if (param.name) {
+         fprintf(fp, " %s", param.name);
+      } else if (param.is_return) {
+         fprintf(fp, " return");
+      }
+   }
+
+   fprintf(fp, ")");
+
    /* clang-format off */
-   fprintf(fp, "decl_function %s (%d params)%s%s", function->name,
-           function->num_params,
-           function->dont_inline ? " (noinline)" :
-           function->should_inline ? " (inline)" : "",
-           function->is_exported ? " (exported)" : "");
+   fprintf(fp, "%s%s%s", function->dont_inline ? " (noinline)" :
+                       function->should_inline ? " (inline)" : "",
+                       function->is_exported ? " (exported)" : "",
+                       function->is_entrypoint ? " (entrypoint)" : "");
    /* clang-format on */
+
+   if (function->workgroup_size[0]) {
+      fprintf(fp, " (%ux%ux%u)",
+              function->workgroup_size[0],
+              function->workgroup_size[1],
+              function->workgroup_size[2]);
+   }
 
    fprintf(fp, "\n");
 
@@ -2821,7 +2871,7 @@ nir_log_shader_annotated_tagged(enum mesa_log_level level, const char *tag,
 }
 
 char *
-nir_shader_gather_debug_info(nir_shader *shader, const char *filename)
+nir_shader_gather_debug_info(nir_shader *shader, const char *filename, uint32_t first_line)
 {
    uint32_t instr_count = 0;
    nir_foreach_function_impl(impl, shader) {
@@ -2845,7 +2895,8 @@ nir_shader_gather_debug_info(nir_shader *shader, const char *filename)
 
       nir_foreach_block(block, impl) {
          nir_foreach_instr_safe(instr, block) {
-            if (instr->type == nir_instr_type_debug_info)
+            if (instr->type == nir_instr_type_debug_info ||
+                instr->type == nir_instr_type_phi)
                continue;
 
             nir_debug_info_instr *di = nir_debug_info_instr_create(shader, nir_debug_info_src_loc, 0);
@@ -2858,11 +2909,13 @@ nir_shader_gather_debug_info(nir_shader *shader, const char *filename)
 
    char *str = _nir_shader_as_str_annotated(shader, NULL, NULL, debug_info);
 
-   uint32_t line = 1;
+   uint32_t line = first_line;
    uint32_t character_index = 0;
 
    for (uint32_t i = 0; i < instr_count; i++) {
       nir_debug_info_instr *di = debug_info[i];
+      if (!di)
+         continue;
 
       while (character_index < di->src_loc.column) {
          if (str[character_index] == '\n')
@@ -2878,7 +2931,8 @@ nir_shader_gather_debug_info(nir_shader *shader, const char *filename)
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr_safe(instr, block) {
-            if (instr->type != nir_instr_type_debug_info)
+            if (instr->type != nir_instr_type_debug_info &&
+                instr->type != nir_instr_type_phi)
                nir_instr_insert_before(instr, &debug_info[instr_count++]->instr);
          }
       }

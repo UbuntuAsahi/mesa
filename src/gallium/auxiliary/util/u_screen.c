@@ -304,7 +304,6 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_FRAMEBUFFER_NO_ATTACHMENT:
    case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
    case PIPE_CAP_CULL_DISTANCE:
-   case PIPE_CAP_CULL_DISTANCE_NOCOMBINE:
    case PIPE_CAP_SHADER_GROUP_VOTE:
    case PIPE_CAP_MAX_WINDOW_RECTANGLES: /* Enables EXT_window_rectangles */
    case PIPE_CAP_POLYGON_OFFSET_UNITS_UNSCALED:
@@ -565,6 +564,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
    case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_STAGES:
    case PIPE_CAP_SHADER_SUBGROUP_SUPPORTED_FEATURES:
    case PIPE_CAP_SHADER_SUBGROUP_QUAD_ALL_STAGES:
+   case PIPE_CAP_CALL_FINALIZE_NIR_IN_LINKER:
       return 0;
 
    default:

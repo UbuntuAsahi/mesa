@@ -1306,6 +1306,7 @@ struct anv_instance {
     bool                                        disable_xe2_ccs;
     bool                                        compression_control_enabled;
     bool                                        anv_fake_nonlocal_memory;
+    bool                                        anv_upper_bound_descriptor_pool_sampler;
 
     /* HW workarounds */
     bool                                        no_16bit;
@@ -1479,11 +1480,20 @@ enum anv_gfx_state_bits {
    ANV_GFX_STATE_WA_18019816803, /* Fake state to implement workaround */
    ANV_GFX_STATE_WA_14018283232, /* Fake state to implement workaround */
    ANV_GFX_STATE_TBIMR_TILE_PASS_INFO,
+   ANV_GFX_STATE_FS_MSAA_FLAGS,
+   ANV_GFX_STATE_TCS_INPUT_VERTICES,
+   ANV_GFX_STATE_COARSE_STATE,
 
    ANV_GFX_STATE_MAX,
 };
 
 const char *anv_gfx_state_bit_to_str(enum anv_gfx_state_bits state);
+
+enum anv_coarse_pixel_state {
+   ANV_COARSE_PIXEL_STATE_UNKNOWN,
+   ANV_COARSE_PIXEL_STATE_DISABLED,
+   ANV_COARSE_PIXEL_STATE_ENABLED,
+};
 
 /* This structure tracks the values to program in HW instructions for
  * corresponding to dynamic states of the Vulkan API. Only fields that need to
@@ -1769,6 +1779,21 @@ struct anv_gfx_dynamic_state {
    } tbimr;
    bool use_tbimr;
 
+   /**
+    * Dynamic msaa flags, this value can be different from
+    * anv_push_constants::gfx::fs_msaa_flags, as the push constant value only
+    * needs to be updated for fragment shaders dynamically checking the value.
+    */
+   enum intel_msaa_flags fs_msaa_flags;
+
+   /**
+    * Dynamic TCS input vertices, this value can be different from
+    * anv_driver_constants::gfx::tcs_input_vertices, as the push constant
+    * value only needs to be updated for tesselation control shaders
+    * dynamically checking the value.
+    */
+   uint32_t tcs_input_vertices;
+
    bool pma_fix;
 
    /**
@@ -1780,6 +1805,11 @@ struct anv_gfx_dynamic_state {
     * Toggle tracking for Wa_14018283232.
     */
    bool wa_14018283232_toggle;
+
+   /**
+    * Coarse state tracking for Wa_18038825448.
+    */
+   enum anv_coarse_pixel_state coarse_state;
 
    BITSET_DECLARE(dirty, ANV_GFX_STATE_MAX);
 };
@@ -1933,11 +1963,13 @@ struct anv_device {
      *
      * The size of the shadow buffer depends on the number of queries per
      * shader.
+     *
+     * We might need a buffer per queue family due to Wa_14022863161.
      */
-    struct anv_bo                              *ray_query_shadow_bos[16];
+    struct anv_bo                              *ray_query_shadow_bos[2][16];
     /** Ray query buffer used to communicated with HW unit.
      */
-    struct anv_bo                              *ray_query_bo;
+    struct anv_bo                              *ray_query_bo[2];
 
     struct anv_shader_bin                      *rt_trampoline;
     struct anv_shader_bin                      *rt_trivial_return;
@@ -1964,6 +1996,7 @@ struct anv_device {
 
     int                                         perf_fd; /* -1 if no opened */
     struct anv_queue                            *perf_queue;
+    struct intel_bind_timeline                  perf_timeline;
 
     struct intel_aux_map_context                *aux_map_ctx;
 
@@ -3008,6 +3041,9 @@ struct anv_descriptor_pool_heap {
 
    /* Size of the heap */
    uint32_t              size;
+
+   /* Allocated size in the heap */
+   uint32_t              alloc_size;
 };
 
 struct anv_descriptor_pool {
@@ -3034,7 +3070,7 @@ struct anv_descriptor_pool {
     */
    bool host_only;
 
-   char host_mem[0];
+   alignas(8) char host_mem[0];
 };
 
 bool
@@ -3348,9 +3384,7 @@ enum anv_cmd_dirty_bits {
    ANV_CMD_DIRTY_XFB_ENABLE                          = 1 << 4,
    ANV_CMD_DIRTY_RESTART_INDEX                       = 1 << 5,
    ANV_CMD_DIRTY_OCCLUSION_QUERY_ACTIVE              = 1 << 6,
-   ANV_CMD_DIRTY_FS_MSAA_FLAGS                       = 1 << 7,
-   ANV_CMD_DIRTY_COARSE_PIXEL_ACTIVE                 = 1 << 8,
-   ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE                = 1 << 9,
+   ANV_CMD_DIRTY_INDIRECT_DATA_STRIDE                = 1 << 7,
 };
 typedef enum anv_cmd_dirty_bits anv_cmd_dirty_mask_t;
 
@@ -3386,6 +3420,9 @@ enum anv_pipe_bits {
 
    ANV_PIPE_TLB_INVALIDATE_BIT               = (1 << 18),
 
+   /* L3 Fabric Flush */
+   ANV_PIPE_L3_FABRIC_FLUSH_BIT              = (1 << 19),
+
    ANV_PIPE_CS_STALL_BIT                     = (1 << 20),
    ANV_PIPE_END_OF_PIPE_SYNC_BIT             = (1 << 21),
 
@@ -3408,8 +3445,6 @@ enum anv_pipe_bits {
     */
    ANV_PIPE_POST_SYNC_BIT                    = (1 << 24),
 
-   /* L3 Fabric Flush */
-   ANV_PIPE_L3_FABRIC_FLUSH_BIT              = (1 << 25),
 };
 
 /* These bits track the state of buffer writes for queries. They get cleared
@@ -3474,6 +3509,14 @@ enum anv_query_bits {
    ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | \
    ANV_PIPE_TILE_CACHE_FLUSH_BIT | \
    ANV_PIPE_L3_FABRIC_FLUSH_BIT)
+
+#define ANV_PIPE_BARRIER_FLUSH_BITS ( \
+   ANV_PIPE_DEPTH_CACHE_FLUSH_BIT | \
+   ANV_PIPE_DATA_CACHE_FLUSH_BIT | \
+   ANV_PIPE_HDC_PIPELINE_FLUSH_BIT | \
+   ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT | \
+   ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT | \
+   ANV_PIPE_TILE_CACHE_FLUSH_BIT)
 
 #define ANV_PIPE_STALL_BITS ( \
    ANV_PIPE_STALL_AT_SCOREBOARD_BIT | \
@@ -3830,10 +3873,10 @@ struct anv_cmd_pipeline_state {
    struct anv_pipeline      *pipeline;
 };
 
-enum anv_coarse_pixel_state {
-   ANV_COARSE_PIXEL_STATE_UNKNOWN,
-   ANV_COARSE_PIXEL_STATE_DISABLED,
-   ANV_COARSE_PIXEL_STATE_ENABLED,
+enum anv_depth_reg_mode {
+   ANV_DEPTH_REG_MODE_UNKNOWN = 0,
+   ANV_DEPTH_REG_MODE_HW_DEFAULT,
+   ANV_DEPTH_REG_MODE_D16_1X_MSAA,
 };
 
 /** State tracking for graphics pipeline
@@ -3875,7 +3918,6 @@ struct anv_cmd_graphics_state {
 
    VkShaderStageFlags push_constant_stages;
 
-   uint32_t primitive_topology;
    bool used_task_shader;
 
    struct anv_buffer *index_buffer;
@@ -3889,12 +3931,6 @@ struct anv_cmd_graphics_state {
    struct vk_vertex_input_state vertex_input;
    struct vk_sample_locations_state sample_locations;
 
-   /* Dynamic msaa flags, this value can be different from
-    * anv_push_constants::gfx::fs_msaa_flags, as the push constant value only
-    * needs to be updated for fragment shaders dynamically checking the value.
-    */
-   enum intel_msaa_flags fs_msaa_flags;
-
    bool object_preemption;
    bool has_uint_rt;
 
@@ -3907,22 +3943,33 @@ struct anv_cmd_graphics_state {
     */
    bool                                         viewport_set;
 
-   /**
-    * State tracking for Wa_18038825448.
-    */
-   enum anv_coarse_pixel_state coarse_pixel_active;
-
    struct intel_urb_config urb_cfg;
 
    uint32_t n_occlusion_queries;
 
-   struct anv_gfx_dynamic_state dyn_state;
-};
+   /**
+    * Whether or not the gfx8 PMA fix is enabled.  We ensure that, at the top
+    * of any command buffer it is disabled by disabling it in EndCommandBuffer
+    * and before invoking the secondary in ExecuteCommands.
+    */
+   bool                                         pma_fix_enabled;
 
-enum anv_depth_reg_mode {
-   ANV_DEPTH_REG_MODE_UNKNOWN = 0,
-   ANV_DEPTH_REG_MODE_HW_DEFAULT,
-   ANV_DEPTH_REG_MODE_D16_1X_MSAA,
+   /**
+    * Whether or not we know for certain that HiZ is enabled for the current
+    * subpass.  If, for whatever reason, we are unsure as to whether HiZ is
+    * enabled or not, this will be false.
+    */
+   bool                                         hiz_enabled;
+
+   /**
+    * We ensure the registers for the gfx12 D16 fix are initialized at the
+    * first non-NULL depth stencil packet emission of every command buffer.
+    * For secondary command buffer execution, we transfer the state from the
+    * last command buffer to the primary (if known).
+    */
+   enum anv_depth_reg_mode                      depth_reg_mode;
+
+   struct anv_gfx_dynamic_state dyn_state;
 };
 
 /** State tracking for compute pipeline
@@ -4027,27 +4074,6 @@ struct anv_cmd_state {
    unsigned char                                sampler_sha1s[MESA_VULKAN_SHADER_STAGES][20];
    unsigned char                                surface_sha1s[MESA_VULKAN_SHADER_STAGES][20];
    unsigned char                                push_sha1s[MESA_VULKAN_SHADER_STAGES][20];
-
-   /**
-    * Whether or not the gfx8 PMA fix is enabled.  We ensure that, at the top
-    * of any command buffer it is disabled by disabling it in EndCommandBuffer
-    * and before invoking the secondary in ExecuteCommands.
-    */
-   bool                                         pma_fix_enabled;
-
-   /**
-    * Whether or not we know for certain that HiZ is enabled for the current
-    * subpass.  If, for whatever reason, we are unsure as to whether HiZ is
-    * enabled or not, this will be false.
-    */
-   bool                                         hiz_enabled;
-
-   /* We ensure the registers for the gfx12 D16 fix are initialized at the
-    * first non-NULL depth stencil packet emission of every command buffer.
-    * For secondary command buffer execution, we transfer the state from the
-    * last command buffer to the primary (if known).
-    */
-   enum anv_depth_reg_mode                      depth_reg_mode;
 
    /* The last auxiliary surface operation (or equivalent operation) provided
     * to genX(cmd_buffer_update_color_aux_op).
@@ -4310,6 +4336,14 @@ anv_cmd_buffer_is_render_or_compute_queue(const struct anv_cmd_buffer *cmd_buffe
 {
    return anv_cmd_buffer_is_render_queue(cmd_buffer) ||
           anv_cmd_buffer_is_compute_queue(cmd_buffer);
+}
+
+static inline uint8_t
+anv_get_ray_query_bo_index(struct anv_cmd_buffer *cmd_buffer)
+{
+   if (intel_needs_workaround(cmd_buffer->device->isl_dev.info, 14022863161))
+      return anv_cmd_buffer_is_compute_queue(cmd_buffer) ? 1 : 0;
+   return 0;
 }
 
 static inline struct anv_address
@@ -4833,7 +4867,6 @@ struct anv_graphics_pipeline {
    /* Fully backed instructions, ready to be emitted in the anv_cmd_buffer */
    struct {
       struct anv_gfx_state_ptr                  urb;
-      struct anv_gfx_state_ptr                  vf_statistics;
       struct anv_gfx_state_ptr                  vf_sgvs;
       struct anv_gfx_state_ptr                  vf_sgvs_2;
       struct anv_gfx_state_ptr                  vf_sgvs_instancing;
@@ -4867,8 +4900,6 @@ struct anv_graphics_pipeline {
    struct {
       struct anv_gfx_state_ptr                  clip;
       struct anv_gfx_state_ptr                  sf;
-      struct anv_gfx_state_ptr                  raster;
-      struct anv_gfx_state_ptr                  ms;
       struct anv_gfx_state_ptr                  ps_extra;
       struct anv_gfx_state_ptr                  wm;
       struct anv_gfx_state_ptr                  so;
@@ -5002,19 +5033,17 @@ anv_pipeline_is_mesh(const struct anv_graphics_pipeline *pipeline)
 }
 
 static inline bool
-anv_cmd_buffer_all_color_write_masked(const struct anv_cmd_buffer *cmd_buffer)
+anv_gfx_all_color_write_masked(const struct anv_cmd_graphics_state *gfx,
+                               const struct vk_dynamic_graphics_state *dyn)
 {
-   const struct anv_cmd_graphics_state *state = &cmd_buffer->state.gfx;
-   const struct vk_dynamic_graphics_state *dyn =
-      &cmd_buffer->vk.dynamic_graphics_state;
    uint8_t color_writes = dyn->cb.color_write_enables;
 
    /* All writes disabled through vkCmdSetColorWriteEnableEXT */
-   if ((color_writes & ((1u << state->color_att_count) - 1)) == 0)
+   if ((color_writes & ((1u << gfx->color_att_count) - 1)) == 0)
       return true;
 
    /* Or all write masks are empty */
-   for (uint32_t i = 0; i < state->color_att_count; i++) {
+   for (uint32_t i = 0; i < gfx->color_att_count; i++) {
       if (dyn->cb.attachments[i].write_mask != 0)
          return false;
    }
@@ -5565,7 +5594,8 @@ static inline struct anv_address
 anv_image_get_clear_color_addr(UNUSED const struct anv_device *device,
                                const struct anv_image *image,
                                enum isl_format view_format,
-                               VkImageAspectFlagBits aspect)
+                               VkImageAspectFlagBits aspect,
+                               bool for_sampler)
 {
    uint32_t plane = anv_image_aspect_to_plane(image, aspect);
    const struct anv_image_memory_range *mem_range =
@@ -5578,15 +5608,17 @@ anv_image_get_clear_color_addr(UNUSED const struct anv_device *device,
    if (view_format == ISL_FORMAT_UNSUPPORTED)
       view_format = image->planes[plane].primary_surface.isl.format;
 
-   const unsigned clear_state_size = device->info->ver >= 11 ? 64 : 16;
+   uint64_t access_offset = device->info->ver == 9 && for_sampler ? 16 : 0;
+   const unsigned clear_state_size = device->info->ver >= 11 ? 64 : 32;
    for (int i = 0; i < image->num_view_formats; i++) {
       if (view_format == image->view_formats[i]) {
-         return anv_address_add(base_addr, i * clear_state_size);
+         uint64_t entry_offset = i * clear_state_size + access_offset;
+         return anv_address_add(base_addr, entry_offset);
       }
    }
 
    assert(anv_image_view_formats_incomplete(image));
-   return base_addr;
+   return anv_address_add(base_addr, access_offset);
 }
 
 static inline struct anv_address
@@ -5598,7 +5630,7 @@ anv_image_get_fast_clear_type_addr(const struct anv_device *device,
    assert(device->info->ver < 20);
    struct anv_address addr =
       anv_image_get_clear_color_addr(device, image, ISL_FORMAT_UNSUPPORTED,
-                                     aspect);
+                                     aspect, false);
 
    /* Refer to add_aux_state_tracking_buffer(). */
    unsigned clear_color_state_size;
@@ -5607,7 +5639,7 @@ anv_image_get_fast_clear_type_addr(const struct anv_device *device,
       clear_color_state_size = (image->num_view_formats - 1) * 64 + 32 - 8;
    } else {
       assert(device->isl_dev.ss.clear_value_size == 16);
-      clear_color_state_size = image->num_view_formats * 16;
+      clear_color_state_size = image->num_view_formats * 16 * 2;
    }
 
    return anv_address_add(addr, clear_color_state_size);
@@ -5768,6 +5800,7 @@ void
 anv_cmd_buffer_mark_image_fast_cleared(struct anv_cmd_buffer *cmd_buffer,
                                        const struct anv_image *image,
                                        const enum isl_format format,
+                                       const struct isl_swizzle swizzle,
                                        union isl_color_value clear_color);
 
 void
@@ -5880,7 +5913,6 @@ anv_can_fast_clear_color(const struct anv_cmd_buffer *cmd_buffer,
                          const struct VkClearRect *clear_rect,
                          VkImageLayout layout,
                          enum isl_format view_format,
-                         struct isl_swizzle view_swizzle,
                          union isl_color_value clear_color);
 
 enum isl_aux_state ATTRIBUTE_PURE
@@ -6068,48 +6100,6 @@ anv_isl_usage_for_descriptor_type(const VkDescriptorType type)
    }
 }
 
-static inline uint32_t
-anv_rasterization_aa_mode(VkPolygonMode raster_mode,
-                          VkLineRasterizationModeKHR line_mode)
-{
-   if (raster_mode == VK_POLYGON_MODE_LINE &&
-       line_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_KHR)
-      return true;
-   return false;
-}
-
-static inline VkLineRasterizationModeKHR
-anv_line_rasterization_mode(VkLineRasterizationModeKHR line_mode,
-                            unsigned rasterization_samples)
-{
-   if (line_mode == VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR) {
-      if (rasterization_samples > 1) {
-         return VK_LINE_RASTERIZATION_MODE_RECTANGULAR_KHR;
-      } else {
-         return VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR;
-      }
-   }
-   return line_mode;
-}
-
-static inline bool
-anv_is_dual_src_blend_factor(VkBlendFactor factor)
-{
-   return factor == VK_BLEND_FACTOR_SRC1_COLOR ||
-          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR ||
-          factor == VK_BLEND_FACTOR_SRC1_ALPHA ||
-          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
-}
-
-static inline bool
-anv_is_dual_src_blend_equation(const struct vk_color_blend_attachment_state *cb)
-{
-   return anv_is_dual_src_blend_factor(cb->src_color_blend_factor) &&
-          anv_is_dual_src_blend_factor(cb->dst_color_blend_factor) &&
-          anv_is_dual_src_blend_factor(cb->src_alpha_blend_factor) &&
-          anv_is_dual_src_blend_factor(cb->dst_alpha_blend_factor);
-}
-
 VkFormatFeatureFlags2
 anv_get_image_format_features2(const struct anv_physical_device *physical_device,
                                VkFormat vk_format,
@@ -6247,19 +6237,19 @@ struct anv_video_session_params {
 void
 anv_dump_pipe_bits(enum anv_pipe_bits bits, FILE *f);
 
+void
+anv_cmd_buffer_pending_pipe_debug(struct anv_cmd_buffer *cmd_buffer,
+                                  enum anv_pipe_bits bits,
+                                  const char* reason);
+
 static inline void
 anv_add_pending_pipe_bits(struct anv_cmd_buffer* cmd_buffer,
                           enum anv_pipe_bits bits,
                           const char* reason)
 {
    cmd_buffer->state.pending_pipe_bits |= bits;
-   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL) && bits) {
-      fputs("pc: add ", stdout);
-      anv_dump_pipe_bits(bits, stdout);
-      fprintf(stdout, "reason: %s\n", reason);
-   }
-   if (cmd_buffer->batch.pc_reasons_count < ARRAY_SIZE(cmd_buffer->batch.pc_reasons)) {
-      cmd_buffer->batch.pc_reasons[cmd_buffer->batch.pc_reasons_count++] = reason;
+   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL)) {
+      anv_cmd_buffer_pending_pipe_debug(cmd_buffer, bits, reason);
    }
 }
 

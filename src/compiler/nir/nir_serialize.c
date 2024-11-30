@@ -1971,9 +1971,17 @@ write_function(write_ctx *ctx, const nir_function *fxn)
       flags |= 0x40;
    if (fxn->is_tmp_globals_wrapper)
       flags |= 0x80;
+   if (fxn->workgroup_size[0] || fxn->workgroup_size[1] || fxn->workgroup_size[2])
+      flags |= 0x100;
    blob_write_uint32(ctx->blob, flags);
    if (fxn->name)
       blob_write_string(ctx->blob, fxn->name);
+
+   if (flags & 0x100) {
+      blob_write_uint32(ctx->blob, fxn->workgroup_size[0]);
+      blob_write_uint32(ctx->blob, fxn->workgroup_size[1]);
+      blob_write_uint32(ctx->blob, fxn->workgroup_size[2]);
+   }
 
    blob_write_uint32(ctx->blob, fxn->subroutine_index);
    blob_write_uint32(ctx->blob, fxn->num_subroutine_types);
@@ -1988,7 +1996,15 @@ write_function(write_ctx *ctx, const nir_function *fxn)
       uint32_t val =
          ((uint32_t)fxn->params[i].num_components) |
          ((uint32_t)fxn->params[i].bit_size) << 8;
+
+      bool has_name = fxn->params[i].name && !ctx->strip;
+      if (has_name)
+         val |= 0x10000;
+
       blob_write_uint32(ctx->blob, val);
+      if (has_name)
+         blob_write_string(ctx->blob, fxn->params[i].name);
+
       encode_type_to_blob(ctx->blob, fxn->params[i].type);
       blob_write_uint32(ctx->blob, encode_deref_modes(fxn->params[i].mode));
    }
@@ -2010,6 +2026,12 @@ read_function(read_ctx *ctx)
 
    nir_function *fxn = nir_function_create(ctx->nir, name);
 
+   if (flags & 0x100) {
+      fxn->workgroup_size[0] = blob_read_uint32(ctx->blob);
+      fxn->workgroup_size[1] = blob_read_uint32(ctx->blob);
+      fxn->workgroup_size[2] = blob_read_uint32(ctx->blob);
+   }
+
    fxn->subroutine_index = blob_read_uint32(ctx->blob);
    fxn->num_subroutine_types = blob_read_uint32(ctx->blob);
    for (unsigned i = 0; i < fxn->num_subroutine_types; i++) {
@@ -2019,9 +2041,13 @@ read_function(read_ctx *ctx)
    read_add_object(ctx, fxn);
 
    fxn->num_params = blob_read_uint32(ctx->blob);
-   fxn->params = ralloc_array(fxn, nir_parameter, fxn->num_params);
+   fxn->params = rzalloc_array(fxn, nir_parameter, fxn->num_params);
    for (unsigned i = 0; i < fxn->num_params; i++) {
       uint32_t val = blob_read_uint32(ctx->blob);
+      bool has_name = (val & 0x10000);
+      if (has_name)
+         fxn->params[i].name = blob_read_string(ctx->blob);
+
       fxn->params[i].num_components = val & 0xff;
       fxn->params[i].bit_size = (val >> 8) & 0xff;
       fxn->params[i].type = decode_type_from_blob(ctx->blob);

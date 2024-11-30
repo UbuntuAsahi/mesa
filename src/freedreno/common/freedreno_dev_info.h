@@ -79,7 +79,7 @@ struct fd_dev_info {
       bool tess_use_shared;
 
       /* Does the hw support GL_QCOM_shading_rate? */
-      bool has_shading_rate;
+      bool has_legacy_pipeline_shading_rate;
 
       /* Whether a 16-bit descriptor can be used */
       bool storage_16bit;
@@ -185,6 +185,23 @@ struct fd_dev_info {
        * Happens with VK_EXT_attachment_feedback_loop_layout.
        */
       bool has_coherent_ubwc_flag_caches;
+
+      bool has_attachment_shading_rate;
+
+      /* Whether mipmaps below certain threshold can use LINEAR tiling when higher
+       * levels use UBWC,
+       */
+      bool has_ubwc_linear_mipmap_fallback;
+
+      /* Whether 4 nops are needed after the second pred[tf] of a
+       * pred[tf]/pred[ft] pair to work around a hardware issue.
+       */
+      bool predtf_nop_quirk;
+
+      /* Whether 6 nops are needed after prede to work around a hardware
+       * issue.
+       */
+      bool prede_nop_quirk;
 
       struct {
          uint32_t PC_POWER_CNTL;
@@ -302,6 +319,14 @@ struct fd_dev_info {
 
       /* Whether only 256 vec4 constants are available for compute */
       bool compute_constlen_quirk;
+
+      bool has_primitive_shading_rate;
+
+      /* A7XX gen1 and gen2 seem to require declaring SAMPLEMASK input
+       * for fragment shading rate to be read correctly.
+       * This workaround was seen in the prop driver v512.762.12.
+       */
+      bool reading_shading_rate_requires_smask_quirk;
    } a7xx;
 };
 

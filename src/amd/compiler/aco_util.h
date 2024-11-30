@@ -1046,6 +1046,7 @@ template <typename T, unsigned offset, unsigned size>
 using bitfield_array64 = bitfield_array<T, offset, size, uint64_t>;
 
 using bitarray8 = bitfield_array<uint8_t, 0, 8, uint8_t>;
+using bitarray32 = bitfield_array<uint32_t, 0, 32, uint32_t>;
 
 /*
  * Resizable array optimized for small lengths. If it's smaller than Size, the elements will be
@@ -1068,8 +1069,8 @@ public:
    using difference_type = std::ptrdiff_t;
 
    constexpr small_vec() = default;
-   constexpr small_vec(const small_vec&) = delete;
-   constexpr small_vec(small_vec&& other) { *this = std::move(other); }
+   constexpr small_vec(const small_vec& other) { *this = other; }
+   constexpr small_vec(small_vec&& other) noexcept { *this = std::move(other); }
 
    ~small_vec()
    {
@@ -1077,8 +1078,16 @@ public:
          free(data);
    }
 
-   constexpr small_vec& operator=(const small_vec&) = delete;
-   constexpr small_vec& operator=(small_vec&& other)
+   constexpr small_vec& operator=(const small_vec& other)
+   {
+      clear();
+      reserve(other.capacity);
+      length = other.length;
+      memcpy(begin(), other.begin(), length * sizeof(value_type));
+      return *this;
+   }
+
+   constexpr small_vec& operator=(small_vec&& other) noexcept
    {
       clear();
       void* ptr = this;

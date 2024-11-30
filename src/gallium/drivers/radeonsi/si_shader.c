@@ -460,7 +460,7 @@ void si_init_shader_args(struct si_shader *shader, struct si_shader_args *args)
 
             /* VS outputs passed via VGPRs to TCS. */
             if (shader->key.ge.opt.same_patch_vertices && !sel->info.base.use_aco_amd) {
-               unsigned num_outputs = util_last_bit64(shader->selector->info.outputs_written_before_tes_gs);
+               unsigned num_outputs = util_last_bit64(shader->selector->info.ls_es_outputs_written);
                for (i = 0; i < num_outputs * 4; i++)
                   ac_add_return(&args->ac, AC_ARG_VGPR);
             }
@@ -468,7 +468,7 @@ void si_init_shader_args(struct si_shader *shader, struct si_shader_args *args)
       } else {
          /* TCS inputs are passed via VGPRs from VS. */
          if (shader->key.ge.opt.same_patch_vertices && !sel->info.base.use_aco_amd) {
-            unsigned num_inputs = util_last_bit64(shader->previous_stage_sel->info.outputs_written_before_tes_gs);
+            unsigned num_inputs = util_last_bit64(shader->previous_stage_sel->info.ls_es_outputs_written);
             for (i = 0; i < num_inputs * 4; i++)
                ac_add_arg(&args->ac, AC_ARG_VGPR, 1, AC_ARG_FLOAT, NULL);
          }
@@ -1313,7 +1313,7 @@ void si_shader_dump_stats_for_shader_db(struct si_screen *screen, struct si_shad
       if (shader->key.ge.as_ls)
          num_ls_outputs = si_shader_lshs_vertex_stride(shader) / 16;
       else if (shader->selector->stage == MESA_SHADER_TESS_CTRL)
-         num_hs_outputs = util_last_bit64(shader->selector->info.outputs_written_before_tes_gs);
+         num_hs_outputs = util_last_bit64(shader->selector->info.tcs_outputs_written);
       else if (shader->key.ge.as_es)
          num_es_outputs = shader->selector->info.esgs_vertex_stride / 16;
       else if (shader->gs_copy_shader)
@@ -1748,8 +1748,8 @@ static bool kill_ps_outputs_cb(struct nir_builder *b, nir_instr *instr, void *_k
    }
 
    /* Color outputs. */
-   unsigned comp_mask = BITFIELD_MASK(intr->num_components);
-   assert(nir_intrinsic_component(intr) == 0);
+   unsigned component = nir_intrinsic_component(intr);
+   unsigned comp_mask = BITFIELD_RANGE(component, intr->num_components);
    unsigned cb_shader_mask = ac_get_cb_shader_mask(key->ps.part.epilog.spi_shader_col_format);
 
    /* Preserve alpha if ALPHA_TESTING is enabled. */
@@ -1779,7 +1779,7 @@ static bool kill_ps_outputs_cb(struct nir_builder *b, nir_instr *instr, void *_k
    nir_def *new_value = intr->src[0].ssa;
    nir_def *undef = nir_undef(b, 1, new_value->bit_size);
 
-   unsigned kill_mask = ~output_mask & comp_mask;
+   unsigned kill_mask = (~output_mask & comp_mask) >> component;
    u_foreach_bit(i, kill_mask) {
       new_value = nir_vector_insert_imm(b, new_value, undef, i);
    }
@@ -1870,13 +1870,13 @@ static bool si_lower_io_to_mem(struct si_shader *shader, nir_shader *nir,
                  key->ge.opt.same_patch_vertices, sel->info.tcs_vgpr_only_inputs);
 
       /* Used by hs_emit_write_tess_factors() when monolithic shader. */
-      nir->info.tess._primitive_mode = key->ge.opt.tes_prim_mode;
+      if (nir->info.tess._primitive_mode == TESS_PRIMITIVE_UNSPECIFIED)
+         nir->info.tess._primitive_mode = key->ge.opt.tes_prim_mode;
 
       NIR_PASS_V(nir, ac_nir_lower_hs_outputs_to_mem, si_map_io_driver_location,
                  sel->screen->info.gfx_level,
                  ~0ULL, ~0U, /* no TES inputs filter */
-                 shader->wave_size,
-                 sel->info.tessfactors_are_def_in_all_invocs);
+                 shader->wave_size);
       return true;
    } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
       NIR_PASS_V(nir, ac_nir_lower_tes_inputs_to_mem, si_map_io_driver_location);
@@ -1911,7 +1911,7 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
       .gfx_level = sel->screen->info.gfx_level,
       .max_workgroup_size = si_get_max_workgroup_size(shader),
       .wave_size = shader->wave_size,
-      .can_cull = !!key->ge.opt.ngg_culling,
+      .can_cull = si_shader_culling_enabled(shader),
       .disable_streamout = !si_shader_uses_streamout(shader),
       .vs_output_param_offset = shader->info.vs_output_param_offset,
       .has_param_exports = shader->info.nr_param_exports,
@@ -1942,12 +1942,12 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
 
       unsigned clip_plane_enable =
          SI_NGG_CULL_GET_CLIP_PLANE_ENABLE(key->ge.opt.ngg_culling);
-      unsigned num_vertices = gfx10_ngg_get_vertices_per_prim(shader);
+      unsigned num_vertices = si_get_num_vertices_per_output_prim(shader);
 
       options.num_vertices_per_primitive = num_vertices ? num_vertices : 3;
       options.early_prim_export = gfx10_ngg_export_prim_early(shader);
       options.passthrough = gfx10_is_ngg_passthrough(shader);
-      options.use_edgeflags = gfx10_edgeflags_have_effect(shader);
+      options.use_edgeflags = gfx10_has_variable_edgeflags(shader);
       options.has_gen_prim_query = options.has_xfb_prim_query =
          sel->screen->info.gfx_level >= GFX11 && !sel->info.base.vs.blit_sgprs_amd;
       options.export_primitive_id = key->ge.mono.u.vs_export_prim_id;
@@ -2350,6 +2350,8 @@ struct nir_shader *si_get_nir_shader(struct si_shader *shader,
 
       if (key->ps.mono.point_smoothing)
          NIR_PASS(progress, nir, nir_lower_point_smooth);
+
+      NIR_PASS(progress, nir, nir_lower_fragcoord_wtrans);
    }
 
    /* This must be before si_nir_lower_resource. */
@@ -3649,15 +3651,6 @@ nir_shader *si_get_prev_stage_nir_shader(struct si_shader *shader,
       prev_shader->selector->info.uses_instanceid || prev_shader->info.uses_instanceid;
 
    return nir;
-}
-
-unsigned si_get_tcs_out_patch_stride(const struct si_shader_info *info)
-{
-   unsigned tcs_out_vertices = info->base.tess.tcs_vertices_out;
-   unsigned vertex_stride = util_last_bit64(info->outputs_written_before_tes_gs) * 4;
-   unsigned num_patch_outputs = util_last_bit64(info->patch_outputs_written);
-
-   return tcs_out_vertices * vertex_stride + num_patch_outputs * 4;
 }
 
 void si_get_ps_prolog_args(struct si_shader_args *args,

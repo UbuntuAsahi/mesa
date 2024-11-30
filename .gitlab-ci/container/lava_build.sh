@@ -114,6 +114,7 @@ fi
 
 # no need to remove these at end, image isn't saved at the end
 CONTAINER_EPHEMERAL=(
+    arch-test
     automake
     bc
     "clang-${LLVM_VERSION}"
@@ -292,6 +293,11 @@ mv /usr/local/bin/*-runner $ROOTFS/usr/bin/.
 
 
 ############### Build dEQP
+
+DEQP_API=tools \
+DEQP_TARGET=default \
+. .gitlab-ci/container/build-deqp.sh
+
 DEQP_API=GL \
 DEQP_TARGET=surfaceless \
 . .gitlab-ci/container/build-deqp.sh
@@ -300,11 +306,19 @@ DEQP_API=GLES \
 DEQP_TARGET=surfaceless \
 . .gitlab-ci/container/build-deqp.sh
 
-[ "$BUILD_VK" == "ON" ] && DEQP_API=VK \
-DEQP_TARGET=default \
-. .gitlab-ci/container/build-deqp.sh
+if [ "$BUILD_VK" == "ON" ]; then
+  DEQP_API=VK \
+  DEQP_TARGET=default \
+  . .gitlab-ci/container/build-deqp.sh
 
-mv /deqp $ROOTFS/.
+  DEQP_API=VK-main \
+  DEQP_TARGET=default \
+  . .gitlab-ci/container/build-deqp.sh
+fi
+
+rm -rf /VK-GL-CTS
+
+mv /deqp-* $ROOTFS/.
 
 
 ############### Build SKQP
@@ -348,10 +362,8 @@ if [[ ${DEBIAN_ARCH} = "amd64" ]]; then
 fi
 
 ############### Build ci-kdl
-section_start kdl "Prepare a venv for kdl"
 . .gitlab-ci/container/build-kdl.sh
 mv /ci-kdl $ROOTFS/
-section_end kdl
 
 ############### Build local stuff for use by igt and kernel testing, which
 ############### will reuse most of our container build process from a specific
@@ -374,12 +386,14 @@ if [ "$DEBIAN_ARCH" = "amd64" ]; then
 fi
 
 ############### Fill rootfs
+cp .gitlab-ci/setup-test-env.sh $ROOTFS/.
 cp .gitlab-ci/container/setup-rootfs.sh $ROOTFS/.
 cp .gitlab-ci/container/strip-rootfs.sh $ROOTFS/.
 cp .gitlab-ci/container/debian/llvm-snapshot.gpg.key $ROOTFS/.
 cp .gitlab-ci/container/debian/winehq.gpg.key $ROOTFS/.
 chroot $ROOTFS bash /setup-rootfs.sh
 rm $ROOTFS/{llvm-snapshot,winehq}.gpg.key
+rm "$ROOTFS/setup-test-env.sh"
 rm "$ROOTFS/setup-rootfs.sh"
 rm "$ROOTFS/strip-rootfs.sh"
 cp /etc/wgetrc $ROOTFS/etc/.

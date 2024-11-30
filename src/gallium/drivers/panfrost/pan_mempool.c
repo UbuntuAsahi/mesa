@@ -137,7 +137,9 @@ panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
 #ifdef PAN_DBG_OVERFLOW
    if (unlikely(pool->dev->debug & PAN_DBG_OVERFLOW) &&
        !(pool->create_flags & PAN_BO_INVISIBLE)) {
-      unsigned aligned = ALIGN_POT(sz, sysconf(_SC_PAGESIZE));
+      long alignment = sysconf(_SC_PAGESIZE);
+      assert(alignment > 0 && util_is_power_of_two_nonzero(alignment));
+      unsigned aligned = ALIGN_POT(sz, alignment);
       unsigned bo_size = aligned + PAN_GUARD_SIZE;
 
       bo = panfrost_pool_alloc_backing(pool, bo_size);
@@ -148,7 +150,7 @@ panfrost_pool_alloc_aligned(struct panfrost_pool *pool, size_t sz,
       offset = ROUND_DOWN_TO(aligned - sz, alignment);
 
       if (mprotect(bo->ptr.cpu + aligned, PAN_GUARD_SIZE, PROT_NONE) == -1)
-         perror("mprotect");
+         mesa_loge("mprotect failed: %s", strerror(errno));
 
       pool->transient_bo = NULL;
    }

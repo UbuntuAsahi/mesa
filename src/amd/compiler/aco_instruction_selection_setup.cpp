@@ -376,13 +376,14 @@ init_context(isel_context* ctx, nir_shader* shader)
    }
 
    apply_nuw_to_offsets(ctx, impl);
+   ac_nir_flag_smem_for_loads(shader, ctx->program->gfx_level, false, true);
 
    /* sanitize control flow */
    sanitize_cf_list(impl, &impl->body);
    nir_metadata_preserve(impl, nir_metadata_none);
 
    /* we'll need these for isel */
-   nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_dominance);
+   nir_metadata_require(impl, nir_metadata_block_index);
 
    if (ctx->options->dump_preoptir) {
       fprintf(stderr, "NIR shader before instruction selection:\n");
@@ -445,7 +446,8 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_op_udot_2x16_uadd:
                case nir_op_sdot_2x16_iadd:
                case nir_op_udot_2x16_uadd_sat:
-               case nir_op_sdot_2x16_iadd_sat: type = RegType::vgpr; break;
+               case nir_op_sdot_2x16_iadd_sat:
+               case nir_op_alignbyte_amd: type = RegType::vgpr; break;
                case nir_op_fmul:
                case nir_op_ffma:
                case nir_op_fadd:
@@ -558,6 +560,7 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_load_barycentric_at_offset:
                case nir_intrinsic_load_interpolated_input:
                case nir_intrinsic_load_frag_coord:
+               case nir_intrinsic_load_pixel_coord:
                case nir_intrinsic_load_frag_shading_rate:
                case nir_intrinsic_load_sample_pos:
                case nir_intrinsic_load_local_invocation_id:

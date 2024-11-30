@@ -140,11 +140,54 @@ get_cache_uuid(uint16_t family, void *uuid)
    return 0;
 }
 
+static VkResult
+get_device_sync_types(struct panvk_physical_device *device,
+                      const struct panvk_instance *instance)
+{
+   const unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
+   uint32_t sync_type_count = 0;
+
+   device->drm_syncobj_type = vk_drm_syncobj_get_type(device->kmod.dev->fd);
+   if (!device->drm_syncobj_type.features) {
+      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
+                       "failed to query syncobj features");
+   }
+
+   device->sync_types[sync_type_count++] = &device->drm_syncobj_type;
+
+   if (arch >= 10) {
+      assert(device->drm_syncobj_type.features & VK_SYNC_FEATURE_TIMELINE);
+   } else {
+      /* We don't support timelines in the uAPI yet and we don't want it getting
+       * suddenly turned on by vk_drm_syncobj_get_type() without us adding panvk
+       * code for it first.
+       */
+      device->drm_syncobj_type.features &= ~VK_SYNC_FEATURE_TIMELINE;
+
+      /* vk_sync_timeline requires VK_SYNC_FEATURE_GPU_MULTI_WAIT.  Panfrost
+       * waits on the underlying dma-fences and supports the feature.
+       */
+      device->drm_syncobj_type.features |= VK_SYNC_FEATURE_GPU_MULTI_WAIT;
+
+      device->sync_timeline_type =
+         vk_sync_timeline_get_type(&device->drm_syncobj_type);
+      device->sync_types[sync_type_count++] = &device->sync_timeline_type.sync;
+   }
+
+   assert(sync_type_count < ARRAY_SIZE(device->sync_types));
+   device->sync_types[sync_type_count] = NULL;
+
+   return VK_SUCCESS;
+}
+
 static void
 get_device_extensions(const struct panvk_physical_device *device,
                       struct vk_device_extension_table *ext)
 {
+   const unsigned arch = pan_arch(device->kmod.props.gpu_prod_id);
+
    *ext = (struct vk_device_extension_table){
+      .KHR_16bit_storage = true,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_copy_commands2 = true,
@@ -160,35 +203,50 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_external_semaphore = true,
       .KHR_external_semaphore_fd = true,
       .KHR_get_memory_requirements2 = true,
+      .KHR_global_priority = true,
       .KHR_image_format_list = true,
+      .KHR_index_type_uint8 = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
+      .KHR_map_memory2 = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_shader_expect_assume = true,
+      .KHR_shader_non_semantic_info = true,
+      .KHR_shader_relaxed_extended_instruction = true,
       .KHR_storage_buffer_storage_class = true,
 #ifdef PANVK_USE_WSI_PLATFORM
       .KHR_swapchain = true,
 #endif
       .KHR_synchronization2 = true,
+      .KHR_timeline_semaphore = true,
       .KHR_variable_pointers = true,
+      .KHR_vertex_attribute_divisor = true,
+      .KHR_zero_initialize_workgroup_memory = true,
       .EXT_buffer_device_address = true,
       .EXT_custom_border_color = true,
       .EXT_depth_clip_enable = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_global_priority = true,
+      .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_host_query_reset = true,
       .EXT_image_drm_format_modifier = true,
+      .EXT_image_robustness = true,
       .EXT_index_type_uint8 = true,
       .EXT_physical_device_drm = true,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
+      .EXT_pipeline_robustness = true,
       .EXT_private_data = true,
+      .EXT_queue_family_foreign = true,
+      .EXT_sampler_filter_minmax = arch >= 10,
       .EXT_shader_module_identifier = true,
-      .EXT_vertex_attribute_divisor = true,
+      .EXT_tooling_info = true,
       .GOOGLE_decorate_string = true,
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
@@ -203,23 +261,29 @@ get_features(const struct panvk_physical_device *device,
 
    *features = (struct vk_features){
       /* Vulkan 1.0 */
+      .depthClamp = true,
+      .depthBiasClamp = true,
       .robustBufferAccess = true,
       .fullDrawIndexUint32 = true,
       .independentBlend = true,
+      .sampleRateShading = true,
       .logicOp = true,
       .wideLines = true,
       .largePoints = true,
+      .occlusionQueryPrecise = true,
+      .samplerAnisotropy = true,
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = true,
-      .samplerAnisotropy = true,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
       .shaderStorageImageArrayDynamicIndexing = true,
+      .shaderInt16 = true,
+      .shaderInt64 = true,
 
       /* Vulkan 1.1 */
-      .storageBuffer16BitAccess = false,
-      .uniformAndStorageBuffer16BitAccess = false,
+      .storageBuffer16BitAccess = true,
+      .uniformAndStorageBuffer16BitAccess = true,
       .storagePushConstant16 = false,
       .storageInputOutput16 = false,
       .multiview = false,
@@ -264,14 +328,14 @@ get_features(const struct panvk_physical_device *device,
       .descriptorBindingVariableDescriptorCount = false,
       .runtimeDescriptorArray = false,
 
-      .samplerFilterMinmax = false,
+      .samplerFilterMinmax = arch >= 10,
       .scalarBlockLayout = false,
       .imagelessFramebuffer = false,
       .uniformBufferStandardLayout = false,
       .shaderSubgroupExtendedTypes = false,
       .separateDepthStencilLayouts = false,
-      .hostQueryReset = false,
-      .timelineSemaphore = false,
+      .hostQueryReset = true,
+      .timelineSemaphore = true,
       .bufferDeviceAddress = true,
       .bufferDeviceAddressCaptureReplay = false,
       .bufferDeviceAddressMultiDevice = false,
@@ -283,7 +347,7 @@ get_features(const struct panvk_physical_device *device,
       .subgroupBroadcastDynamicId = false,
 
       /* Vulkan 1.3 */
-      .robustImageAccess = false,
+      .robustImageAccess = true,
       .inlineUniformBlock = false,
       .descriptorBindingInlineUniformBlockUpdateAfterBind = false,
       .pipelineCreationCacheControl = true,
@@ -294,7 +358,7 @@ get_features(const struct panvk_physical_device *device,
       .computeFullSubgroups = false,
       .synchronization2 = true,
       .textureCompressionASTC_HDR = false,
-      .shaderZeroInitializeWorkgroupMemory = false,
+      .shaderZeroInitializeWorkgroupMemory = true,
       .dynamicRendering = true,
       .shaderIntegerDotProduct = false,
       .maintenance4 = false,
@@ -302,10 +366,13 @@ get_features(const struct panvk_physical_device *device,
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibrary = true,
 
-      /* VK_EXT_index_type_uint8 */
+      /* VK_KHR_global_priority */
+      .globalPriorityQuery = true,
+
+      /* VK_KHR_index_type_uint8 */
       .indexTypeUint8 = true,
 
-      /* VK_EXT_vertex_attribute_divisor */
+      /* VK_KHR_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
       .vertexAttributeInstanceRateZeroDivisor = true,
 
@@ -328,6 +395,12 @@ get_features(const struct panvk_physical_device *device,
 
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
+
+      /* VK_EXT_pipeline_robustness */
+      .pipelineRobustness = true,
+
+      /* VK_KHR_shader_relaxed_extended_instruction */
+      .shaderRelaxedExtendedInstruction = true,
 
       /* VK_KHR_shader_expect_assume */
       .shaderExpectAssume = true,
@@ -390,10 +463,18 @@ get_device_properties(const struct panvk_instance *instance,
        * requirements.
        */
       .maxPushConstantsSize = 128,
-      /* There's no HW limit here. Should we advertize something smaller? */
+      /* On our kernel drivers we're limited by the available memory rather
+       * than available allocations. This is better expressed through memory
+       * properties and budget queries, and by returning
+       * VK_ERROR_OUT_OF_DEVICE_MEMORY when applicable, rather than
+       * this limit.
+       */
       .maxMemoryAllocationCount = UINT32_MAX,
-      /* Again, no hardware limit, but most drivers seem to advertive 64k. */
-      .maxSamplerAllocationCount = 64 * 1024,
+      /* On Mali, VkSampler objects do not use any resources other than host
+       * memory and host address space, availability of which can change
+       * significantly over time.
+       */
+      .maxSamplerAllocationCount = UINT32_MAX,
       /* A cache line. */
       .bufferImageGranularity = 64,
       /* Sparse binding not supported yet. */
@@ -637,7 +718,6 @@ get_device_properties(const struct panvk_instance *instance,
       .maxPerStageDescriptorUpdateAfterBindSampledImages = 0,
       .maxPerStageDescriptorUpdateAfterBindStorageImages = 0,
       .maxPerStageDescriptorUpdateAfterBindInputAttachments = 0,
-      .maxPerStageDescriptorUpdateAfterBindInputAttachments = 0,
       .maxPerStageUpdateAfterBindResources = 0,
       .maxDescriptorSetUpdateAfterBindSamplers = 0,
       .maxDescriptorSetUpdateAfterBindUniformBuffers = 0,
@@ -647,10 +727,8 @@ get_device_properties(const struct panvk_instance *instance,
       .maxDescriptorSetUpdateAfterBindSampledImages = 0,
       .maxDescriptorSetUpdateAfterBindStorageImages = 0,
       .maxDescriptorSetUpdateAfterBindInputAttachments = 0,
-      /* XXX: VK_EXT_sampler_filter_minmax */
-      .filterMinmaxSingleComponentFormats = false,
-      .filterMinmaxImageComponentMapping = false,
-      /* XXX: VK_KHR_timeline_semaphore */
+      .filterMinmaxSingleComponentFormats = arch >= 10,
+      .filterMinmaxImageComponentMapping = arch >= 10,
       .maxTimelineSemaphoreValueDifference = INT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
 
@@ -692,6 +770,16 @@ get_device_properties(const struct panvk_instance *instance,
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibraryFastLinking = true,
       .graphicsPipelineLibraryIndependentInterpolationDecoration = true,
+
+      /* VK_EXT_pipeline_robustness */
+      .defaultRobustnessStorageBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT,
+      .defaultRobustnessUniformBuffers =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT,
+      .defaultRobustnessVertexInputs =
+         VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_EXT,
+      .defaultRobustnessImages =
+         VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_EXT,
 
       /* VK_KHR_vertex_attribute_divisor */
       /* We will have to restrict this a bit for multiview */
@@ -801,14 +889,11 @@ panvk_physical_device_init(struct panvk_physical_device *device,
       goto fail;
    }
 
-   vk_warn_non_conformant_implementation("panvk");
+   result = get_device_sync_types(device, instance);
+   if (result != VK_SUCCESS)
+      goto fail;
 
-   device->drm_syncobj_type = vk_drm_syncobj_get_type(device->kmod.dev->fd);
-   /* We don't support timelines in the uAPI yet and we don't want it getting
-    * suddenly turned on by vk_drm_syncobj_get_type() without us adding panvk
-    * code for it first.
-    */
-   device->drm_syncobj_type.features &= ~VK_SYNC_FEATURE_TIMELINE;
+   vk_warn_non_conformant_implementation("panvk");
 
    struct vk_device_extension_table supported_extensions;
    get_device_extensions(device, &supported_extensions);
@@ -832,8 +917,6 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    if (result != VK_SUCCESS)
       goto fail;
 
-   device->sync_types[0] = &device->drm_syncobj_type;
-   device->sync_types[1] = NULL;
    device->vk.supported_sync_types = device->sync_types;
 
    result = panvk_wsi_init(device);
@@ -859,17 +942,46 @@ static const VkQueueFamilyProperties panvk_queue_family_properties = {
    .minImageTransferGranularity = {1, 1, 1},
 };
 
+static void
+panvk_fill_global_priority(const struct panvk_physical_device *physical_device,
+                           VkQueueFamilyGlobalPriorityPropertiesKHR *prio)
+{
+   enum pan_kmod_group_allow_priority_flags prio_mask =
+      physical_device->kmod.props.allowed_group_priorities_mask;
+   uint32_t prio_idx = 0;
+
+   if (prio_mask & PAN_KMOD_GROUP_ALLOW_PRIORITY_LOW)
+      prio->priorities[prio_idx++] = VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR;
+
+   if (prio_mask & PAN_KMOD_GROUP_ALLOW_PRIORITY_MEDIUM)
+      prio->priorities[prio_idx++] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
+
+   if (prio_mask & PAN_KMOD_GROUP_ALLOW_PRIORITY_HIGH)
+      prio->priorities[prio_idx++] = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+
+   if (prio_mask & PAN_KMOD_GROUP_ALLOW_PRIORITY_REALTIME)
+      prio->priorities[prio_idx++] = VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR;
+
+   prio->priorityCount = prio_idx;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetPhysicalDeviceQueueFamilyProperties2(
    VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
    VkQueueFamilyProperties2 *pQueueFamilyProperties)
 {
+   VK_FROM_HANDLE(panvk_physical_device, physical_device, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkQueueFamilyProperties2, out, pQueueFamilyProperties,
                           pQueueFamilyPropertyCount);
 
    vk_outarray_append_typed(VkQueueFamilyProperties2, &out, p)
    {
       p->queueFamilyProperties = panvk_queue_family_properties;
+
+      VkQueueFamilyGlobalPriorityPropertiesKHR *prio =
+         vk_find_struct(p->pNext, QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR);
+      if (prio)
+         panvk_fill_global_priority(physical_device, prio);
    }
 }
 
@@ -1140,24 +1252,24 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
    default:
       unreachable("bad vkimage type");
    case VK_IMAGE_TYPE_1D:
-      maxExtent.width = 16384;
+      maxExtent.width = 1 << 16;
       maxExtent.height = 1;
       maxExtent.depth = 1;
-      maxMipLevels = 15; /* log2(maxWidth) + 1 */
-      maxArraySize = 2048;
+      maxMipLevels = 17; /* log2(maxWidth) + 1 */
+      maxArraySize = 1 << 16;
       break;
    case VK_IMAGE_TYPE_2D:
-      maxExtent.width = 16384;
-      maxExtent.height = 16384;
+      maxExtent.width = 1 << 16;
+      maxExtent.height = 1 << 16;
       maxExtent.depth = 1;
-      maxMipLevels = 15; /* log2(maxWidth) + 1 */
-      maxArraySize = 2048;
+      maxMipLevels = 17; /* log2(maxWidth) + 1 */
+      maxArraySize = 1 << 16;
       break;
    case VK_IMAGE_TYPE_3D:
-      maxExtent.width = 2048;
-      maxExtent.height = 2048;
-      maxExtent.depth = 2048;
-      maxMipLevels = 12; /* log2(maxWidth) + 1 */
+      maxExtent.width = 1 << 16;
+      maxExtent.height = 1 << 16;
+      maxExtent.depth = 1 << 16;
+      maxMipLevels = 17; /* log2(maxWidth) + 1 */
       maxArraySize = 1;
       break;
    }
@@ -1196,13 +1308,17 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
          }
       }
 
-      if (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
+      if (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||
+          ((info->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+           !vk_format_is_depth_or_stencil(info->format))) {
          if (!(format_feature_flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
             goto unsupported;
          }
       }
 
-      if (info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+      if ((info->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ||
+          ((info->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+           vk_format_is_depth_or_stencil(info->format))) {
          if (!(format_feature_flags &
                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
             goto unsupported;
@@ -1216,8 +1332,11 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
       .maxArrayLayers = maxArraySize,
       .sampleCounts = sampleCounts,
 
-      /* FINISHME: Accurately calculate
-       * VkImageFormatProperties::maxResourceSize.
+      /* We need to limit images to 32-bit range, because the maximum
+       * slice-stride is 32-bit wide, meaning that if we allocate an image
+       * with the maximum widht and height, we end up overflowing it.
+       *
+       * We get around this by simply limiting the maximum resource size.
        */
       .maxResourceSize = UINT32_MAX,
    };

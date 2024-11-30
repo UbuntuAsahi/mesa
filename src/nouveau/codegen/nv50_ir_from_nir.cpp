@@ -149,6 +149,7 @@ private:
                          uint32_t align_mul,
                          uint32_t align_offset,
                          bool offset_is_const,
+                         enum gl_access_qualifier access,
                          const void *cb_data);
 
    bool isFloatType(nir_alu_type);
@@ -1407,6 +1408,7 @@ Converter::getMemAccessSizeAlign(nir_intrinsic_op intrin,
                                  uint32_t align_mul,
                                  uint32_t align_offset,
                                  bool offset_is_const,
+                                 enum gl_access_qualifier access,
                                  const void *cb_data)
 {
    const Converter* converter = (Converter*) cb_data;
@@ -1437,6 +1439,7 @@ Converter::getMemAccessSizeAlign(nir_intrinsic_op intrin,
       .num_components = (uint8_t) (bytes / (bit_size / 8)),
       .bit_size = (uint8_t) bit_size,
       .align = (uint16_t) bytes,
+      .shift = nir_mem_access_shift_method_scalar,
    };
 }
 
@@ -3151,7 +3154,7 @@ Converter::visit(nir_tex_instr *insn)
       if (lodIdx != -1 && !target.isMS())
          srcs.push_back(getSrc(&insn->src[lodIdx].src, 0));
       else if (op == OP_TXQ)
-         srcs.push_back(zero); // TXQ always needs an LOD
+         srcs.push_back(loadImm(NULL, 0)); // TXQ always needs an LOD
       else if (op == OP_TXF)
          lz = true;
       if (msIdx != -1)
@@ -3427,7 +3430,7 @@ Converter::run()
    NIR_PASS_V(nir, nir_lower_vars_to_ssa);
 
    NIR_PASS_V(nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
-              type_size, (nir_lower_io_options)0);
+              type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
    NIR_PASS_V(nir, nir_lower_subgroups, &subgroup_options);
 
@@ -3627,7 +3630,6 @@ nvir_nir_shader_compiler_options(int chipset, uint8_t shader_type)
    op.vectorize_io = false;
    op.lower_to_scalar = false;
    op.unify_interfaces = false;
-   op.use_interpolated_input_intrinsics = true;
    op.lower_mul_2x32_64 = true; // TODO
    op.has_rotate32 = (chipset >= NVISA_GV100_CHIPSET);
    op.has_imul24 = false;

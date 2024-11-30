@@ -56,6 +56,8 @@
 extern "C" {
 #endif
 
+struct nir_shader;
+
 /**
  * Implementation limits
  */
@@ -301,7 +303,7 @@ struct pipe_shader_state
    const struct tgsi_token *tokens;
    union {
       void *native;
-      void *nir;
+      struct nir_shader *nir;
    } ir;
    struct pipe_stream_output_info stream_output;
 };
@@ -1064,12 +1066,14 @@ struct pipe_ml_operation
    /**
     * Tensor used as input.
     */
-   struct pipe_tensor *input_tensor;
+   struct pipe_tensor **input_tensors;
+   unsigned input_count;
 
    /**
     * Tensor used as output.
     */
-   struct pipe_tensor *output_tensor;
+   struct pipe_tensor **output_tensors;
+   unsigned output_count;
 
    union {
       struct {
@@ -1106,6 +1110,11 @@ struct pipe_ml_operation
           * Whether this is a depthwise convolution.
           */
          bool depthwise;
+
+         /**
+          * Whether this convolution has fused ReLU activation.
+          */
+         bool relu;
       } conv;
       struct {
          /**
@@ -1133,12 +1142,6 @@ struct pipe_ml_operation
           */
          bool padding_same;
       } pooling;
-      struct {
-         /**
-          * Additional input tensor, to be added to the other one.
-          */
-         struct pipe_tensor *input_tensor;
-      } add;
    };
 };
 

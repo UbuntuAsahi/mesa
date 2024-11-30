@@ -26,8 +26,8 @@
 #include "nir_intrinsics_indices.h"
 #include "shader_enums.h"
 
-/* Alignment for shader programs. I'm not sure what the optimal value is. */
-#define AGX_CODE_ALIGN 0x100
+/* Cache-line align shader programs. This matches the prop compiler. */
+#define AGX_CODE_ALIGN 0x80
 
 /* clang-format off */
 static const struct debug_named_value agx_debug_options[] = {
@@ -2825,16 +2825,15 @@ agx_optimize_loop_nir(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_undef);
-      NIR_PASS(progress, nir, nir_opt_shrink_vectors, true);
       NIR_PASS(progress, nir, nir_opt_loop_unroll);
    } while (progress);
 }
 
-static bool
-mem_vectorize_cb(unsigned align_mul, unsigned align_offset, unsigned bit_size,
-                 unsigned num_components, unsigned hole_size,
-                 nir_intrinsic_instr *low, nir_intrinsic_instr *high,
-                 void *data)
+bool
+agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
+                     unsigned bit_size, unsigned num_components,
+                     unsigned hole_size, nir_intrinsic_instr *low,
+                     nir_intrinsic_instr *high, void *data)
 {
    if (hole_size)
       return false;
@@ -2978,7 +2977,7 @@ optimize_bounds(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 static void
-agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
+agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -3002,10 +3001,19 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
 
    NIR_PASS(_, nir, nir_opt_load_store_vectorize,
             &(const nir_load_store_vectorize_options){
-               .modes = nir_var_mem_global | nir_var_mem_constant,
-               .callback = mem_vectorize_cb,
+               .modes = nir_var_mem_global | nir_var_mem_constant |
+                        nir_var_shader_temp,
+               .callback = agx_mem_vectorize_cb,
             });
    NIR_PASS(_, nir, nir_lower_pack);
+   NIR_PASS(_, nir, nir_opt_algebraic);
+
+   /* Lower addressing modes. The sooner we do this, the sooner we get rid of
+    * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
+    * want to vectorize first since nir_opt_load_store_vectorize doesn't know
+    * how to handle our loads.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_address);
 
    NIR_PASS_V(nir, nir_divergence_analysis);
    bool progress = false;
@@ -3033,7 +3041,6 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
    } while (progress);
 
    progress = false;
-   NIR_PASS(progress, nir, agx_nir_lower_address);
 
    /* If address lowering made progress, clean up before forming preambles.
     * Otherwise the optimized preambles might just be constants! Do it before
@@ -3068,8 +3075,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
     */
    NIR_PASS(_, nir, agx_nir_lower_fminmax);
 
-   if (preamble_size && (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE)))
-      NIR_PASS(_, nir, agx_nir_opt_preamble, preamble_size);
+   if (preamble_size && (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE))) {
+      unsigned temp = *preamble_size;
+      NIR_PASS(_, nir, agx_nir_opt_preamble, &temp);
+      *preamble_size = temp;
+   }
 
    /* Forming preambles may dramatically reduce the instruction count
     * in certain blocks, causing some if-else statements to become
@@ -3109,7 +3119,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, unsigned *preamble_size)
       nir_index_ssa_defs(impl);
    }
 
-   if (soft_fault) {
+   /* TODO: Reenable this pass. It's breaking Fallout 4 in ways I don't
+    * understand yet.
+    */
+   if (soft_fault && 0) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, optimize_bounds,
                nir_metadata_control_flow, NULL);
    }
@@ -3229,7 +3242,7 @@ static nir_mem_access_size_align
 mem_access_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
                          uint8_t bit_size, uint32_t align,
                          uint32_t align_offset, bool offset_is_const,
-                         const void *cb_data)
+                         enum gl_access_qualifier access, const void *cb_data)
 {
    align = nir_combined_align(align, align_offset);
 
@@ -3246,6 +3259,7 @@ mem_access_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
       .num_components = MIN2(bytes / (bit_size / 8), 4),
       .bit_size = bit_size,
       .align = bit_size / 8,
+      .shift = nir_mem_access_shift_method_scalar,
    };
 }
 
@@ -3882,6 +3896,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       info->early_fragment_tests = nir->info.fs.early_fragment_tests;
    } else if (nir->info.stage == MESA_SHADER_COMPUTE) {
       info->imageblock_stride = nir->info.cs.image_block_size_per_thread_agx;
+
+      for (unsigned i = 0; i < 3; ++i) {
+         info->workgroup_size[i] = nir->info.workgroup_size[i];
+      }
    }
 
    out->binary = binary.data;

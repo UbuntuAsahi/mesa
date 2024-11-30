@@ -96,7 +96,6 @@ static const nir_shader_compiler_options ir3_base_options = {
    .lower_unpack_unorm_4x8 = true,
    .lower_unpack_unorm_2x16 = true,
    .lower_pack_split = true,
-   .use_interpolated_input_intrinsics = true,
    .lower_to_scalar = true,
    .has_imul24 = true,
    .has_fsub = true,
@@ -217,6 +216,8 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->bitops_can_write_predicates = true;
       compiler->has_branch_and_or = true;
       compiler->has_predication = true;
+      compiler->predtf_nop_quirk = dev_info->a6xx.predtf_nop_quirk;
+      compiler->prede_nop_quirk = dev_info->a6xx.prede_nop_quirk;
       compiler->has_scalar_alu = dev_info->a6xx.has_scalar_alu;
       compiler->has_isam_v = dev_info->a6xx.has_isam_v;
       compiler->has_ssbo_imm_offsets = dev_info->a6xx.has_ssbo_imm_offsets;
@@ -224,6 +225,8 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->has_early_preamble = dev_info->a6xx.has_early_preamble;
       compiler->has_rpt_bary_f = true;
       compiler->has_shfl = true;
+      compiler->reading_shading_rate_requires_smask_quirk =
+         dev_info->a7xx.reading_shading_rate_requires_smask_quirk;
    } else {
       compiler->max_const_pipeline = 512;
       compiler->max_const_geom = 512;
@@ -284,6 +287,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
    compiler->bool_type = (compiler->gen >= 5) ? TYPE_U16 : TYPE_U32;
    compiler->has_shared_regfile = compiler->gen >= 5;
+   compiler->has_bitwise_triops = compiler->gen >= 5;
 
    /* The driver can't request this unless preambles are supported. */
    if (options->push_ubo_with_preamble)

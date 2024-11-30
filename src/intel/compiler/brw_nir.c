@@ -607,13 +607,14 @@ brw_nir_lower_fs_inputs(nir_shader *nir,
    }
 
    nir_lower_io(nir, nir_var_shader_in, type_size_vec4,
-                nir_lower_io_lower_64bit_to_32);
+                nir_lower_io_lower_64bit_to_32 |
+                nir_lower_io_use_interpolated_input_intrinsics);
    if (devinfo->ver >= 11)
       nir_lower_interpolation(nir, ~0);
 
-   if (key->multisample_fbo == BRW_NEVER) {
+   if (key->multisample_fbo == INTEL_NEVER) {
       nir_lower_single_sampled(nir);
-   } else if (key->persample_interp == BRW_ALWAYS) {
+   } else if (key->persample_interp == INTEL_ALWAYS) {
       nir_shader_intrinsics_pass(nir, lower_barycentric_per_sample,
                                    nir_metadata_control_flow,
                                    NULL);
@@ -1498,7 +1499,8 @@ bool combine_all_memory_barriers(nir_intrinsic_instr *a,
 static nir_mem_access_size_align
 get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
                           uint8_t bit_size, uint32_t align_mul, uint32_t align_offset,
-                          bool offset_is_const, const void *cb_data)
+                          bool offset_is_const, enum gl_access_qualifier access,
+                          const void *cb_data)
 {
    const uint32_t align = nir_combined_align(align_mul, align_offset);
 
@@ -1517,6 +1519,7 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
             .bit_size = 32,
             .num_components = comps32,
             .align = 4,
+            .shift = nir_mem_access_shift_method_scalar,
          };
       }
       break;
@@ -1527,6 +1530,7 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
             .bit_size = 32,
             .num_components = 1,
             .align = 4,
+            .shift = nir_mem_access_shift_method_scalar,
          };
       }
       break;
@@ -1562,6 +1566,7 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
          .bit_size = bytes * 8,
          .num_components = 1,
          .align = 1,
+         .shift = nir_mem_access_shift_method_scalar,
       };
    } else {
       bytes = MIN2(bytes, 16);
@@ -1570,6 +1575,7 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
          .num_components = is_scratch ? 1 :
                            is_load ? DIV_ROUND_UP(bytes, 4) : bytes / 4,
          .align = 4,
+         .shift = nir_mem_access_shift_method_scalar,
       };
    }
 }

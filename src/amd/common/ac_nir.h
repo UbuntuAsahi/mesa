@@ -92,8 +92,7 @@ ac_nir_lower_hs_outputs_to_mem(nir_shader *shader,
                                enum amd_gfx_level gfx_level,
                                uint64_t tes_inputs_read,
                                uint32_t tes_patch_inputs_read,
-                               unsigned wave_size,
-                               bool pass_tessfactors_by_reg);
+                               unsigned wave_size);
 
 void
 ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
@@ -135,6 +134,7 @@ typedef struct {
    bool kill_pointsize;
    bool kill_layer;
    bool force_vrs;
+   bool compact_primitives;
 
    /* VS */
    unsigned num_vertices_per_primitive;
@@ -322,6 +322,12 @@ ac_nir_varying_estimate_instr_cost(nir_instr *instr);
 
 bool
 ac_nir_opt_shared_append(nir_shader *shader);
+
+bool
+ac_nir_flag_smem_for_loads(nir_shader *shader, enum amd_gfx_level gfx_level, bool use_llvm, bool after_lowering);
+
+bool
+ac_nir_lower_mem_access_bit_sizes(nir_shader *shader, enum amd_gfx_level gfx_level, bool use_llvm);
 
 #ifdef __cplusplus
 }

@@ -408,8 +408,7 @@ llvmpipe_get_shader_param(struct pipe_screen *screen,
    case PIPE_SHADER_COMPUTE:
       if ((lscreen->allow_cl) && param == PIPE_SHADER_CAP_SUPPORTED_IRS)
          return ((1 << PIPE_SHADER_IR_TGSI) |
-                 (1 << PIPE_SHADER_IR_NIR) |
-                 (1 << PIPE_SHADER_IR_NIR_SERIALIZED));
+                 (1 << PIPE_SHADER_IR_NIR));
       FALLTHROUGH;
    case PIPE_SHADER_MESH:
    case PIPE_SHADER_TASK:
@@ -664,7 +663,6 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_int64_options = nir_lower_imul_2x32_64,
    .lower_doubles_options = nir_lower_dround_even,
    .max_unroll_iterations = 32,
-   .use_interpolated_input_intrinsics = true,
    .lower_to_scalar = true,
    .lower_uniforms_to_ubo = true,
    .lower_vector_cmp = true,
@@ -679,9 +677,8 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
 
 static char *
 llvmpipe_finalize_nir(struct pipe_screen *screen,
-                      void *nirptr)
+                      struct nir_shader *nir)
 {
-   struct nir_shader *nir = (struct nir_shader *)nirptr;
    lp_build_opt_nir(nir);
    return NULL;
 }
@@ -939,8 +936,9 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
 
    glsl_type_singleton_decref();
 
-#ifdef HAVE_LIBDRM
-   close(screen->udmabuf_fd);
+#if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
+   if (screen->udmabuf_fd != -1)
+      close(screen->udmabuf_fd);
 #endif
 
 #if DETECT_OS_LINUX
@@ -1000,11 +998,11 @@ update_cache_sha1_cpu(struct mesa_sha1 *ctx)
    const struct util_cpu_caps_t *cpu_caps = util_get_cpu_caps();
    /*
     * Don't need the cpu cache affinity stuff. The rest
-    * is contained in first 6 dwords.
+    * is contained in first 5 dwords.
     */
    STATIC_ASSERT(offsetof(struct util_cpu_caps_t, num_L3_caches)
-                 == 6 * sizeof(uint32_t));
-   _mesa_sha1_update(ctx, cpu_caps, 6 * sizeof(uint32_t));
+                 == 5 * sizeof(uint32_t));
+   _mesa_sha1_update(ctx, cpu_caps, 5 * sizeof(uint32_t));
 }
 
 

@@ -781,6 +781,7 @@ typedef enum
     */
    /*@{*/
    SYSTEM_VALUE_FRAG_COORD,
+   SYSTEM_VALUE_PIXEL_COORD,
    SYSTEM_VALUE_POINT_COORD,
    SYSTEM_VALUE_LINE_COORD, /**< Coord along axis perpendicular to line */
    SYSTEM_VALUE_FRONT_FACE,
@@ -1158,6 +1159,11 @@ enum gl_access_qualifier
     * shader where the API wants to copy all bytes that are resident.
     */
    ACCESS_KEEP_SCALAR = (1 << 15),
+
+   /**
+    * Indicates that this load will use SMEM.
+    */
+   ACCESS_SMEM_AMD = (1 << 16),
 };
 
 /**
@@ -1606,6 +1612,20 @@ typedef enum {
 } mesa_scope;
 
 const char *mesa_scope_name(mesa_scope scope);
+
+/* This is defined here to be available to OpenCL */
+enum glsl_sampler_dim {
+   GLSL_SAMPLER_DIM_1D = 0,
+   GLSL_SAMPLER_DIM_2D,
+   GLSL_SAMPLER_DIM_3D,
+   GLSL_SAMPLER_DIM_CUBE,
+   GLSL_SAMPLER_DIM_RECT,
+   GLSL_SAMPLER_DIM_BUF,
+   GLSL_SAMPLER_DIM_EXTERNAL,
+   GLSL_SAMPLER_DIM_MS,
+   GLSL_SAMPLER_DIM_SUBPASS, /* for vulkan input attachments */
+   GLSL_SAMPLER_DIM_SUBPASS_MS, /* for multisampled vulkan input attachments */
+};
 
 #ifdef __cplusplus
 } /* extern "C" */

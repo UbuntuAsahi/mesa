@@ -1338,7 +1338,7 @@ zink_screen_init_compiler(struct zink_screen *screen)
 {
    static const struct nir_shader_compiler_options
    default_options = {
-      .io_options = nir_io_glsl_lower_derefs,
+      .io_options = nir_io_has_intrinsics | nir_io_separate_clip_cull_distance_arrays,
       .lower_ffma16 = true,
       .lower_ffma32 = true,
       .lower_ffma64 = true,
@@ -1383,7 +1383,6 @@ zink_screen_init_compiler(struct zink_screen *screen)
       .support_indirect_inputs = BITFIELD_MASK(MESA_SHADER_COMPUTE),
       .support_indirect_outputs = BITFIELD_MASK(MESA_SHADER_COMPUTE),
       .max_unroll_iterations = 0,
-      .use_interpolated_input_intrinsics = true,
    };
 
    screen->nir_options = default_options;
@@ -1402,8 +1401,6 @@ zink_screen_init_compiler(struct zink_screen *screen)
    }
 
    if (screen->driver_compiler_workarounds.io_opt) {
-      screen->nir_options.io_options |= nir_io_glsl_opt_varyings;
-
       switch (zink_driverid(screen)) {
       case VK_DRIVER_ID_MESA_RADV:
       case VK_DRIVER_ID_AMD_OPEN_SOURCE:
@@ -1416,6 +1413,8 @@ zink_screen_init_compiler(struct zink_screen *screen)
          screen->nir_options.varying_expression_max_cost = amd_varying_expression_max_cost;
          screen->nir_options.varying_estimate_instr_cost = amd_varying_estimate_instr_cost;
       }
+   } else {
+      screen->nir_options.io_options |= nir_io_dont_optimize;
    }
 
    /*
@@ -5716,7 +5715,7 @@ static nir_mem_access_size_align
 mem_access_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
                          uint8_t bit_size, uint32_t align,
                          uint32_t align_offset, bool offset_is_const,
-                         const void *cb_data)
+                         enum gl_access_qualifier access, const void *cb_data)
 {
    align = nir_combined_align(align, align_offset);
 
@@ -5728,12 +5727,14 @@ mem_access_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
          .num_components = MIN2(bytes / align, 4),
          .bit_size = align * 8,
          .align = align,
+         .shift = nir_mem_access_shift_method_scalar,
       };
    } else {
       return (nir_mem_access_size_align){
          .num_components = MIN2(bytes / (bit_size / 8), 4),
          .bit_size = bit_size,
          .align = bit_size / 8,
+         .shift = nir_mem_access_shift_method_scalar,
       };
    }
 }
@@ -5742,7 +5743,7 @@ static nir_mem_access_size_align
 mem_access_scratch_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
                                  uint8_t bit_size, uint32_t align,
                                  uint32_t align_offset, bool offset_is_const,
-                                 const void *cb_data)
+                                 enum gl_access_qualifier access, const void *cb_data)
 {
    bit_size = *(const uint8_t *)cb_data;
    align = nir_combined_align(align, align_offset);
@@ -5753,6 +5754,7 @@ mem_access_scratch_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
       .num_components = MIN2(bytes / (bit_size / 8), 4),
       .bit_size = bit_size,
       .align = bit_size / 8,
+      .shift = nir_mem_access_shift_method_scalar,
    };
 }
 
@@ -6450,10 +6452,9 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
 }
 
 char *
-zink_shader_finalize(struct pipe_screen *pscreen, void *nirptr)
+zink_shader_finalize(struct pipe_screen *pscreen, struct nir_shader *nir)
 {
    struct zink_screen *screen = zink_screen(pscreen);
-   nir_shader *nir = nirptr;
 
    nir_lower_tex_options tex_opts = {
       .lower_invalid_implicit_lod = true,

@@ -282,6 +282,29 @@ is_medium_precision(const nir_shader *shader, const nir_variable *var)
           var->data.precision == GLSL_PRECISION_LOW;
 }
 
+static enum glsl_interp_mode
+get_interp_mode(const nir_variable *var)
+{
+   unsigned interp_mode = var->data.interpolation;
+
+   /* INTERP_MODE_NONE is an artifact of OpenGL. Change it to SMOOTH
+    * to enable CSE between load_barycentric_pixel(NONE->SMOOTH) and
+    * load_barycentric_pixel(SMOOTH), which also enables IO vectorization when
+    * one component originally had NONE and an adjacent component had SMOOTH.
+    *
+    * Color varyings must preserve NONE. NONE for colors means that
+    * glShadeModel determines the interpolation mode.
+    */
+   if (var->data.location != VARYING_SLOT_COL0 &&
+       var->data.location != VARYING_SLOT_COL1 &&
+       var->data.location != VARYING_SLOT_BFC0 &&
+       var->data.location != VARYING_SLOT_BFC1 &&
+       interp_mode == INTERP_MODE_NONE)
+      return INTERP_MODE_SMOOTH;
+
+   return interp_mode;
+}
+
 static nir_def *
 emit_load(struct lower_io_state *state,
           nir_def *array_index, nir_variable *var, nir_def *offset,
@@ -297,7 +320,7 @@ emit_load(struct lower_io_state *state,
    switch (mode) {
    case nir_var_shader_in:
       if (nir->info.stage == MESA_SHADER_FRAGMENT &&
-          nir->options->use_interpolated_input_intrinsics &&
+          state->options & nir_lower_io_use_interpolated_input_intrinsics &&
           var->data.interpolation != INTERP_MODE_FLAT &&
           !var->data.per_primitive) {
          if (var->data.interpolation == INTERP_MODE_EXPLICIT ||
@@ -316,7 +339,7 @@ emit_load(struct lower_io_state *state,
                bary_op = nir_intrinsic_load_barycentric_pixel;
 
             barycentric = nir_load_barycentric(&state->builder, bary_op,
-                                               var->data.interpolation);
+                                               get_interp_mode(var));
             op = nir_intrinsic_load_interpolated_input;
          }
       } else {
@@ -366,6 +389,10 @@ emit_load(struct lower_io_state *state,
       semantics.location = var->data.location;
       semantics.num_slots = get_number_of_slots(state, var);
       semantics.fb_fetch_output = var->data.fb_fetch_output;
+      if (semantics.fb_fetch_output) {
+         semantics.fb_fetch_output_coherent =
+            !!(var->data.access & ACCESS_COHERENT);
+      }
       semantics.medium_precision = is_medium_precision(b->shader, var);
       semantics.high_dvec2 = high_dvec2;
       /* "per_vertex" is misnamed. It means "explicit interpolation with
@@ -629,7 +656,7 @@ lower_interpolate_at(nir_intrinsic_instr *intrin, struct lower_io_state *state,
       nir_intrinsic_instr_create(state->builder.shader, bary_op);
 
    nir_def_init(&bary_setup->instr, &bary_setup->def, 2, 32);
-   nir_intrinsic_set_interp_mode(bary_setup, var->data.interpolation);
+   nir_intrinsic_set_interp_mode(bary_setup, get_interp_mode(var));
 
    if (intrin->intrinsic == nir_intrinsic_interp_deref_at_sample ||
        intrin->intrinsic == nir_intrinsic_interp_deref_at_offset ||
@@ -681,7 +708,7 @@ nir_lower_io_block(nir_block *block,
       case nir_intrinsic_interp_deref_at_offset:
       case nir_intrinsic_interp_deref_at_vertex:
          /* We can optionally lower these to load_interpolated_input */
-         if (options->use_interpolated_input_intrinsics ||
+         if (state->options & nir_lower_io_use_interpolated_input_intrinsics ||
              options->lower_interpolate_at)
             break;
          FALLTHROUGH;
@@ -1463,7 +1490,12 @@ build_explicit_io_load(nir_builder *b, nir_intrinsic_instr *intrin,
          break;
       case nir_var_mem_global:
          assert(addr_format_is_global(addr_format, mode));
-         op = get_load_global_op_from_addr_format(addr_format);
+
+         if (nir_intrinsic_has_access(intrin) &&
+             (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER))
+            op = get_load_global_constant_op_from_addr_format(addr_format);
+         else
+            op = get_load_global_op_from_addr_format(addr_format);
          break;
       case nir_var_uniform:
          assert(addr_format_is_offset(addr_format, mode));
@@ -3274,8 +3306,9 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
     */
    NIR_PASS_V(nir, nir_lower_io, nir_var_shader_out | nir_var_shader_in,
               type_size_vec4,
-              renumber_vs_inputs ? nir_lower_io_lower_64bit_to_32_new :
-                                   nir_lower_io_lower_64bit_to_32);
+              (renumber_vs_inputs ? nir_lower_io_lower_64bit_to_32_new :
+                                    nir_lower_io_lower_64bit_to_32) |
+              nir_lower_io_use_interpolated_input_intrinsics);
 
    /* nir_io_add_const_offset_to_base needs actual constants. */
    NIR_PASS_V(nir, nir_opt_constant_folding);

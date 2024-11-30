@@ -1245,6 +1245,11 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
                                   (LLVMValueRef[]){src[0], src[1], src[2]}, 3, 0);
       break;
 
+   case nir_op_alignbyte_amd:
+      result = ac_build_intrinsic(&ctx->ac, "llvm.amdgcn.alignbyte", ctx->ac.i32,
+                                  (LLVMValueRef[]){src[0], src[1], src[2]}, 3, 0);
+      break;
+
    default:
       fprintf(stderr, "Unknown NIR alu instr: ");
       nir_print_instr(&instr->instr, stderr);
@@ -2873,10 +2878,17 @@ emit_load_frag_coord(struct ac_nir_context *ctx)
 {
    LLVMValueRef values[4] = {
       ac_get_arg(&ctx->ac, ctx->args->frag_pos[0]), ac_get_arg(&ctx->ac, ctx->args->frag_pos[1]),
-      ac_get_arg(&ctx->ac, ctx->args->frag_pos[2]),
-      ac_build_fdiv(&ctx->ac, ctx->ac.f32_1, ac_get_arg(&ctx->ac, ctx->args->frag_pos[3]))};
+      ac_get_arg(&ctx->ac, ctx->args->frag_pos[2]), ac_get_arg(&ctx->ac, ctx->args->frag_pos[3])};
 
    return ac_to_integer(&ctx->ac, ac_build_gather_values(&ctx->ac, values, 4));
+}
+
+static LLVMValueRef
+emit_load_pixel_coord(struct ac_nir_context *ctx)
+{
+   LLVMValueRef value = ac_get_arg(&ctx->ac, ctx->args->pos_fixed_pt);
+
+   return LLVMBuildBitCast(ctx->ac.builder, value, ctx->ac.v2i16, "");
 }
 
 static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *instr)
@@ -3022,6 +3034,9 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       break;
    case nir_intrinsic_load_frag_coord:
       result = emit_load_frag_coord(ctx);
+      break;
+   case nir_intrinsic_load_pixel_coord:
+      result = emit_load_pixel_coord(ctx);
       break;
    case nir_intrinsic_load_frag_shading_rate:
       result = emit_load_frag_shading_rate(ctx);

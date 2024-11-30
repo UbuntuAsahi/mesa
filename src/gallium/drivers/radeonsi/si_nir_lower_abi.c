@@ -254,7 +254,7 @@ static void preload_reusable_variables(nir_builder *b, struct lower_abi_state *s
 static nir_def *get_num_vertices_per_prim(nir_builder *b, struct lower_abi_state *s)
 {
    struct si_shader_args *args = s->args;
-   unsigned num_vertices = gfx10_ngg_get_vertices_per_prim(s->shader);
+   unsigned num_vertices = si_get_num_vertices_per_output_prim(s->shader);
 
    if (num_vertices)
       return nir_imm_int(b, num_vertices);
@@ -371,7 +371,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       nir_def *per_vtx_out_patch_size = NULL;
 
       if (stage == MESA_SHADER_TESS_CTRL) {
-         const unsigned num_hs_out = util_last_bit64(sel->info.outputs_written_before_tes_gs);
+         const unsigned num_hs_out = util_last_bit64(sel->info.tcs_outputs_written);
          const unsigned out_vtx_size = num_hs_out * 16;
          const unsigned out_vtx_per_patch = sel->info.base.tess.tcs_vertices_out;
          per_vtx_out_patch_size = nir_imm_int(b, out_vtx_size * out_vtx_per_patch);
@@ -417,7 +417,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       replacement = nir_imm_false(b);
       break;
    case nir_intrinsic_load_cull_any_enabled_amd:
-      replacement = nir_imm_bool(b, !!key->ge.opt.ngg_culling);
+      replacement = nir_imm_bool(b, si_shader_culling_enabled(shader));
       break;
    case nir_intrinsic_load_cull_back_face_enabled_amd:
       replacement = nir_imm_bool(b, key->ge.opt.ngg_culling & SI_NGG_CULL_BACK_FACE);
@@ -672,11 +672,12 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_workgroup_num_input_primitives_amd:
       replacement = ac_nir_unpack_arg(b, &args->ac, args->ac.gs_tg_info, 22, 9);
       break;
-   case nir_intrinsic_load_initial_edgeflags_amd:
-      if (shader->key.ge.opt.ngg_culling & SI_NGG_CULL_LINES ||
-          (shader->selector->stage == MESA_SHADER_VERTEX &&
-           shader->selector->info.base.vs.blit_sgprs_amd)) {
-         /* Line primitives and blits don't need edge flags. */
+   case nir_intrinsic_load_initial_edgeflags_amd: {
+      unsigned output_prim = si_get_output_prim_simplified(sel, &shader->key);
+
+      /* Points, lines, and rectangles don't need edge flags. */
+      if (output_prim == MESA_PRIM_POINTS || output_prim == MESA_PRIM_LINES ||
+          output_prim == SI_PRIM_RECTANGLE_LIST) {
          replacement = nir_imm_int(b, 0);
       } else if (shader->selector->stage == MESA_SHADER_VERTEX) {
          if (sel->screen->info.gfx_level >= GFX12) {
@@ -694,13 +695,13 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
             replacement = nir_iand_imm(b, tmp, 0x20080200);
          }
       } else {
-         /* Edge flags are always enabled when polygon mode is enabled, so we always have to
-          * return valid edge flags if the primitive type is not lines and if we are not blitting
-          * because the shader doesn't know when polygon mode is enabled.
+         /* TES and GS: Edge flags are always enabled by the rasterizer state when polygon mode is
+          * enabled, so set all edge flags to 1 for triangles.
           */
          replacement = nir_imm_int(b, ac_get_all_edge_flag_bits(sel->screen->info.gfx_level));
       }
       break;
+   }
    case nir_intrinsic_load_packed_passthrough_primitive_amd:
       replacement = ac_nir_load_arg(b, &args->ac, args->ac.gs_vtx_offset[0]);
       break;
@@ -738,7 +739,10 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       if (shader->is_monolithic) {
          replacement = nir_imm_int(b, key->ge.opt.tes_prim_mode);
       } else {
-         replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 29, 2);
+         if (b->shader->info.tess._primitive_mode != TESS_PRIMITIVE_UNSPECIFIED)
+            replacement = nir_imm_int(b, b->shader->info.tess._primitive_mode);
+         else
+            replacement = ac_nir_unpack_arg(b, &args->ac, args->tcs_offchip_layout, 29, 2);
       }
       break;
    case nir_intrinsic_load_ring_gsvs_amd: {

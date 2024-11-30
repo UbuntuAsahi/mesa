@@ -178,6 +178,7 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_NULL_TEXTURES:
    case PIPE_CAP_HAS_CONST_BW:
    case PIPE_CAP_CL_GL_SHARING:
+   case PIPE_CAP_CALL_FINALIZE_NIR_IN_LINKER:
       return 1;
 
    /* Tahiti and Verde only: reduction mode is unsupported due to a bug
@@ -762,18 +763,6 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          } else
             return 0;
 
-      case PIPE_VIDEO_CAP_ENC_SUPPORTS_ASYNC_OPERATION:
-         if (sscreen->info.vcn_ip_version >= VCN_1_0_0)
-            return 1;
-
-         /* dual instance */
-         if (codec == PIPE_VIDEO_FORMAT_MPEG4_AVC &&
-             sscreen->info.family >= CHIP_TONGA &&
-             sscreen->info.vce_harvest_config == 0)
-            return 0;
-
-         return 1;
-
       case PIPE_VIDEO_CAP_ENC_MAX_SLICES_PER_FRAME:
          return (sscreen->info.vcn_ip_version >= VCN_1_0_0) ? 128 : 1;
 
@@ -1071,6 +1060,8 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
           sscreen->info.vcn_ip_version == VCN_4_0_3)
          return true;
       return false;
+   case PIPE_VIDEO_CAP_SKIP_CLEAR_SURFACE:
+      return sscreen->info.is_amdgpu && sscreen->info.drm_minor >= 59;
    default:
       return 0;
    }
@@ -1167,7 +1158,9 @@ static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
 
    switch (entrypoint) {
    case PIPE_VIDEO_ENTRYPOINT_BITSTREAM:
-      return !is_dcc && !is_format_conversion;
+      if (is_dcc || is_format_conversion)
+         return false;
+      break;
 
    case PIPE_VIDEO_ENTRYPOINT_ENCODE:
       if (is_dcc)
@@ -1188,23 +1181,23 @@ static bool si_vid_is_target_buffer_supported(struct pipe_screen *screen,
 
          if (sscreen->info.vcn_ip_version < VCN_2_0_0 ||
              sscreen->info.vcn_ip_version == VCN_2_2_0 ||
-             sscreen->info.vcn_ip_version >= VCN_5_0_0 ||
              sscreen->debug_flags & DBG(NO_EFC))
             return false;
 
-         if (input_8bit)
-            return format == PIPE_FORMAT_NV12;
-         else if (input_10bit)
-            return format == PIPE_FORMAT_NV12 || format == PIPE_FORMAT_P010;
-         else
+         if (input_8bit && format != PIPE_FORMAT_NV12)
+            return false;
+         if (input_10bit && format != PIPE_FORMAT_NV12 && format != PIPE_FORMAT_P010)
             return false;
       }
-
-      return true;
+      break;
 
    default:
-      return !is_format_conversion;
+      if (is_format_conversion)
+         return false;
+      break;
    }
+
+   return si_vid_is_format_supported(screen, format, profile, entrypoint);
 }
 
 static unsigned get_max_threads_per_block(struct si_screen *screen, enum pipe_shader_ir ir_type)
@@ -1568,7 +1561,6 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
    options->fuse_ffma64 = true;
    options->lower_uniforms_to_ubo = true;
    options->lower_layer_fs_input_to_sysval = true;
-   options->optimize_sample_mask_in = true;
    options->lower_to_scalar = true;
    options->lower_to_scalar_filter =
       sscreen->info.has_packed_math_16bit ? si_alu_to_scalar_packed_math_filter : NULL;
@@ -1582,9 +1574,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
     * when execution mode is rtz instead of rtne.
     */
    options->force_f2f16_rtz = true;
-   options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) |
-                          nir_io_glsl_lower_derefs |
-                          (sscreen->options.optimize_io ? nir_io_glsl_opt_varyings : 0);
+   options->io_options |= (!has_mediump ? nir_io_mediump_is_32bit : 0) | nir_io_has_intrinsics;
    options->lower_mediump_io = has_mediump ? si_lower_mediump_io : NULL;
    /* HW supports indirect indexing for: | Enabled in driver
     * -------------------------------------------------------

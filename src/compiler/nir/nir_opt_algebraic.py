@@ -946,6 +946,12 @@ optimizations.extend([
    # fmin(0.0, b)) while the right one is "b", so this optimization is inexact.
    (('~fmin', ('fsat', a), '#b(is_zero_to_one)'), ('fsat', ('fmin', a, b))),
 
+   # If a >= 0 ... 1 + a >= 1 ... so fsat(1 + a) = 1
+   (('fsat', ('fadd', 1.0, 'a(is_ge_zero)')), 1.0),
+
+   # Let constant folding do its job. This can have emergent behaviour.
+   (('fneg', ('bcsel(is_used_once)', a, '#b', '#c')), ('bcsel', a, ('fneg', b), ('fneg', c))),
+
    # max(-min(b, a), b) -> max(abs(b), -a)
    # min(-max(b, a), b) -> min(-abs(b), -a)
    (('fmax', ('fneg', ('fmin', b, a)), b), ('fmax', ('fabs', b), ('fneg', a))),
@@ -1187,7 +1193,7 @@ for op in ['iand', 'ior', 'ixor']:
 
 # Integer sizes
 for s in [8, 16, 32, 64]:
-    last_shift_bit = int(math.log2(s)) - 1
+    amount_bits = int(math.log2(s))
 
     lower_umin = 'options->lower_umin'
     lower_umax = 'options->lower_umax'
@@ -1225,7 +1231,8 @@ for s in [8, 16, 32, 64]:
        (('ishl', 'a@{}'.format(s), ('iand', s - 1, b)), ('ishl', a, b)),
        (('ishr', 'a@{}'.format(s), ('iand', s - 1, b)), ('ishr', a, b)),
        (('ushr', 'a@{}'.format(s), ('iand', s - 1, b)), ('ushr', a, b)),
-       (('ushr', 'a@{}'.format(s), ('ishl(is_used_once)', ('iand', b, 1), last_shift_bit)), ('ushr', a, ('ishl', b, last_shift_bit))),
+       (('ushr', 'a@{}'.format(s), ('ishl(is_used_once)', ('iand', b, 1), amount_bits - 1)), ('ushr', a, ('ishl', b, amount_bits - 1))),
+       (('ushr', 'a@{}'.format(s), ('ishl(is_used_once)', ('iand', b, 3), amount_bits - 2)), ('ushr', a, ('ishl', b, amount_bits - 2))),
     ])
 
 optimizations.extend([
@@ -1320,7 +1327,8 @@ optimizations.extend([
    # negative.
    (('bcsel', ('ilt', a, 0), ('ineg', ('ishr', a, b)), ('ishr', a, b)),
     ('iabs', ('ishr', a, b))),
-   (('iabs', ('ishr', ('iabs', a), b)), ('ishr', ('iabs', a), b)),
+   (('iabs', ('ishr', ('iabs', a), b)), ('ushr', ('iabs', a), b)),
+   (('iabs', ('ushr', ('iabs', a), b)), ('ushr', ('iabs', a), b)),
 
    (('fabs', ('slt', a, b)), ('slt', a, b)),
    (('fabs', ('sge', a, b)), ('sge', a, b)),
@@ -1502,6 +1510,12 @@ optimizations.extend([
    (('ishr', a, 0), a),
    (('ushr', 0, a), 0),
    (('ushr', a, 0), a),
+   (('bcsel', ('ieq', b, 0), a, ('ushr', a, b)), ('ushr', a, b)),
+   (('bcsel', ('ieq', b, 0), a, ('ishr', a, b)), ('ishr', a, b)),
+   (('bcsel', ('ieq', b, 0), a, ('ishl', a, b)), ('ishl', a, b)),
+   (('bcsel', ('ine', b, 0), ('ushr', a, b), a), ('ushr', a, b)),
+   (('bcsel', ('ine', b, 0), ('ishr', a, b), a), ('ishr', a, b)),
+   (('bcsel', ('ine', b, 0), ('ishl', a, b), a), ('ishl', a, b)),
    (('ior', ('ishl@16', a, b), ('ushr@16', a, ('iadd', 16, ('ineg', b)))), ('urol', a, b), 'options->has_rotate16'),
    (('ior', ('ishl@16', a, b), ('ushr@16', a, ('isub', 16, b))), ('urol', a, b), 'options->has_rotate16'),
    (('ior', ('ishl@32', a, b), ('ushr@32', a, ('iadd', 32, ('ineg', b)))), ('urol', a, b), 'options->has_rotate32'),
@@ -1804,8 +1818,9 @@ optimizations.extend([
    (('ishr', 'a@32', 24), ('extract_i8', a, 3), '!options->lower_extract_byte'),
    (('ishr', 'a@64', 56), ('extract_i8', a, 7), '!options->lower_extract_byte'),
    (('iand', 0xff, a), ('extract_u8', a, 0), '!options->lower_extract_byte'),
-   (('ishr', ('iand', a, 0x0000ff00),  8), ('extract_u8', a, 1), '!options->lower_extract_byte'),
-   (('ishr', ('iand', a, 0x00ff0000), 16), ('extract_u8', a, 2), '!options->lower_extract_byte'),
+   (('ishr', ('iand', 'a@32', 0x0000ff00),  8), ('extract_u8', a, 1), '!options->lower_extract_byte'),
+   (('ishr', ('iand', 'a@64', 0x0000ff00),  8), ('extract_u8', a, 1), '!options->lower_extract_byte'),
+   (('ishr', ('iand',  a,     0x00ff0000), 16), ('extract_u8', a, 2), '!options->lower_extract_byte'),
 
    # Common pattern in many Vulkan CTS tests that read 8-bit integers from a
    # storage buffer.
@@ -1956,6 +1971,17 @@ optimizations.extend([
    (('u2u32', ('iadd(is_used_once)', 'a@64', b)),
     ('iadd', ('u2u32', a), ('u2u32', b))),
 
+   (('u2u32', ('imul(is_used_once)', 'a@64', b)),
+    ('imul', ('u2u32', a), ('u2u32', b))),
+
+   (('u2f32', ('u2u64', 'a@32')), ('u2f32', a)),
+
+   # UINT32_MAX < a just checks the high half of a 64-bit value. This occurs
+   # when lowering convert_uint_sat(ulong). Although the replacement is more
+   # instructions, it replaces a 64-bit instruction with a 32-bit instruction
+   # and a move that will likely be coalesced.
+   (('ult', 0xffffffff, 'a@64'), ('ine', ('unpack_64_2x32_split_y', a), 0)),
+
    # Redundant trip through 8-bit
    (('i2i16', ('u2u8', ('iand', 'a@16', 1))), ('iand', 'a@16', 1)),
    (('u2u16', ('u2u8', ('iand', 'a@16', 1))), ('iand', 'a@16', 1)),
@@ -1967,8 +1993,11 @@ optimizations.extend([
    (('bcsel', a, ('b2i16', 'b@1'), ('b2i16', 'c@1')), ('b2i16', ('bcsel', a, b, c))),
 
    # Lowered pack followed by lowered unpack, for the high bits
-   (('u2u32', ('ushr', ('ior', ('ishl', a, 32), ('u2u64', b)), 32)), ('u2u32', a)),
-   (('u2u16', ('ushr', ('ior', ('ishl', a, 16), ('u2u32', b)), 16)), ('u2u16', a)),
+   (('u2u32', ('ushr', ('ior', ('ishl', a, 32), ('u2u64', 'b@8')), 32)), ('u2u32', a)),
+   (('u2u32', ('ushr', ('ior', ('ishl', a, 32), ('u2u64', 'b@16')), 32)), ('u2u32', a)),
+   (('u2u32', ('ushr', ('ior', ('ishl', a, 32), ('u2u64', 'b@32')), 32)), ('u2u32', a)),
+   (('u2u16', ('ushr', ('ior', ('ishl', a, 16), ('u2u32', 'b@8')), 16)), ('u2u16', a)),
+   (('u2u16', ('ushr', ('ior', ('ishl', a, 16), ('u2u32', 'b@16')), 16)), ('u2u16', a)),
 ])
 
 # After the ('extract_u8', a, 0) pattern, above, triggers, there will be
@@ -2125,8 +2154,10 @@ optimizations.extend([
    (('fabs', ('bcsel(is_used_once)', b, a, ('fneg', a))), ('fabs', a)),
    (('~bcsel', ('flt', a, 0.0), ('fneg', a), a), ('fabs', a)),
 
-   (('bcsel', a, ('bcsel', b, c, d), d), ('bcsel', ('iand', a, b), c, d)),
-   (('bcsel', a, b, ('bcsel', c, b, d)), ('bcsel', ('ior', a, c), b, d)),
+   (('bcsel', a, ('bcsel(is_used_once)', b, c, d), d), ('bcsel', ('iand', a, b), c, d)),
+   (('bcsel', a, ('bcsel(is_used_once)', b, d, c), d), ('bcsel', ('iand', a, ('inot', b)), c, d)),
+   (('bcsel', a, b, ('bcsel(is_used_once)', c, b, d)), ('bcsel', ('ior', a, c), b, d)),
+   (('bcsel', a, b, ('bcsel(is_used_once)', c, d, b)), ('bcsel', ('iand', c, ('inot', a)), d, b)),
 
    # Misc. lowering
    (('fmod', a, b), ('fsub', a, ('fmul', b, ('ffloor', ('fdiv', a, b)))), 'options->lower_fmod'),
@@ -2465,9 +2496,9 @@ optimizations.extend([
    (('fsign', 'a@64'), ('fsub', ('b2f', ('!flt', 0.0, a)), ('b2f', ('!flt', a, 0.0))), 'options->lower_doubles_options & nir_lower_dsign'),
 
    # Address/offset calculations:
-   # Drivers supporting imul24 should use the nir_lower_amul() pass, this
+   # Drivers supporting imul24 should use a pass like nir_lower_amul(), this
    # rule converts everyone else to imul:
-   (('amul', a, b), ('imul', a, b), '!options->has_imul24'),
+   (('amul', a, b), ('imul', a, b), '!options->has_imul24 && !options->has_amul'),
 
    (('umul24', a, b),
     ('imul', ('iand', a, 0xffffff), ('iand', b, 0xffffff)),

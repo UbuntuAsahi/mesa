@@ -270,6 +270,9 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
       }
       break;
    }
+   case nir_intrinsic_load_pixel_coord:
+      info->ps.reads_pixel_coord = true;
+      break;
    case nir_intrinsic_load_frag_coord:
       info->ps.reads_frag_coord_mask |= nir_def_components_read(&instr->def);
       break;
@@ -914,22 +917,8 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
                       const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const uint64_t per_primitive_input_mask = nir->info.inputs_read & nir->info.per_primitive_inputs;
-   const unsigned num_per_primitive_inputs = util_bitcount64(per_primitive_input_mask);
-   const unsigned num_inputs = util_bitcount64(nir->info.inputs_read);
-   assert(num_per_primitive_inputs <= num_inputs);
 
-   info->ps.num_interp = num_inputs;
-   info->ps.num_prim_interp = 0;
-
-   if (pdev->info.gfx_level == GFX10_3) {
-      /* GFX10.3 distinguishes NUM_INTERP and NUM_PRIM_INTERP, but
-       * these are counted together in NUM_INTERP on GFX11.
-       */
-      info->ps.num_interp = num_inputs - num_per_primitive_inputs;
-      info->ps.num_prim_interp = num_per_primitive_inputs;
-   }
-
+   info->ps.num_inputs = util_bitcount64(nir->info.inputs_read);
    info->ps.can_discard = nir->info.fs.uses_discard;
    info->ps.early_fragment_test =
       nir->info.fs.early_fragment_tests ||
@@ -963,6 +952,7 @@ gather_shader_info_fs(const struct radv_device *device, const nir_shader *nir,
       !(uses_persp_or_linear_interp || info->ps.needs_sample_positions || info->ps.reads_frag_shading_rate ||
         info->ps.writes_memory || nir->info.fs.needs_quad_helper_invocations ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) ||
+        BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_PIXEL_COORD) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_POINT_COORD) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_ID) ||
         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_SAMPLE_POS) ||
@@ -1231,6 +1221,7 @@ radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shader *n
       outinfo->writes_viewport_index_per_primitive = per_prim_mask & VARYING_BIT_VIEWPORT;
       outinfo->writes_layer_per_primitive = per_prim_mask & VARYING_BIT_LAYER;
       outinfo->writes_primitive_shading_rate_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_SHADING_RATE;
+      outinfo->export_prim_id_per_primitive = per_prim_mask & VARYING_BIT_PRIMITIVE_ID;
 
       /* Clip/cull distances. */
       outinfo->clip_dist_mask = (1 << nir->info.clip_distance_array_size) - 1;
@@ -1676,7 +1667,7 @@ gfx10_get_ngg_info(const struct radv_device *device, struct radv_shader_info *es
    /* Get scratch LDS usage. */
    const struct radv_shader_info *info = gs_info ? gs_info : es_info;
    const unsigned scratch_lds_size = ac_ngg_get_scratch_lds_size(info->stage, info->workgroup_size, info->wave_size,
-                                                                 pdev->use_ngg_streamout, info->has_ngg_culling);
+                                                                 pdev->use_ngg_streamout, info->has_ngg_culling, false);
    out->lds_size = out->scratch_lds_base + scratch_lds_size;
 
    unsigned workgroup_size =

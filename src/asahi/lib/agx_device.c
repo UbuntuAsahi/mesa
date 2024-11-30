@@ -15,6 +15,7 @@
 #include "agx_scratch.h"
 #include "decode.h"
 #include "glsl_types.h"
+#include "libagx_dgc.h"
 #include "libagx_shaders.h"
 
 #include <fcntl.h>
@@ -393,6 +394,27 @@ const agx_device_ops_t agx_device_drm_ops = {
    .submit = agx_submit,
 };
 
+static uint64_t
+gcd(uint64_t n, uint64_t m)
+{
+   while (n != 0) {
+      uint64_t remainder = m % n;
+      m = n;
+      n = remainder;
+   }
+
+   return m;
+}
+
+static void
+agx_init_timestamps(struct agx_device *dev)
+{
+   uint64_t ts_gcd = gcd(dev->params.timer_frequency_hz, NSEC_PER_SEC);
+
+   dev->timestamp_to_ns.num = NSEC_PER_SEC / ts_gcd;
+   dev->timestamp_to_ns.den = dev->params.timer_frequency_hz / ts_gcd;
+}
+
 bool
 agx_open_device(void *memctx, struct agx_device *dev)
 {
@@ -509,6 +531,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    dev->agxdecode = agxdecode_new_context(dev->shader_base);
 
+   agx_init_timestamps(dev);
+
    util_sparse_array_init(&dev->bo_map, sizeof(struct agx_bo), 512);
    pthread_mutex_init(&dev->bo_map_lock, NULL);
 
@@ -546,11 +570,25 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    glsl_type_singleton_init_or_ref();
    struct blob_reader blob;
-   blob_reader_init(&blob, (void *)libagx_shaders_nir,
-                    sizeof(libagx_shaders_nir));
+   blob_reader_init(&blob, (void *)libagx_0_nir, sizeof(libagx_0_nir));
    dev->libagx = nir_deserialize(memctx, &agx_nir_options, &blob);
 
-   dev->helper = agx_build_helper(dev);
+   if (agx_gather_device_key(dev).needs_g13x_coherency == U_TRISTATE_YES) {
+      dev->libagx_programs = libagx_g13x;
+   } else {
+      dev->libagx_programs = libagx_g13g;
+   }
+
+   if (dev->params.gpu_generation >= 14 && dev->params.num_clusters_total > 1) {
+      dev->chip = AGX_CHIP_G14X;
+   } else if (dev->params.gpu_generation >= 14) {
+      dev->chip = AGX_CHIP_G14G;
+   } else if (dev->params.gpu_generation >= 13 &&
+              dev->params.num_clusters_total > 1) {
+      dev->chip = AGX_CHIP_G13X;
+   } else {
+      dev->chip = AGX_CHIP_G13G;
+   }
 
    return true;
 }
@@ -559,7 +597,6 @@ void
 agx_close_device(struct agx_device *dev)
 {
    ralloc_free((void *)dev->libagx);
-   agx_bo_unreference(dev, dev->helper);
    agx_bo_cache_evict_all(dev);
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);
@@ -707,6 +744,16 @@ agx_debug_fault(struct agx_device *dev, uint64_t addr)
 uint64_t
 agx_get_gpu_timestamp(struct agx_device *dev)
 {
+   if (dev->params.feat_compat & DRM_ASAHI_FEAT_GETTIME) {
+      struct drm_asahi_get_time get_time = {.flags = 0, .extensions = 0};
+
+      int ret = asahi_simple_ioctl(dev, DRM_IOCTL_ASAHI_GET_TIME, &get_time);
+      if (ret) {
+         fprintf(stderr, "DRM_IOCTL_ASAHI_GET_TIME failed: %m\n");
+      } else {
+         return get_time.gpu_timestamp;
+      }
+   }
 #if DETECT_ARCH_AARCH64
    uint64_t ret;
    __asm__ volatile("mrs \t%0, cntvct_el0" : "=r"(ret));
@@ -772,4 +819,29 @@ agx_get_driver_uuid(void *uuid)
 
    assert(SHA1_DIGEST_LENGTH >= UUID_SIZE);
    memcpy(uuid, sha1, UUID_SIZE);
+}
+
+unsigned
+agx_get_num_cores(const struct agx_device *dev)
+{
+   unsigned n = 0;
+
+   for (unsigned cl = 0; cl < dev->params.num_clusters_total; cl++) {
+      n += util_bitcount(dev->params.core_masks[cl]);
+   }
+
+   return n;
+}
+
+struct agx_device_key
+agx_gather_device_key(struct agx_device *dev)
+{
+   bool g13x_coh = (dev->params.gpu_generation == 13 &&
+                    dev->params.num_clusters_total > 1) ||
+                   dev->params.num_dies > 1;
+
+   return (struct agx_device_key){
+      .needs_g13x_coherency = u_tristate_make(g13x_coh),
+      .soft_fault = agx_has_soft_fault(dev),
+   };
 }

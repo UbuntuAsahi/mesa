@@ -389,7 +389,10 @@ st_glsl_to_nir_post_opts(struct st_context *st, struct gl_program *prog,
    char *msg = NULL;
    if (st->allow_st_finalize_nir_twice) {
       st_serialize_base_nir(prog, nir);
-      msg = st_finalize_nir(st, prog, shader_program, nir, true, true, false);
+      st_finalize_nir(st, prog, shader_program, nir, true, false);
+
+      if (screen->finalize_nir)
+         msg = screen->finalize_nir(screen, nir);
    }
 
    if (st->ctx->_Shader->Flags & GLSL_DUMP) {
@@ -737,8 +740,7 @@ st_link_glsl_to_nir(struct gl_context *ctx,
       prog->info.num_abos = old_info.num_abos;
 
       if (prog->info.stage == MESA_SHADER_VERTEX) {
-         if (prog->nir->info.io_lowered &&
-             prog->nir->options->io_options & nir_io_glsl_opt_varyings) {
+         if (prog->nir->info.io_lowered) {
             prog->info.inputs_read = prog->nir->info.inputs_read;
             prog->DualSlotInputs = prog->nir->info.dual_slot_inputs;
          } else {
@@ -882,12 +884,10 @@ st_nir_lower_uniforms(struct st_context *st, nir_shader *nir)
 /* Last third of preparing nir from glsl, which happens after shader
  * variant lowering.
  */
-char *
+void
 st_finalize_nir(struct st_context *st, struct gl_program *prog,
-                struct gl_shader_program *shader_program,
-                nir_shader *nir, bool finalize_by_driver,
-                bool is_before_variants,
-                bool is_draw_shader)
+                struct gl_shader_program *shader_program, nir_shader *nir,
+                bool is_before_variants, bool is_draw_shader)
 {
    struct pipe_screen *screen = st->screen;
 
@@ -910,18 +910,6 @@ st_finalize_nir(struct st_context *st, struct gl_program *prog,
    st_nir_assign_varying_locations(st, nir);
    st_nir_assign_uniform_locations(st->ctx, prog, nir);
 
-   /* Lower load_deref/store_deref of inputs and outputs.
-    * This depends on st_nir_assign_varying_locations.
-    *
-    * TODO: remove this once nir_io_glsl_opt_varyings is enabled by default.
-    */
-   if (!is_draw_shader && nir->options->io_options & nir_io_glsl_lower_derefs &&
-       !(nir->options->io_options & nir_io_glsl_opt_varyings)) {
-      nir_lower_io_passes(nir, false);
-      NIR_PASS(_, nir, nir_remove_dead_variables,
-                 nir_var_shader_in | nir_var_shader_out, NULL);
-   }
-
    /* Set num_uniforms in number of attribute slots (vec4s) */
    nir->num_uniforms = DIV_ROUND_UP(prog->Parameters->NumParameterValues, 4);
 
@@ -938,12 +926,6 @@ st_finalize_nir(struct st_context *st, struct gl_program *prog,
    st_nir_lower_samplers(screen, nir, shader_program, prog);
    if (!is_draw_shader && !screen->get_param(screen, PIPE_CAP_NIR_IMAGES_AS_DEREF))
       NIR_PASS(_, nir, gl_nir_lower_images, false);
-
-   char *msg = NULL;
-   if (!is_draw_shader && finalize_by_driver && screen->finalize_nir)
-      msg = screen->finalize_nir(screen, nir);
-
-   return msg;
 }
 
 /**

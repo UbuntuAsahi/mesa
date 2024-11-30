@@ -8,9 +8,9 @@
 #pragma once
 
 #include "asahi/lib/agx_device.h"
+#include "util/rwlock.h"
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
-#include "util/rwlock.h"
 #include "agx_bg_eot.h"
 #include "agx_pack.h"
 #include "agx_scratch.h"
@@ -83,7 +83,6 @@ struct hk_device {
 
    struct {
       struct agx_bo *bo;
-      struct agx_usc_sampler_packed txf_sampler;
       struct agx_usc_uniform_packed image_heap;
       uint64_t null_sink, zero_sink;
       uint64_t geometry_state;

@@ -17,7 +17,7 @@ copy_to_image_use_gfx_pipeline(struct panvk_device *dev,
       return true;
 
    /* Writes to AFBC images must go through the graphics pipeline. */
-   if (drm_is_afbc(dst_img->pimage.layout.modifier))
+   if (drm_is_afbc(dst_img->vk.drm_format_mod))
       return true;
 
    return false;
@@ -65,12 +65,14 @@ panvk_per_arch(cmd_meta_compute_end)(
    if (memcmp(cmdbuf->state.push_constants.data, save_ctx->push_constants.data,
               sizeof(cmdbuf->state.push_constants.data))) {
       cmdbuf->state.push_constants = save_ctx->push_constants;
-      cmdbuf->state.compute.push_uniforms = 0;
-      cmdbuf->state.gfx.push_uniforms = 0;
+      compute_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
+      gfx_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
    }
 
    cmdbuf->state.compute.shader = save_ctx->cs.shader;
    cmdbuf->state.compute.cs.desc = save_ctx->cs.desc;
+   compute_state_set_dirty(cmdbuf, CS);
+   compute_state_set_dirty(cmdbuf, DESC_STATE);
 }
 
 void
@@ -101,6 +103,12 @@ panvk_per_arch(cmd_meta_gfx_start)(
    save_ctx->dyn_state.all = cmdbuf->vk.dynamic_graphics_state;
    save_ctx->dyn_state.vi = cmdbuf->state.gfx.dynamic.vi;
    save_ctx->dyn_state.sl = cmdbuf->state.gfx.dynamic.sl;
+   save_ctx->occlusion_query = cmdbuf->state.gfx.occlusion_query;
+
+   /* Ensure occlusion queries are disabled */
+   cmdbuf->state.gfx.occlusion_query.ptr = 0;
+   cmdbuf->state.gfx.occlusion_query.mode = MALI_OCCLUSION_MODE_DISABLED;
+   gfx_state_set_dirty(cmdbuf, OQ);
 }
 
 void
@@ -122,8 +130,8 @@ panvk_per_arch(cmd_meta_gfx_end)(
    if (memcmp(cmdbuf->state.push_constants.data, save_ctx->push_constants.data,
               sizeof(cmdbuf->state.push_constants.data))) {
       cmdbuf->state.push_constants = save_ctx->push_constants;
-      cmdbuf->state.compute.push_uniforms = 0;
-      cmdbuf->state.gfx.push_uniforms = 0;
+      compute_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
+      gfx_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
    }
 
    cmdbuf->state.gfx.fs.shader = save_ctx->fs.shader;
@@ -136,14 +144,24 @@ panvk_per_arch(cmd_meta_gfx_end)(
    cmdbuf->state.gfx.vs.attribs = 0;
    cmdbuf->state.gfx.vs.attrib_bufs = 0;
    cmdbuf->state.gfx.fs.rsd = 0;
+#else
+   cmdbuf->state.gfx.fs.desc.res_table = 0;
+   cmdbuf->state.gfx.vs.desc.res_table = 0;
 #endif
 
    cmdbuf->vk.dynamic_graphics_state = save_ctx->dyn_state.all;
    cmdbuf->state.gfx.dynamic.vi = save_ctx->dyn_state.vi;
    cmdbuf->state.gfx.dynamic.sl = save_ctx->dyn_state.sl;
+   cmdbuf->state.gfx.occlusion_query = save_ctx->occlusion_query;
    memcpy(cmdbuf->vk.dynamic_graphics_state.dirty,
           cmdbuf->vk.dynamic_graphics_state.set,
           sizeof(cmdbuf->vk.dynamic_graphics_state.set));
+   gfx_state_set_dirty(cmdbuf, VS);
+   gfx_state_set_dirty(cmdbuf, FS);
+   gfx_state_set_dirty(cmdbuf, VB);
+   gfx_state_set_dirty(cmdbuf, OQ);
+   gfx_state_set_dirty(cmdbuf, DESC_STATE);
+   gfx_state_set_dirty(cmdbuf, RENDER_STATE);
 }
 
 VKAPI_ATTR void VKAPI_CALL

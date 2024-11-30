@@ -649,6 +649,7 @@ instruction_requires_packed_data(fs_inst *inst)
    case FS_OPCODE_DDY_FINE:
    case FS_OPCODE_DDY_COARSE:
    case SHADER_OPCODE_QUAD_SWIZZLE:
+   case SHADER_OPCODE_QUAD_SWAP:
       return true;
    default:
       return false;
@@ -825,9 +826,8 @@ try_copy_propagate(const brw_compiler *compiler, fs_inst *inst,
     * destination of the copy, and simply replacing the sources would give a
     * program with different semantics.
     */
-   if ((brw_type_size_bits(entry->dst.type) < brw_type_size_bits(inst->src[arg].type) ||
-        entry->is_partial_write) &&
-       inst->opcode != BRW_OPCODE_MOV) {
+   if (brw_type_size_bits(entry->dst.type) < brw_type_size_bits(inst->src[arg].type) ||
+       (entry->is_partial_write && inst->opcode != BRW_OPCODE_MOV)) {
       return false;
    }
 
@@ -1217,6 +1217,7 @@ try_constant_propagate_value(brw_reg val, brw_reg_type dst_type,
    case BRW_OPCODE_LRP:
    case FS_OPCODE_PACK_HALF_2x16_SPLIT:
    case SHADER_OPCODE_SHUFFLE:
+   case SHADER_OPCODE_BALLOT:
       inst->src[arg] = val;
       progress = true;
       break;
@@ -1506,8 +1507,7 @@ try_copy_propagate_def(const brw_compiler *compiler,
     * destination of the copy, and simply replacing the sources would give a
     * program with different semantics.
     */
-   if (inst->opcode != BRW_OPCODE_MOV &&
-       brw_type_size_bits(def->dst.type) <
+   if (brw_type_size_bits(def->dst.type) <
        brw_type_size_bits(inst->src[arg].type))
       return false;
 

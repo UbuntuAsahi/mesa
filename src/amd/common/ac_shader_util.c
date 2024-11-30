@@ -87,7 +87,6 @@ void ac_set_nir_options(struct radeon_info *info, bool use_llvm,
    options->has_fmulz = true;
    options->has_msad = true;
    options->has_shfr32 = true;
-   options->use_interpolated_input_intrinsics = true;
    options->lower_int64_options = nir_lower_imul64 | nir_lower_imul_high64 | nir_lower_imul_2x32_64 | nir_lower_divmod64 |
                                   nir_lower_minmax64 | nir_lower_iabs64 | nir_lower_iadd_sat64 | nir_lower_conv64;
    options->divergence_analysis_options = nir_divergence_view_index_uniform;
@@ -96,11 +95,13 @@ void ac_set_nir_options(struct radeon_info *info, bool use_llvm,
    options->support_16bit_alu = info->gfx_level >= GFX8;
    options->vectorize_vec2_16bit = info->has_packed_math_16bit;
    options->discard_is_demote = true;
+   options->optimize_sample_mask_in = true;
    options->io_options = nir_io_has_flexible_input_interpolation_except_flat |
                          (info->gfx_level >= GFX8 ? nir_io_16bit_input_output_support : 0) |
                          nir_io_prefer_scalar_fs_inputs |
                          nir_io_mix_convergent_flat_with_interpolated |
-                         nir_io_vectorizer_ignores_types;
+                         nir_io_vectorizer_ignores_types |
+                         nir_io_compaction_rotates_color_channels;
    options->scalarize_ddx = true;
    options->skip_lower_packing_ops =
       BITFIELD_BIT(nir_lower_packing_op_unpack_64_2x32) |

@@ -76,13 +76,6 @@ struct hk_shader_info {
       } vs;
 
       struct {
-         /* Local workgroup size */
-         uint16_t local_size[3];
-
-         uint8_t _pad[26];
-      } cs;
-
-      struct {
          struct agx_interp_info interp;
          struct agx_fs_epilog_link_info epilog_key;
 
@@ -389,13 +382,6 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, gl_shader_stage stage,
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,
                                      size_t data_size);
-
-static inline struct hk_shader *
-hk_meta_kernel(struct hk_device *dev, hk_internal_builder_t builder, void *data,
-               size_t data_size)
-{
-   return hk_only_variant(hk_meta_shader(dev, builder, data, data_size));
-}
 
 struct hk_passthrough_gs_key {
    /* Bit mask of outputs written by the VS/TES, to be passed through */

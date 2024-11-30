@@ -6,9 +6,9 @@
  */
 #include "hk_physical_device.h"
 
+#include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
-#include "asahi/lib/agx_nir_passes.h"
 #include "util/disk_cache.h"
 #include "util/mesa-sha1.h"
 #include "git_sha1.h"
@@ -21,10 +21,8 @@
 #include "hk_wsi.h"
 
 #include "util/simple_mtx.h"
-#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
-#include "vk_device.h"
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 
@@ -139,7 +137,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_conditional_rendering = false,
       .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
-      .EXT_depth_bias_control = false,
+      .EXT_depth_bias_control = true,
       .EXT_depth_clip_control = false,
       .EXT_depth_clip_enable = true,
       .EXT_descriptor_indexing = true,
@@ -440,10 +438,10 @@ hk_get_device_features(
       .customBorderColorWithoutFormat = true,
 
       /* VK_EXT_depth_bias_control */
-      .depthBiasControl = false,
-      .leastRepresentableValueForceUnormRepresentation = false,
+      .depthBiasControl = true,
+      .leastRepresentableValueForceUnormRepresentation = true,
       .floatRepresentation = false,
-      .depthBiasExact = false,
+      .depthBiasExact = true,
 
       /* VK_EXT_depth_clip_control */
       .depthClipControl = false,
@@ -478,7 +476,7 @@ hk_get_device_features(
       .extendedDynamicState3ConservativeRasterizationMode = false,
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3DepthClipEnable = true,
-      .extendedDynamicState3SampleLocationsEnable = false,
+      .extendedDynamicState3SampleLocationsEnable = true,
       .extendedDynamicState3ColorBlendAdvanced = false,
       .extendedDynamicState3ProvokingVertexMode = true,
       .extendedDynamicState3LineRasterizationMode = true,
@@ -617,7 +615,16 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxImageArrayLayers = 2048,
       .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE,
       .maxUniformBufferRange = 65536,
-      .maxStorageBufferRange = UINT32_MAX,
+
+      /* From a hardware perspective, storage buffers are lowered to global
+       * address arithmetic so there is no hard limit. However, making efficient
+       * use of the hardware addressing modes depends on no signed wrapping in
+       * any `amul` operations, which are themselves bounded by
+       * maxStorageBufferRange. Therefore, limit storage buffers to INT32_MAX
+       * bytes instead of UINT32_MAX. This is believed to be acceptable for
+       * Direct3D.
+       */
+      .maxStorageBufferRange = INT32_MAX,
       .maxPushConstantsSize = HK_MAX_PUSH_SIZE,
       .maxMemoryAllocationCount = 4096,
       .maxSamplerAllocationCount = 4000,
@@ -748,7 +755,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxMultiviewViewCount = HK_MAX_MULTIVIEW_VIEW_COUNT,
       .maxMultiviewInstanceIndex = UINT32_MAX,
       .maxPerSetDescriptors = UINT32_MAX,
-      .maxMemoryAllocationSize = (1u << 31),
+      .maxMemoryAllocationSize = (1ull << 37),
 
       /* Vulkan 1.2 properties */
       .supportedDepthResolveModes =

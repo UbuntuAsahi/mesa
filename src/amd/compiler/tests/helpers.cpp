@@ -382,6 +382,8 @@ finish_isel_test(enum ac_hw_stage hw_stage, unsigned wave_size)
 
    select_program(program.get(), 1, &nb->shader, &config, &options, &info, &args);
    dominator_tree(program.get());
+   if (program->should_repair_ssa)
+      repair_ssa(program.get());
    lower_phis(program.get());
 
    ralloc_free(nb->shader);
@@ -528,18 +530,39 @@ fmax(Temp src0, Temp src1, Builder b)
    return b.vop2(aco_opcode::v_max_f32, b.def(v1), src0, src1);
 }
 
+static Temp
+extract(Temp src, unsigned idx, unsigned size, bool sign_extend, Builder b)
+{
+   if (src.type() == RegType::sgpr)
+      return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), bld.def(s1, scc), src,
+                      Operand::c32(idx), Operand::c32(size), Operand::c32(sign_extend));
+   else
+      return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
+                      Operand::c32(size), Operand::c32(sign_extend));
+}
+
 Temp
 ext_ushort(Temp src, unsigned idx, Builder b)
 {
-   return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
-                   Operand::c32(16u), Operand::c32(false));
+   return extract(src, idx, 16, false, b);
+}
+
+Temp
+ext_sshort(Temp src, unsigned idx, Builder b)
+{
+   return extract(src, idx, 16, true, b);
 }
 
 Temp
 ext_ubyte(Temp src, unsigned idx, Builder b)
 {
-   return b.pseudo(aco_opcode::p_extract, b.def(src.regClass()), src, Operand::c32(idx),
-                   Operand::c32(8u), Operand::c32(false));
+   return extract(src, idx, 8, false, b);
+}
+
+Temp
+ext_sbyte(Temp src, unsigned idx, Builder b)
+{
+   return extract(src, idx, 8, true, b);
 }
 
 void

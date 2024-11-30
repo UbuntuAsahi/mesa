@@ -470,9 +470,9 @@ lower_fb_write_logical_send(const fs_builder &bld, fs_inst *inst,
                         0 /* coarse_rt_write */);
 
    brw_reg desc = brw_imm_ud(0);
-   if (prog_data->coarse_pixel_dispatch == BRW_ALWAYS) {
+   if (prog_data->coarse_pixel_dispatch == INTEL_ALWAYS) {
       inst->desc |= (1 << 18);
-   } else if (prog_data->coarse_pixel_dispatch == BRW_SOMETIMES) {
+   } else if (prog_data->coarse_pixel_dispatch == INTEL_SOMETIMES) {
       STATIC_ASSERT(INTEL_MSAA_FLAG_COARSE_RT_WRITES == (1 << 18));
       const fs_builder &ubld = bld.exec_all().group(8, 0);
       desc = ubld.vgrf(BRW_TYPE_UD);
@@ -1589,9 +1589,13 @@ emit_a64_oword_block_header(const fs_builder &bld, const brw_reg &addr)
    brw_reg expanded_addr = addr;
    if (addr.file == UNIFORM) {
       /* We can't do stride 1 with the UNIFORM file, it requires stride 0 */
-      expanded_addr = ubld.vgrf(BRW_TYPE_UQ);
-      expanded_addr.stride = 0;
-      ubld.MOV(expanded_addr, retype(addr, BRW_TYPE_UQ));
+      fs_builder ubld1 = ubld.group(1, 0);
+
+      brw_reg tmp = ubld1.vgrf(BRW_TYPE_UQ);
+      ubld1.UNDEF(tmp);
+
+      expanded_addr = component(tmp, 0);
+      ubld1.MOV(expanded_addr, retype(addr, BRW_TYPE_UQ));
    }
 
    brw_reg header = ubld.vgrf(BRW_TYPE_UD);
@@ -2103,9 +2107,9 @@ lower_interpolator_logical_send(const fs_builder &bld, fs_inst *inst,
                             false /* coarse_pixel_rate */,
                             inst->exec_size, inst->group);
 
-   if (wm_prog_data->coarse_pixel_dispatch == BRW_ALWAYS) {
+   if (wm_prog_data->coarse_pixel_dispatch == INTEL_ALWAYS) {
       desc_imm |= (1 << 15);
-   } else if (wm_prog_data->coarse_pixel_dispatch == BRW_SOMETIMES) {
+   } else if (wm_prog_data->coarse_pixel_dispatch == INTEL_SOMETIMES) {
       STATIC_ASSERT(INTEL_MSAA_FLAG_COARSE_PI_MSG == (1 << 15));
       brw_reg orig_desc = desc;
       const fs_builder &ubld = bld.exec_all().group(8, 0);

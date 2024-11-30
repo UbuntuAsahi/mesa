@@ -752,7 +752,8 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
    MESA_TRACE_FUNC();
 
    NIR_PASS_V(s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
-              ir3_glsl_type_size, nir_lower_io_lower_64bit_to_32);
+              ir3_glsl_type_size, nir_lower_io_lower_64bit_to_32 |
+              nir_lower_io_use_interpolated_input_intrinsics);
 
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
       /* NOTE: lower load_barycentric_at_sample first, since it
@@ -763,6 +764,11 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
       NIR_PASS_V(s, ir3_nir_move_varying_inputs);
       NIR_PASS_V(s, nir_lower_fb_read);
       NIR_PASS_V(s, ir3_nir_lower_layer_id);
+      NIR_PASS_V(s, ir3_nir_lower_frag_shading_rate);
+   }
+
+   if (s->info.stage == MESA_SHADER_VERTEX || s->info.stage == MESA_SHADER_GEOMETRY) {
+      NIR_PASS_V(s, ir3_nir_lower_primitive_shading_rate);
    }
 
    if (compiler->gen >= 6 && s->info.stage == MESA_SHADER_FRAGMENT &&
@@ -968,7 +974,7 @@ nir_mem_access_size_align
 ir3_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
                  uint8_t bit_size, uint32_t align,
                  uint32_t align_offset, bool offset_is_const,
-                 const void *cb_data)
+                 enum gl_access_qualifier access, const void *cb_data)
 {
    align = nir_combined_align(align, align_offset);
    assert(util_is_power_of_two_nonzero(align));
@@ -991,6 +997,7 @@ ir3_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
       .num_components = MAX2(1, MIN2(bytes / (bit_size / 8), 4)),
       .bit_size = bit_size,
       .align = bit_size / 8,
+      .shift = nir_mem_access_shift_method_scalar,
    };
 }
 
@@ -1065,7 +1072,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
       progress |= OPT(s, nir_lower_clip_vs, so->key.ucp_enables, false, true, NULL);
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (so->key.ucp_enables && !so->compiler->has_clip_cull)
-         progress |= OPT(s, nir_lower_clip_fs, so->key.ucp_enables, true);
+         progress |= OPT(s, nir_lower_clip_fs, so->key.ucp_enables, true, true);
    }
 
    /* Move large constant variables to the constants attached to the NIR
