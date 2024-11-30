@@ -1,7 +1,7 @@
 Source: mesa-asahi
 Section: graphics
 Priority: optional
-Maintainer: NoisyCoil <noisycoil@tutanota.com>
+Maintainer: Debian Bananas Team <team+bananas@tracker.debian.org>
 Standards-Version: 4.1.4
 Build-Depends:
  debhelper-compat (= 13),
@@ -66,8 +66,8 @@ Build-Depends:
  librust-paste-dev [@NVK_ARCHS@],
  librust-syn-dev (>= 2.0.68) [@NVK_ARCHS@],
 Rules-Requires-Root: no
-Vcs-Git: https://salsa.debian.org/NoisyCoil/mesa-asahi.git
-Vcs-Browser: https://salsa.debian.org/NoisyCoil/mesa-asahi
+Vcs-Git: https://salsa.debian.org/bananas-team/wip/mesa-asahi.git
+Vcs-Browser: https://salsa.debian.org/bananas-team/wip/mesa-asahi
 Homepage: https://mesa3d.org/
 
 Package: libxatracker2
