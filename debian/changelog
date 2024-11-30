@@ -1,10 +1,10 @@
-mesa-asahi (24.3.0~git20241111.5b912d7-3) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241111.5b912d7-3) UNRELEASED; urgency=medium
 
   * d/control: add Breaks/Replaces to package libgbm1
 
  -- NoisyCoil <noisycoil@tutanota.com>  Thu, 14 Nov 2024 13:18:10 +0100
 
-mesa-asahi (24.3.0~git20241111.5b912d7-2) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241111.5b912d7-2) UNRELEASED; urgency=medium
 
   * Import packaging changes from debian/24.3.0_rc1-1
     - Move dri_gbm.so to libgbm1 binary package
@@ -13,38 +13,38 @@ mesa-asahi (24.3.0~git20241111.5b912d7-2) unstable; urgency=medium
 
  -- NoisyCoil <noisycoil@tutanota.com>  Thu, 14 Nov 2024 08:38:32 +0100
 
-mesa-asahi (24.3.0~git20241111.5b912d7-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241111.5b912d7-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241111)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Tue, 12 Nov 2024 00:31:13 +0100
 
-mesa-asahi (24.3.0~git20241109.81b422f-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241109.81b422f-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241109)
   * d/control: add min versions for directx-headers and libvulkan
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 09 Nov 2024 17:32:10 +0100
 
-mesa-asahi (24.3.0~git20241108.1f021b3-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241108.1f021b3-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241108)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 09 Nov 2024 00:55:46 +0100
 
-mesa-asahi (24.3.0~git20241104.d534fd6-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241104.d534fd6-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241104)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Mon, 04 Nov 2024 17:51:23 +0100
 
-mesa-asahi (24.3.0~git20241101.d5c3ba7-1) experimental; urgency=medium
+mesa-asahi (24.3.0~git20241101.d5c3ba7-1) UNRELEASED; urgency=medium
 
   * Release to unstable(-asahi)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sun, 03 Nov 2024 22:46:02 +0100
 
-mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) experimental; urgency=medium
+mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241101)
   * d/patches:
@@ -58,39 +58,39 @@ mesa-asahi (24.3.0~git20241101.d5c3ba7-1~exp1) experimental; urgency=medium
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sun, 03 Nov 2024 21:54:44 +0100
 
-mesa-asahi (24.3.0~git20241006.6e004ce-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20241006.6e004ce-1) UNRELEASED; urgency=medium
 
   * Release to unstable(-asahi)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 05 Oct 2024 22:34:52 +0200
 
-mesa-asahi (24.3.0~git20241006.6e004ce-1~exp1) experimental; urgency=medium
+mesa-asahi (24.3.0~git20241006.6e004ce-1~exp1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20241006)
   * d/control: fix Vcs-* fields, set myself as Maintainer
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 05 Oct 2024 21:18:09 +0200
 
-mesa-asahi (24.3.0~git20240930.6e70429-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20240930.6e70429-1) UNRELEASED; urgency=medium
 
   * Release to unstable(-asahi)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Tue, 01 Oct 2024 19:20:11 +0200
 
-mesa-asahi (24.3.0~git20240930.6e70429-1~exp1) experimental; urgency=medium
+mesa-asahi (24.3.0~git20240930.6e70429-1~exp1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20240930)
   * d/rules: build asahi vulkan drivers
 
  -- NoisyCoil <noisycoil@tutanota.com>  Tue, 01 Oct 2024 14:13:39 +0200
 
-mesa-asahi (24.3.0~git20240925.04a6592-1) unstable; urgency=medium
+mesa-asahi (24.3.0~git20240925.04a6592-1) UNRELEASED; urgency=medium
 
   * Release to unstable(-asahi)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 27 Sep 2024 12:07:05 +0200
 
-mesa-asahi (24.3.0~git20240925.04a6592-1~exp1) experimental; urgency=medium
+mesa-asahi (24.3.0~git20240925.04a6592-1~exp1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20240925)
   * Import some packaging changes from tag debian/24.2.3-1
@@ -99,26 +99,26 @@ mesa-asahi (24.3.0~git20240925.04a6592-1~exp1) experimental; urgency=medium
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 27 Sep 2024 02:32:06 +0200
 
-mesa-asahi (24.2.0~git20240727.6d00b02-2) unstable; urgency=medium
+mesa-asahi (24.2.0~git20240727.6d00b02-2) UNRELEASED; urgency=medium
 
   * Release to unstable(-asahi)
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 09 Aug 2024 10:51:54 +0200
 
-mesa-asahi (24.2.0~git20240727.6d00b02-2~exp1) experimental; urgency=medium
+mesa-asahi (24.2.0~git20240727.6d00b02-2~exp1) UNRELEASED; urgency=medium
 
   * Import some packaging changes from tag debian/24.2.0_rc4-1
 
  -- NoisyCoil <noisycoil@tutanota.com>  Thu, 08 Aug 2024 17:08:16 +0200
 
-mesa-asahi (24.2.0~git20240727.6d00b02-1) unstable; urgency=medium
+mesa-asahi (24.2.0~git20240727.6d00b02-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20240727)
     - GPU UAPI bump: needs linux-asahi 6.9.12-1 or higher
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sun, 28 Jul 2024 22:25:07 +0200
 
-mesa-asahi (24.2.0~git20240725.15dc78c-1) unstable; urgency=medium
+mesa-asahi (24.2.0~git20240725.15dc78c-1) UNRELEASED; urgency=medium
 
   * New asahi release (asahi-20240725)
   * Build using LLVM 18
@@ -128,7 +128,7 @@ mesa-asahi (24.2.0~git20240725.15dc78c-1) unstable; urgency=medium
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 26 Jul 2024 01:08:15 +0200
 
-mesa-asahi (24.2.0~git20240527.878b415-2) unstable; urgency=medium
+mesa-asahi (24.2.0~git20240527.878b415-2) UNRELEASED; urgency=medium
 
   * Change source package name
   * d: import debian files from debian-unstable
@@ -179,7 +179,7 @@ mesa (24.1.1-1) unstable; urgency=medium
 
  -- Timo Aaltonen <tjaalton@debian.org>  Mon, 10 Jun 2024 14:39:17 +0300
 
-mesa (24.2.0~git20240527.878b415-1asahi1) unstable; urgency=medium
+mesa (24.2.0~git20240527.878b415-1asahi1) UNRELEASED; urgency=medium
 
   * New upstream version.
   * d/control: add python3-pycparser to Build-Depends
@@ -188,7 +188,7 @@ mesa (24.2.0~git20240527.878b415-1asahi1) unstable; urgency=medium
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sat, 01 Jun 2024 11:54:32 +0200
 
-mesa (24.1.0~git20240228.eebfe84-1asahi1) unstable; urgency=medium
+mesa (24.1.0~git20240228.eebfe84-1asahi1) UNRELEASED; urgency=medium
 
   * Change VCS URLs
   * Build with rust-linux and LLVM 16
@@ -229,7 +229,7 @@ mesa (24.0.0-2) experimental; urgency=medium
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 08 Feb 2024 17:20:59 +0200
 
-mesa (24.0.0~git20231210.bc4fa49-1asahi1) testing; urgency=medium
+mesa (24.0.0~git20231210.bc4fa49-1asahi1) UNRELEASED; urgency=medium
 
   * Build the Asahi driver on i386, amd64 and arm64
   * Build using LLVM 16, rustc 1.68.2 and bindgen 0.62
