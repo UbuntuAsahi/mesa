@@ -1,0 +1,139 @@
+---
+include:
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/recipes/debian.yml
+
+variables:
+  # No need to add the +salsaci suffix to package versions
+  SALSA_CI_DISABLE_VERSION_BUMP: 1
+  # Disable 'Architecture: all' builds: there are none in mesa
+  SALSA_CI_DISABLE_BUILD_PACKAGE_ALL: 1
+  # Disable i386 builds: we don't need them and can't natively build them
+  SALSA_CI_DISABLE_BUILD_PACKAGE_I386: 1
+  # Disable arm64 cross-builds: we are happy enough with native builds
+  SALSA_CI_DISABLE_CROSSBUILD_ARM64: 1
+  # Temporarily disable autopkgtests: arm64 LXD containers are currently not built
+  # https://salsa.debian.org/salsa-ci-team/autopkgtest-lxc/-/commit/5ab5e8a9613b8e25f0d888f2f70b11a10f8dd396
+  SALSA_CI_DISABLE_AUTOPKGTEST: 1
+  # Disable piuparts: it requires configuring DinD on bananas.d.n
+  SALSA_CI_DISABLE_PIUPARTS: 1
+  # Disable blhc: known to fail with rust code, see e.g. #1037521
+  SALSA_CI_DISABLE_BLHC: 1
+  # Disable reprotest: setarch fails on bananas.d.n
+  SALSA_CI_DISABLE_REPROTEST: 1
+  # Suppress lintian tag: not-our-bug, should be fixed or overridden in mainline
+  # Debian mesa (affects libteflon.so)
+  SALSA_CI_LINTIAN_SUPPRESS_TAGS: "arch-dependent-file-not-in-arch-specific-directory"
+
+# Copied from https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
+.get-target-distribution: &get-target-distribution
+  - dist=$(dpkg-parsechangelog --show-field=distribution || echo UNRELEASED)
+  # if dist is UNRELEASED, try to use 'dch' to guess a sane default.
+  # Use oracular by default if VENDOR's value is `ubuntu`.
+  - clbak="/tmp/debian.changelog"
+  - cp debian/changelog "${clbak}"
+  - |
+    if [ "$VENDOR" = ubuntu ] && [ "${dist}" = UNRELEASED ]
+    then
+      dist=oracular
+    elif [ "${dist}" = UNRELEASED ]
+    then
+      dch --release foo || true; dist=$(dpkg-parsechangelog --show-field=distribution || echo UNRELEASED); cat "${clbak}" >debian/changelog;
+    fi
+  - rm -rf "${clbak}"
+  # strip away UNRELEASED prefix/suffix/...
+  - dist=${dist#UNRELEASED-}
+  - dist=${dist%-UNRELEASED}
+  - dist=${dist%-security}
+  - dist=${dist#UNRELEASED}
+  - test -n "${dist}" || dist=$DEFAULT_RELEASE
+
+  - echo "RELEASE_FROM_CHANGELOG=${dist}" | tee ${CI_PROJECT_DIR}/salsa.env
+
+extract-source:
+  # Use a custom source extraction script
+  script:
+    - mkdir -vp ${WORKING_DIR}
+
+    - git remote add upstream $(grep 'Repository:' debian/upstream/metadata | cut -d' ' -f2)
+
+    - DEB_UPSTREAM_VERSION=$(dpkg-parsechangelog -SVersion | cut -d- -f-1)
+    - UPSTREAM_TAG="asahi-$(echo "$DEB_UPSTREAM_VERSION" | sed 's/.*git\([0-9]\+\)\..*/\1/')"
+
+    - git fetch --depth=1 upstream tag "${UPSTREAM_TAG}"
+
+    - |
+      git archive -o ../mesa-asahi_${DEB_UPSTREAM_VERSION}.orig.tar.gz --prefix mesa-asahi-${DEB_UPSTREAM_VERSION}/ ${UPSTREAM_TAG}
+      cp -v ../*orig*tar* ${WORKING_DIR}
+
+      gbp buildpackage \
+          --git-ignore-branch \
+          --git-ignore-new \
+          --git-no-create-orig \
+          --git-export-dir=${WORKING_DIR} \
+          --no-check-builddeps \
+          --git-builder=/bin/true \
+          --git-no-pbuilder \
+          --git-no-hooks \
+          --git-no-purge \
+          ${SALSA_CI_GBP_BUILDPACKAGE_ARGS} |& filter-output
+
+    - ls -lh ${WORKING_DIR}
+    - cd ${WORKING_DIR}
+    - DEBIANIZED_SOURCE=$(find . -maxdepth 3 -wholename "*/debian/changelog" | sed -e 's%/\w*/\w*$%%')
+    - |
+      if [ ! "${DEBIANIZED_SOURCE}" ] ; then
+        echo "Error: No valid debianized source tree found."
+        exit 1
+      fi
+
+    - mv -v ${DEBIANIZED_SOURCE} ${SOURCE_DIR}
+
+    - cd "${SOURCE_DIR}"
+    - *get-target-distribution
+    - cd "${OLDPWD}"
+
+    # Print size of artifacts
+    - du -sh
+
+    # Warn if job artifacts size limit exceeded
+    - |
+      if [ "$(du -s | cut -f1)" -gt ${SALSA_CI_MAX_ARTIFACTS_SIZE} ]; then
+        echo -e "\e[91m WARNING: job artifacts exceed the size limit of $(( ${SALSA_CI_MAX_ARTIFACTS_SIZE} / 1024 ))MB which may prevent the job to succeed.\e[39m"
+      fi
+
+build:
+  image: ${SALSA_CI_IMAGES}/arm64v8/base:${RELEASE}
+  variables:
+    BUILD_ARCH: 'arm64'
+  tags:
+    - arm64
+
+autopkgtest:
+  image: ${SALSA_CI_IMAGES}/arm64v8/autopkgtest
+  tags:
+    - arm64
+
+reprotest:
+  image: ${SALSA_CI_IMAGES}/arm64v8/reprotest:latest
+  tags:
+    - arm64
+
+piuparts:
+  image: ${SALSA_CI_IMAGES}/arm64v8/piuparts:latest
+  variables:
+    SALSA_CI_IMAGES_BASE: ${SALSA_CI_IMAGES}/arm64v8/base:${RELEASE}
+  tags:
+    - arm64
+
+blhc:
+  image: ${SALSA_CI_IMAGES}/arm64v8/blhc:latest
+  tags:
+    - arm64
+
+test-build-any:
+  image: ${SALSA_CI_IMAGES}/arm64v8/base:${RELEASE}
+  variables:
+    BUILD_ARCH: 'arm64'
+  tags:
+    - arm64
+
