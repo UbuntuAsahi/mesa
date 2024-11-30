@@ -1,3 +1,9 @@
+mesa-asahi (25.0.0~git20241128.0c8c82f-1) UNRELEASED; urgency=medium
+
+  * New upstream release (asahi-20241128)
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sat, 30 Nov 2024 18:45:21 +0100
+
 mesa-asahi (24.3.0~git20241111.5b912d7-3) UNRELEASED; urgency=medium
 
   * d/control: add Breaks/Replaces to package libgbm1
