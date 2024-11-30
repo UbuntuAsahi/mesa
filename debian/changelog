@@ -1,8 +1,12 @@
-mesa-asahi (25.0.0~git20241128.0c8c82f-1) UNRELEASED; urgency=medium
+mesa-asahi (25.0.0~git20241128.0c8c82f-1) unstable-bananas; urgency=medium
 
   * New upstream release (asahi-20241128)
+  * d/control: set Maintainer to Bananas Team and Vcs fields to
+    team's repository
+  * d/gbp.conf: change debian-branch and upstream-tag
+  * d/salsa-ci.yml: set up Salsa CI
 
- -- NoisyCoil <noisycoil@tutanota.com>  Sat, 30 Nov 2024 18:45:21 +0100
+ -- NoisyCoil <noisycoil@tutanota.com>  Sat, 30 Nov 2024 23:38:59 +0100
 
 mesa-asahi (24.3.0~git20241111.5b912d7-3) UNRELEASED; urgency=medium
 
