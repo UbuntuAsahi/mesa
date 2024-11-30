@@ -20,9 +20,13 @@ variables:
   SALSA_CI_DISABLE_BLHC: 1
   # Disable reprotest: setarch fails on bananas.d.n
   SALSA_CI_DISABLE_REPROTEST: 1
-  # Suppress lintian tag: not-our-bug, should be fixed or overridden in mainline
-  # Debian mesa (affects libteflon.so)
-  SALSA_CI_LINTIAN_SUPPRESS_TAGS: "arch-dependent-file-not-in-arch-specific-directory"
+  # Suppress lintian tags:
+  # - arch-dependent-file-not-in-arch-specific-directory: not-our-bug, should be
+  #   fixed or overridden in mainline Debian mesa (affects libteflon.so)
+  # - bad-distribution-in-changes-file: cannot be overridden (bug #575400)
+  SALSA_CI_LINTIAN_SUPPRESS_TAGS: "arch-dependent-file-not-in-arch-specific-directory,bad-distribution-in-changes-file"
+  # Set release to unstable: d/changelog uses unstable-bananas for releases
+  RELEASE: "unstable"
 
 # Copied from https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
 .get-target-distribution: &get-target-distribution
