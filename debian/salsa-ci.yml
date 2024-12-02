@@ -62,12 +62,12 @@ extract-source:
     - git remote add upstream $(grep 'Repository:' debian/upstream/metadata | cut -d' ' -f2)
 
     - DEB_UPSTREAM_VERSION=$(dpkg-parsechangelog -SVersion | cut -d- -f-1)
-    - UPSTREAM_TAG="asahi-$(echo "$DEB_UPSTREAM_VERSION" | sed 's/.*git\([0-9]\+\)\..*/\1/')"
+    - UPSTREAM_COMMIT="$(echo "$DEB_UPSTREAM_VERSION" | rev | cut -d. -f-1 | rev)"
 
-    - git fetch --depth=1 upstream tag "${UPSTREAM_TAG}"
+    - git fetch upstream main
 
     - |
-      git archive -o ../mesa-asahi_${DEB_UPSTREAM_VERSION}.orig.tar.gz --prefix mesa-asahi-${DEB_UPSTREAM_VERSION}/ ${UPSTREAM_TAG}
+      git archive -o ../mesa-asahi_${DEB_UPSTREAM_VERSION}.orig.tar.gz --prefix mesa-asahi-${DEB_UPSTREAM_VERSION}/ ${UPSTREAM_COMMIT}
       cp -v ../*orig*tar* ${WORKING_DIR}
 
       gbp buildpackage \
