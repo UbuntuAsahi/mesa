@@ -1,3 +1,9 @@
+mesa-asahi (25.0.0~git20241202.dc86a47-1) UNRELEASED; urgency=medium
+
+  * New upstream release (asahi-20241202.2)
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Mon, 02 Dec 2024 19:56:26 +0100
+
 mesa-asahi (25.0.0~git20241128.0c8c82f-1) unstable-bananas; urgency=medium
 
   * New upstream release (asahi-20241128)
