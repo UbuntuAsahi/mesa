@@ -80,12 +80,8 @@ struct agx_encoder
 agx_encoder_allocate(struct agx_batch *batch, struct agx_device *dev)
 {
    struct agx_bo *bo = agx_bo_create(dev, 0x80000, 0, 0, "Encoder");
-
-   return (struct agx_encoder){
-      .bo = bo,
-      .current = bo->map,
-      .end = (uint8_t *)bo->map + bo->size,
-   };
+   uint8_t *map = agx_bo_map(bo);
+   return (struct agx_encoder){.bo = bo, .current = map, .end = map + bo->size};
 }
 
 static void
@@ -101,8 +97,9 @@ agx_batch_init(struct agx_context *ctx,
    batch->seqnum = ++ctx->batches.seqnum;
 
    agx_bo_reference(screen->rodata);
-   agx_pool_init(&batch->pool, dev, 0, true);
-   agx_pool_init(&batch->pipeline_pool, dev, AGX_BO_LOW_VA, true);
+   agx_pool_init(&batch->pool, dev, "Batch pool", 0, true);
+   agx_pool_init(&batch->pipeline_pool, dev, "Batch low VA pool", AGX_BO_LOW_VA,
+                 true);
 
    /* These allocations can happen only once and will just be zeroed (not freed)
     * during batch clean up. The memory is owned by the context.
@@ -165,7 +162,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->result_off =
       (2 * sizeof(union agx_batch_result)) * agx_batch_idx(batch);
    batch->result =
-      (void *)(((uint8_t *)ctx->result_buf->map) + batch->result_off);
+      (void *)(((uint8_t *)agx_bo_map(ctx->result_buf)) + batch->result_off);
    memset(batch->result, 0, sizeof(union agx_batch_result) * 2);
 
    agx_batch_mark_active(batch);
@@ -930,7 +927,10 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
          .cmd_type = DRM_ASAHI_CMD_COMPUTE,
          .flags = 0,
          .cmd_buffer = (uint64_t)(uintptr_t)compute,
-         .cmd_buffer_size = sizeof(struct drm_asahi_cmd_compute),
+
+         /* Work around for shipping 6.11.8 kernels, remove when we bump uapi
+          */
+         .cmd_buffer_size = sizeof(struct drm_asahi_cmd_compute) - 8,
          .result_offset = feedback ? batch->result_off : 0,
          .result_size = feedback ? sizeof(union agx_batch_result) : 0,
          /* Barrier on previous submission */

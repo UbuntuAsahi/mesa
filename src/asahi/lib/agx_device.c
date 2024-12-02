@@ -46,6 +46,7 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 /* clang-format off */
 static const struct debug_named_value agx_debug_options[] = {
    {"trace",     AGX_DBG_TRACE,    "Trace the command stream"},
+   {"bodump",    AGX_DBG_BODUMP,   "Periodically dump live BOs"},
    {"no16",      AGX_DBG_NO16,     "Disable 16-bit support"},
    {"perf",      AGX_DBG_PERF,     "Print performance warnings"},
 #ifndef NDEBUG
@@ -67,6 +68,7 @@ static const struct debug_named_value agx_debug_options[] = {
    {"scratch",   AGX_DBG_SCRATCH,  "Debug scratch memory usage"},
    {"1queue",    AGX_DBG_1QUEUE,   "Force usage of a single queue for multiple contexts"},
    {"nosoft",    AGX_DBG_NOSOFT,   "Disable soft fault optimizations"},
+   {"bodumpverbose", AGX_DBG_BODUMPVERBOSE,   "Include extra info with dumps"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -76,8 +78,8 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
 
-   if (bo->map)
-      munmap(bo->map, bo->size);
+   if (bo->_map)
+      munmap(bo->_map, bo->size);
 
    /* Free the VA. No need to unmap the BO, as the kernel will take care of that
     * when we close it.
@@ -155,6 +157,7 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    /* Fresh handle */
    assert(!memcmp(bo, &((struct agx_bo){}), sizeof(*bo)));
 
+   bo->dev = dev;
    bo->size = gem_create.size;
    bo->align = align;
    bo->flags = flags;
@@ -180,18 +183,16 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
       return NULL;
    }
 
-   dev->ops.bo_mmap(dev, bo);
    return bo;
 }
 
 static void
 agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo)
 {
+   assert(bo->_map == NULL && "not double mapped");
+
    struct drm_asahi_gem_mmap_offset gem_mmap_offset = {.handle = bo->handle};
    int ret;
-
-   if (bo->map)
-      return;
 
    ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GEM_MMAP_OFFSET, &gem_mmap_offset);
    if (ret) {
@@ -199,13 +200,13 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo)
       assert(0);
    }
 
-   bo->map = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                     dev->fd, gem_mmap_offset.offset);
-   if (bo->map == MAP_FAILED) {
-      bo->map = NULL;
+   bo->_map = os_mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      dev->fd, gem_mmap_offset.offset);
+   if (bo->_map == MAP_FAILED) {
+      bo->_map = NULL;
       fprintf(stderr,
               "mmap failed: result=%p size=0x%llx fd=%i offset=0x%llx %m\n",
-              bo->map, (long long)bo->size, dev->fd,
+              bo->_map, (long long)bo->size, dev->fd,
               (long long)gem_mmap_offset.offset);
    }
 }
@@ -295,8 +296,10 @@ agx_bo_import(struct agx_device *dev, int fd)
    }
    pthread_mutex_unlock(&dev->bo_map_lock);
 
-   if (dev->debug & AGX_DBG_TRACE)
+   if (dev->debug & AGX_DBG_TRACE) {
+      agx_bo_map(bo);
       agxdecode_track_alloc(dev->agxdecode, bo);
+   }
 
    return bo;
 
@@ -340,6 +343,52 @@ agx_bo_export(struct agx_device *dev, struct agx_bo *bo)
 
    assert(bo->prime_fd >= 0);
    return fd;
+}
+
+static int
+agx_bo_bind_object(struct agx_device *dev, struct agx_bo *bo,
+                   uint32_t *object_handle, size_t size_B, uint64_t offset_B,
+                   uint32_t flags)
+{
+   struct drm_asahi_gem_bind_object gem_bind = {
+      .op = ASAHI_BIND_OBJECT_OP_BIND,
+      .flags = flags,
+      .handle = bo->handle,
+      .vm_id = 0,
+      .offset = offset_B,
+      .range = size_B,
+   };
+
+   int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GEM_BIND_OBJECT, &gem_bind);
+   if (ret) {
+      fprintf(stderr,
+              "DRM_IOCTL_ASAHI_GEM_BIND_OBJECT failed: %m (handle=%d)\n",
+              bo->handle);
+   }
+
+   *object_handle = gem_bind.object_handle;
+
+   return ret;
+}
+
+static int
+agx_bo_unbind_object(struct agx_device *dev, uint32_t object_handle,
+                     uint32_t flags)
+{
+   struct drm_asahi_gem_bind_object gem_bind = {
+      .op = ASAHI_BIND_OBJECT_OP_UNBIND,
+      .flags = flags,
+      .object_handle = object_handle,
+   };
+
+   int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GEM_BIND_OBJECT, &gem_bind);
+   if (ret) {
+      fprintf(stderr,
+              "DRM_IOCTL_ASAHI_GEM_BIND_OBJECT failed: %m (object_handle=%d)\n",
+              object_handle);
+   }
+
+   return ret;
 }
 
 static void
@@ -392,6 +441,8 @@ const agx_device_ops_t agx_device_drm_ops = {
    .bo_mmap = agx_bo_mmap,
    .get_params = agx_get_params,
    .submit = agx_submit,
+   .bo_bind_object = agx_bo_bind_object,
+   .bo_unbind_object = agx_bo_unbind_object,
 };
 
 static uint64_t
@@ -413,6 +464,12 @@ agx_init_timestamps(struct agx_device *dev)
 
    dev->timestamp_to_ns.num = NSEC_PER_SEC / ts_gcd;
    dev->timestamp_to_ns.den = dev->params.timer_frequency_hz / ts_gcd;
+
+   uint64_t user_ts_gcd = gcd(dev->params.timer_frequency_hz, NSEC_PER_SEC);
+
+   dev->user_timestamp_to_ns.num = NSEC_PER_SEC / user_ts_gcd;
+   dev->user_timestamp_to_ns.den =
+      dev->params.user_timestamp_frequency_hz / user_ts_gcd;
 }
 
 bool
