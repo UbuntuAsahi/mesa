@@ -1,3 +1,11 @@
+mesa-asahi (25.0.0~git20241211.819a5d4-2) unstable-bananas; urgency=medium
+
+  * d/*.symbols: reset symbol versions to Debian package's
+  * d/gbp.conf: fix debian-branch
+  * d/control: remove obsolete Breaks/Replaces
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Wed, 11 Dec 2024 19:55:17 +0100
+
 mesa-asahi (25.0.0~git20241211.819a5d4-1) unstable-bananas; urgency=medium
 
   *  New upstream release (asahi-20241211)
