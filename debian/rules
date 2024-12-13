@@ -204,7 +204,6 @@ rewrite_wrap_files:
 	touch subprojects/rewrite
 
 override_dh_clean: regen_control
-	dpkg-parsechangelog | awk '/^Version:/ {print $$2}' | sed 's/-.*//;s/~/-/' > VERSION
 	rm -rf .pc
 	rm -rf build
 	rm -rf configure bin/config.guess bin/config.sub config.h.in
@@ -222,7 +221,6 @@ override_dh_clean: regen_control
 	dh_clean
 
 override_dh_auto_configure: rewrite_wrap_files
-	dpkg-parsechangelog | awk '/^Version:/ {print $$2}' > VERSION
 	$(buildflags) dh_auto_configure -- \
 		$(confflags)
 
