@@ -1,3 +1,4 @@
-version=3
-opts="uversionmangle=s/-rc/~rc/,dversionmangle=s/\+repack//,pgpsigurlmangle=s/$/.sig/,pasv" \
-https://mesa.freedesktop.org/archive/mesa-(.*)\.tar\.xz
+version=4
+opts=searchmode=plain,\
+dversionmangle=s/^@ANY_VERSION@~git//;s/\.[a-z0-9]+$//;s/\.v/./ \
+ https://gitlab.freedesktop.org/asahi/mesa/tags?sort=updated_desc -/archive/asahi-\d+(?:[.-]\d+)?/mesa-asahi-@ANY_VERSION@\.tar\.gz
