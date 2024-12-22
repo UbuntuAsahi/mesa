@@ -63,7 +63,17 @@ extract-source:
     - DEB_UPSTREAM_VERSION=$(dpkg-parsechangelog -SVersion | cut -d- -f-1)
     - UPSTREAM_COMMIT="$(echo "$DEB_UPSTREAM_VERSION" | rev | cut -d. -f-1 | rev)"
 
-    - git fetch upstream main
+    # Corner cases involving multiple upstream releases in a single day with unpredictable version
+    # numbers require we stick to the release's commit number instead of its date for uniquely
+    # identifying the release in d/changelog (although we keep the date in the version for ordering
+    # purposes, and will attach a '.v#' suffix to the date in the even more corner case in which we
+    # do multiple Bananas releases in a single day).
+    #
+    # `git fetch upstream main` doesn't work since the release commit may not be in upstream/main
+    # at the time of release, after an upstream rebases (also, it clones an entire branch, while
+    # we actually only need the release commit for creating the tarball). Thus we use git ls-remote
+    # to obtain the full commit ID of the tag from its short ID, then fetch that with depth=1.
+    - git fetch --depth=1 upstream $(git ls-remote upstream | grep ${UPSTREAM_COMMIT} | cut -f1)
 
     - |
       git archive -o ../mesa-asahi_${DEB_UPSTREAM_VERSION}.orig.tar.gz --prefix mesa-asahi-${DEB_UPSTREAM_VERSION}/ ${UPSTREAM_COMMIT}
