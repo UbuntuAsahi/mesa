@@ -1,3 +1,10 @@
+mesa-asahi (25.0.0~git20241211.819a5d4-3) UNRELEASED; urgency=medium
+
+  * Import packaging changes from debian/24.3.4-1
+    - control: Make libgl1-mesa-dri depend on the same version of libgbm1
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Thu, 23 Jan 2025 19:16:38 +0100
+
 mesa-asahi (25.0.0~git20241211.819a5d4-2) unstable-bananas; urgency=medium
 
   * d/*.symbols: reset symbol versions to Debian package's
