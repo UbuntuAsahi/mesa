@@ -1,10 +1,10 @@
-mesa-asahi (25.0.0~git20241211.819a5d4-4) UNRELEASED; urgency=medium
+mesa-asahi (25.0.0~git20241211.819a5d4-4) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/24.3.4-2:
     - Build with gcc-12 and -O1 on ppc64el
     - Drop quilt usage
 
- -- NoisyCoil <noisycoil@tutanota.com>  Mon, 27 Jan 2025 18:06:44 +0100
+ -- NoisyCoil <noisycoil@tutanota.com>  Mon, 27 Jan 2025 18:34:07 +0100
 
 mesa-asahi (25.0.0~git20241211.819a5d4-3) unstable-bananas; urgency=medium
 
