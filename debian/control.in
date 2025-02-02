@@ -5,8 +5,6 @@ Maintainer: Debian Bananas Team <team+bananas@tracker.debian.org>
 Standards-Version: 4.1.4
 Build-Depends:
  debhelper-compat (= 13),
- gcc-12 [ppc64el],
- g++-12 [ppc64el],
  directx-headers-dev (>= 1.614.1~) [linux-amd64 linux-arm64],
  flatbuffers-compiler [linux-arm64],
  glslang-tools [@LLVM_ARCHS@],
