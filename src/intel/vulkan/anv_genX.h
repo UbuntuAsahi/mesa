@@ -52,8 +52,6 @@ VkResult genX(init_device_state)(struct anv_device *device);
 
 void genX(init_cps_device_state)(struct anv_device *device);
 
-nir_shader *genX(load_libanv_shader)(struct anv_device *device, void *mem_ctx);
-
 uint32_t genX(call_internal_shader)(nir_builder *b,
                                     enum anv_internal_kernel_name shader_name);
 
@@ -194,6 +192,10 @@ void genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
 
 void genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer);
 
+void genX(cmd_buffer_flush_gfx_state)(struct anv_cmd_buffer *cmd_buffer);
+
+void genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer);
+
 void genX(cmd_buffer_enable_pma_fix)(struct anv_cmd_buffer *cmd_buffer,
                                      bool enable);
 
@@ -276,6 +278,37 @@ genX(compute_pipeline_emit)(struct anv_compute_pipeline *pipeline);
 void
 genX(ray_tracing_pipeline_emit)(struct anv_ray_tracing_pipeline *pipeline);
 
+#if GFX_VERx10 >= 300
+#define anv_shader_bin_get_handler(bin, local_arg_offset) ({         \
+   assert((local_arg_offset) % 8 == 0);                              \
+   const struct brw_bs_prog_data *prog_data =                        \
+      brw_bs_prog_data_const(bin->prog_data);                        \
+   assert(prog_data->simd_size == 16);                               \
+                                                                     \
+   (struct GENX(CALL_STACK_HANDLER)) {                               \
+      .OffsetToLocalArguments = (local_arg_offset) / 8,              \
+      .BindlessShaderDispatchMode = RT_SIMD16,                       \
+      .KernelStartPointer = bin->kernel.offset,                      \
+      .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used), \
+   };                                                                \
+})
+#endif
+
+#if GFX_VERx10 >= 300
+#define anv_shader_bin_get_bsr(bin, local_arg_offset) ({             \
+   assert((local_arg_offset) % 8 == 0);                              \
+   const struct brw_bs_prog_data *prog_data =                        \
+      brw_bs_prog_data_const(bin->prog_data);                        \
+   assert(prog_data->simd_size == 16);                               \
+                                                                     \
+   (struct GENX(BINDLESS_SHADER_RECORD)) {                           \
+      .OffsetToLocalArguments = (local_arg_offset) / 8,              \
+      .BindlessShaderDispatchMode = RT_SIMD16,                       \
+      .KernelStartPointer = bin->kernel.offset,                      \
+      .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used), \
+   };                                                                \
+})
+#else
 #define anv_shader_bin_get_bsr(bin, local_arg_offset) ({             \
    assert((local_arg_offset) % 8 == 0);                              \
    const struct brw_bs_prog_data *prog_data =                        \
@@ -289,6 +322,7 @@ genX(ray_tracing_pipeline_emit)(struct anv_ray_tracing_pipeline *pipeline);
       .KernelStartPointer = bin->kernel.offset,                      \
    };                                                                \
 })
+#endif
 
 void
 genX(batch_set_preemption)(struct anv_batch *batch,
@@ -345,6 +379,10 @@ genX(cmd_buffer_begin_companion_rcs_syncpoint)(struct anv_cmd_buffer *cmd_buffer
 void
 genX(cmd_buffer_end_companion_rcs_syncpoint)(struct anv_cmd_buffer *cmd_buffer,
                                              struct anv_state syncpoint);
+void
+genX(cmd_write_buffer_cp)(struct anv_cmd_buffer *cmd_buffer,
+                          VkDeviceAddress dstAddr,
+                          void *data, uint32_t size);
 
 void
 genX(emit_simple_shader_init)(struct anv_simple_shader *state);
@@ -428,3 +466,15 @@ genX(cmd_buffer_flush_push_descriptors)(struct anv_cmd_buffer *cmd_buffer,
 void genX(emit_embedded_sampler)(struct anv_device *device,
                                  struct anv_embedded_sampler *sampler,
                                  struct anv_pipeline_embedded_sampler_binding *binding);
+
+void
+genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
+                                   struct anv_address indirect_addr,
+                                   bool is_unaligned_size_x);
+
+void
+genX(cmd_dispatch_unaligned)(
+   VkCommandBuffer                             commandBuffer,
+   uint32_t                                    invocations_x,
+   uint32_t                                    invocations_y,
+   uint32_t                                    invocations_z);

@@ -107,6 +107,7 @@ typedef enum {
    OPC_READ_COND_MACRO = _OPC(1, 54),
    OPC_READ_FIRST_MACRO = _OPC(1, 55),
    OPC_SHPS_MACRO       = _OPC(1, 56),
+   OPC_READ_GETLAST_MACRO = _OPC(1, 57),
 
    /* Macros that expand to a loop */
    OPC_SCAN_MACRO      = _OPC(1, 58),
@@ -346,6 +347,9 @@ typedef enum {
     * It loads into const file and should not be optimized in any way.
     */
    OPC_PUSH_CONSTS_LOAD_MACRO = _OPC(6, 84),
+
+   OPC_RAY_INTERSECTION = _OPC(6, 90),
+   OPC_RESBASE          = _OPC(6, 91),
 
    /* category 7: */
    OPC_BAR             = _OPC(7, 0),
@@ -634,6 +638,18 @@ is_madsh(opc_t opc)
    switch (opc) {
    case OPC_MADSH_U16:
    case OPC_MADSH_M16:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static inline bool
+is_sad(opc_t opc)
+{
+   switch (opc) {
+   case OPC_SAD_S16:
+   case OPC_SAD_S32:
       return true;
    default:
       return false;

@@ -43,10 +43,12 @@
 #include "util/u_memory.h"
 #include "util/u_prim.h"
 #include "util/u_prim_restart.h"
+#include "util/u_printf.h"
 #include "util/u_surface.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_vbuf.h"
 
+#include "clc/panfrost_compile.h"
 #include "compiler/nir/nir_serialize.h"
 #include "util/pan_lower_framebuffer.h"
 #include "decode.h"
@@ -69,6 +71,8 @@ panfrost_clear(struct pipe_context *pipe, unsigned buffers,
     */
    struct panfrost_context *ctx = pan_context(pipe);
    struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+   if (!batch)
+      return;
 
    /* At the start of the batch, we can clear for free */
    if (batch->draw_count == 0) {
@@ -160,7 +164,7 @@ panfrost_set_blend_color(struct pipe_context *pipe,
 
 /* Create a final blend given the context */
 
-mali_ptr
+uint64_t
 panfrost_get_blend(struct panfrost_batch *batch, unsigned rti,
                    struct panfrost_bo **bo, unsigned *shader_offset)
 {
@@ -207,6 +211,10 @@ panfrost_get_blend(struct panfrost_batch *batch, unsigned rti,
    if (!(*bo)) {
       *bo = panfrost_batch_create_bo(batch, 4096, PAN_BO_EXECUTE,
                                      PIPE_SHADER_FRAGMENT, "Blend shader");
+      if (!(*bo)) {
+         mesa_loge("failed to allocate blend-shader");
+         return 0;
+      }
    }
 
    struct panfrost_compiled_shader *ss = ctx->prog[PIPE_SHADER_FRAGMENT];
@@ -270,15 +278,12 @@ panfrost_set_shader_images(struct pipe_context *pctx,
       return;
    }
 
-   /* Bind start_slot...start_slot+count */
+   /* fix up AFBC/AFRC; we do this before starting setup because it involves a
+      blit, so we need a consistent image state */
    for (int i = 0; i < count; i++) {
       const struct pipe_image_view *image = &iviews[i];
-      SET_BIT(ctx->image_mask[shader], 1 << (start_slot + i), image->resource);
-
-      if (!image->resource) {
-         util_copy_image_view(&ctx->images[shader][start_slot + i], NULL);
+      if (!image->resource)
          continue;
-      }
 
       struct panfrost_resource *rsrc = pan_resource(image->resource);
 
@@ -290,7 +295,16 @@ panfrost_set_shader_images(struct pipe_context *pctx,
             ctx, rsrc, DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED, true,
             "Shader image");
       }
+   }
 
+   /* Bind start_slot...start_slot+count */
+   for (int i = 0; i < count; i++) {
+      const struct pipe_image_view *image = &iviews[i];
+      SET_BIT(ctx->image_mask[shader], 1 << (start_slot + i), image->resource);
+      if (!image->resource) {
+         util_copy_image_view(&ctx->images[shader][start_slot + i], NULL);
+         continue;
+      }
       util_copy_image_view(&ctx->images[shader][start_slot + i], image);
    }
 
@@ -552,6 +566,9 @@ panfrost_destroy(struct pipe_context *pipe)
    struct panfrost_device *dev = pan_device(pipe->screen);
 
    pan_screen(pipe->screen)->vtbl.context_cleanup(panfrost);
+
+   u_printf_destroy(&panfrost->printf.ctx);
+   panfrost_bo_unreference(panfrost->printf.bo);
 
    if (panfrost->writers)
       _mesa_hash_table_destroy(panfrost->writers, NULL);
@@ -886,7 +903,8 @@ static void
 panfrost_set_stream_output_targets(struct pipe_context *pctx,
                                    unsigned num_targets,
                                    struct pipe_stream_output_target **targets,
-                                   const unsigned *offsets)
+                                   const unsigned *offsets,
+                                   enum mesa_prim output_prim)
 {
    struct panfrost_context *ctx = pan_context(pctx);
    struct panfrost_streamout *so = &ctx->streamout;
@@ -1081,11 +1099,13 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    gallium->stream_uploader = u_upload_create_default(gallium);
    gallium->const_uploader = gallium->stream_uploader;
 
-   panfrost_pool_init(&ctx->descs, ctx, dev, 0, 4096, "Descriptors", true,
-                      false);
+   if (panfrost_pool_init(&ctx->descs, ctx, dev, 0, 4096, "Descriptors", true,
+                          false) ||
 
-   panfrost_pool_init(&ctx->shaders, ctx, dev, PAN_BO_EXECUTE, 4096, "Shaders",
-                      true, false);
+       panfrost_pool_init(&ctx->shaders, ctx, dev, PAN_BO_EXECUTE, 4096,
+                          "Shaders", true, false)) {
+      goto failed;
+   }
 
    ctx->blitter = util_blitter_create(gallium);
 
@@ -1107,14 +1127,24 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &ctx->in_sync_obj);
    assert(!ret);
 
+   ctx->printf.bo =
+      panfrost_bo_create(dev, LIBPAN_PRINTF_BUFFER_SIZE, 0, "Printf Buffer");
+
+   if (ctx->printf.bo == NULL)
+      goto failed;
+
+   u_printf_init(&ctx->printf.ctx, ctx->printf.bo, ctx->printf.bo->ptr.cpu);
+
    ret = pan_screen(screen)->vtbl.context_init(ctx);
 
-   if (ret) {
-      gallium->destroy(gallium);
-      return NULL;
-   }
+   if (ret)
+      goto failed;
 
    return gallium;
+
+failed:
+   gallium->destroy(gallium);
+   return NULL;
 }
 
 void

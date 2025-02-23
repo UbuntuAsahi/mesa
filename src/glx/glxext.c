@@ -28,7 +28,7 @@
 #include "glxextensions.h"
 
 #include "util/u_debug.h"
-#ifndef GLX_USE_APPLEGL
+#if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
 #include "dri_common.h"
 #endif
 
@@ -41,6 +41,7 @@
 #include <xcb/xcb.h>
 #include <xcb/glx.h>
 #include "dri_util.h"
+#include "pipe/p_screen.h"
 #if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
 #include <dlfcn.h>
 #endif
@@ -58,7 +59,7 @@
 #define __GLX_TOTAL_CONFIG \
    (__GLX_MIN_CONFIG_PROPS + 2 * __GLX_EXT_CONFIG_PROPS)
 
-_X_HIDDEN void
+void
 glx_message(int level, const char *f, ...)
 {
    va_list args;
@@ -85,7 +86,7 @@ glx_message(int level, const char *f, ...)
 ** You can set this cell to 1 to force the gl drawing stuff to be
 ** one command per packet
 */
-_X_HIDDEN int __glXDebug = 0;
+int __glXDebug = 0;
 
 /* Extension required boiler plate */
 
@@ -374,7 +375,7 @@ convert_from_x_visual_type(int visualType)
  * getVisualConfigs uses the !tagged_only path.
  * getFBConfigs uses the tagged_only path.
  */
-_X_HIDDEN void
+void
 __glXInitializeVisualConfigFromTags(struct glx_config * config, int count,
                                     const INT32 * bp, Bool tagged_only,
                                     Bool fbconfig_style_tags)
@@ -709,7 +710,7 @@ getFBConfigs(struct glx_screen *psc, struct glx_display *priv, int screen)
    return psc->configs != NULL;
 }
 
-_X_HIDDEN Bool
+Bool
 glx_screen_init(struct glx_screen *psc,
 		 int screen, struct glx_display * priv)
 {
@@ -728,7 +729,7 @@ glx_screen_init(struct glx_screen *psc,
    return GL_TRUE;
 }
 
-_X_HIDDEN void
+void
 glx_screen_cleanup(struct glx_screen *psc)
 {
    if (psc->configs) {
@@ -790,6 +791,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
       __glXEnableDirectExtension(psc, "GLX_INTEL_swap_event");
    }
 
+#if defined(GLX_DIRECT_RENDERING) && (!defined(GLX_USE_APPLEGL) || defined(GLX_USE_APPLE))
    mask = driGetAPIMask(psc->frontend_screen);
 
    __glXEnableDirectExtension(psc, "GLX_ARB_create_context");
@@ -806,7 +808,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
                                  "GLX_EXT_create_context_es2_profile");
    }
 
-   if (dri_get_screen_param(psc->frontend_screen, PIPE_CAP_DEVICE_RESET_STATUS_QUERY))
+   if (dri_get_pipe_screen(psc->frontend_screen)->caps.device_reset_status_query)
       __glXEnableDirectExtension(psc,
                                  "GLX_ARB_create_context_robustness");
 
@@ -846,6 +848,7 @@ bind_extensions(struct glx_screen *psc, const char *driverName)
          psc->keep_native_window_glx_drawable = keep_native_window_glx_drawable;
       }
    }
+#endif
 }
 
 
@@ -913,7 +916,9 @@ AllocAndFetchScreenConfigs(Display * dpy, struct glx_display * priv, enum glx_dr
 #else
       if (psc == NULL && !zink)
       {
+#ifdef GLX_INDIRECT_RENDERING
          psc = indirect_create_screen(i, priv);
+#endif
          indirect = true;
       }
 #endif
@@ -935,7 +940,7 @@ AllocAndFetchScreenConfigs(Display * dpy, struct glx_display * priv, enum glx_dr
 /*
 ** Initialize the client side extension code.
 */
- _X_HIDDEN struct glx_display *
+struct glx_display *
 __glXInitialize(Display * dpy)
 {
    XExtCodes *codes;
@@ -1013,7 +1018,7 @@ __glXInitialize(Display * dpy)
 #if defined(GLX_USE_DRM)
    bool dri3_err = false;
    if (glx_direct && glx_accel && dri3)
-      dpyPriv->has_multibuffer = x11_dri3_check_multibuffer(XGetXCBConnection(dpy), &dri3_err, &dpyPriv->has_explicit_modifiers);
+      dpyPriv->has_multibuffer = x11_dri3_has_multibuffer(XGetXCBConnection(dpy));
    if (glx_direct && glx_accel &&
        (!(glx_driver & GLX_DRIVER_ZINK_YES) || !kopper)) {
       if (dri3) {
@@ -1039,7 +1044,8 @@ __glXInitialize(Display * dpy)
    if (glx_direct)
       glx_driver |= GLX_DRIVER_SW;
 
-   if (!dpyPriv->has_explicit_modifiers && glx_accel && !debug_get_bool_option("LIBGL_KOPPER_DRI2", false)) {
+#if !defined(GLX_USE_APPLE)
+   if (!dpyPriv->has_multibuffer && glx_accel && !debug_get_bool_option("LIBGL_KOPPER_DRI2", false)) {
       if (glx_driver & GLX_DRIVER_ZINK_YES) {
          /* only print error if zink was explicitly requested */
          CriticalErrorMessageF("DRI3 not available\n");
@@ -1049,6 +1055,7 @@ __glXInitialize(Display * dpy)
       /* if no dri3 and not using dri2, disable zink */
       glx_driver &= ~GLX_DRIVER_ZINK_INFER;
    }
+#endif
 
 #ifdef GLX_USE_WINDOWSGL
    if (glx_direct && glx_accel)
@@ -1074,6 +1081,13 @@ __glXInitialize(Display * dpy)
 
 #if defined(GLX_USE_APPLEGL) && !defined(GLX_USE_APPLE)
    glx_driver |= GLX_DRIVER_SW;
+#endif
+
+#if defined(GLX_USE_APPLEGL) && !defined(GLX_USE_APPLE)
+   if (!applegl_create_display(dpyPriv)) {
+      free(dpyPriv);
+      return NULL;
+   }
 #endif
 
    if (!AllocAndFetchScreenConfigs(dpy, dpyPriv, glx_driver, !env)) {
@@ -1115,7 +1129,7 @@ __glXInitialize(Display * dpy)
 ** Setup for sending a GLX command on dpy.  Make sure the extension is
 ** initialized.  Try to avoid calling __glXInitialize as its kinda slow.
 */
-_X_HIDDEN CARD8
+CARD8
 __glXSetupForCommand(Display * dpy)
 {
     struct glx_context *gc;
@@ -1157,7 +1171,7 @@ __glXSetupForCommand(Display * dpy)
  * Modify this function to use \c ctx->pc instead of the explicit
  * \c pc parameter.
  */
-_X_HIDDEN GLubyte *
+GLubyte *
 __glXFlushRenderBuffer(struct glx_context * ctx, GLubyte * pc)
 {
    Display *const dpy = ctx->currentDpy;
@@ -1191,7 +1205,7 @@ __glXFlushRenderBuffer(struct glx_context * ctx, GLubyte * pc)
  * \param data           Command data.
  * \param dataLen        Size, in bytes, of the command data.
  */
-_X_HIDDEN void
+void
 __glXSendLargeChunk(struct glx_context * gc, GLint requestNumber,
                     GLint totalRequests, const GLvoid * data, GLint dataLen)
 {
@@ -1217,7 +1231,7 @@ __glXSendLargeChunk(struct glx_context * gc, GLint requestNumber,
  * \param data       Command data.
  * \param dataLen    Size, in bytes, of the command data.
  */
-_X_HIDDEN void
+void
 __glXSendLargeCommand(struct glx_context * ctx,
                       const GLvoid * header, GLint headerLen,
                       const GLvoid * data, GLint dataLen)

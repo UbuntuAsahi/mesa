@@ -50,6 +50,9 @@
 
 #include <stdlib.h>
 
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
 struct intrinsic_info {
    nir_variable_mode mode; /* 0 if the mode is obtained from the deref. */
    nir_intrinsic_op op;
@@ -112,6 +115,8 @@ get_info(nir_intrinsic_op op)
       INFO(nir_var_mem_shared, shared_append_amd, true, -1, -1, -1, -1, 1)
       INFO(nir_var_mem_shared, shared_consume_amd, true, -1, -1, -1, -1, 1)
       LOAD(nir_var_mem_global, smem_amd, 0, 1, -1, 1)
+      LOAD(0, buffer_amd, 0, 1, -1, 1)
+      STORE(0, buffer_amd, 1, 2, -1, 0, 1)
    default:
       break;
 #undef ATOMIC
@@ -258,13 +263,27 @@ get_write_mask(const nir_intrinsic_instr *intrin)
    return nir_component_mask(intrin->src[info->value_src].ssa->num_components);
 }
 
+static nir_op
+get_effective_alu_op(nir_scalar scalar)
+{
+   nir_op op = nir_scalar_alu_op(scalar);
+
+   /* amul can always be replaced by imul and we pattern match on the more
+    * general opcode, so return imul for amul.
+    */
+   if (op == nir_op_amul)
+      return nir_op_imul;
+   else
+      return op;
+}
+
 /* If "def" is from an alu instruction with the opcode "op" and one of it's
  * sources is a constant, update "def" to be the non-constant source, fill "c"
  * with the constant and return true. */
 static bool
 parse_alu(nir_scalar *def, nir_op op, uint64_t *c)
 {
-   if (!nir_scalar_is_alu(*def) || nir_scalar_alu_op(*def) != op)
+   if (!nir_scalar_is_alu(*def) || get_effective_alu_op(*def) != op)
       return false;
 
    nir_scalar src0 = nir_scalar_chase_alu_src(*def, 0);
@@ -331,6 +350,12 @@ type_scalar_size_bytes(const struct glsl_type *type)
    return glsl_type_is_boolean(type) ? 4u : glsl_get_bit_size(type) / 8u;
 }
 
+static bool
+cmp_scalar(nir_scalar a, nir_scalar b)
+{
+   return a.def == b.def ? a.comp > b.comp : a.def->index > b.def->index;
+}
+
 static unsigned
 add_to_entry_key(nir_scalar *offset_defs, uint64_t *offset_defs_mul,
                  unsigned offset_def_count, nir_scalar def, uint64_t mul)
@@ -338,7 +363,7 @@ add_to_entry_key(nir_scalar *offset_defs, uint64_t *offset_defs_mul,
    mul = util_mask_sign_extend(mul, def.def->bit_size);
 
    for (unsigned i = 0; i <= offset_def_count; i++) {
-      if (i == offset_def_count || def.def->index > offset_defs[i].def->index) {
+      if (i == offset_def_count || cmp_scalar(def, offset_defs[i])) {
          /* insert before i */
          memmove(offset_defs + i + 1, offset_defs + i,
                  (offset_def_count - i) * sizeof(nir_scalar));
@@ -499,7 +524,9 @@ create_entry_key_from_offset(void *mem_ctx, nir_def *base, uint64_t base_mul, ui
 static nir_variable_mode
 get_variable_mode(struct entry *entry)
 {
-   if (entry->info->mode)
+   if (nir_intrinsic_has_memory_modes(entry->intrin))
+      return nir_intrinsic_memory_modes(entry->intrin);
+   else if (entry->info->mode)
       return entry->info->mode;
    assert(entry->deref && util_bitcount(entry->deref->modes) == 1);
    return entry->deref->modes;
@@ -529,6 +556,16 @@ aliasing_modes(nir_variable_mode modes)
 static void
 calc_alignment(struct entry *entry)
 {
+   if (entry->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
+       entry->intrin->intrinsic == nir_intrinsic_store_buffer_amd) {
+      /* The alignment is the result of the descriptor and several offset/index sources, so just use
+       * the original alignment.
+       */
+      entry->align_mul = nir_intrinsic_align_mul(entry->intrin);
+      entry->align_offset = nir_intrinsic_align_offset(entry->intrin);
+      return;
+   }
+
    uint32_t align_mul = 31;
    for (unsigned i = 0; i < entry->key->offset_def_count; i++) {
       if (entry->key->offset_defs_mul[i])
@@ -655,8 +692,7 @@ new_bitsize_acceptable(struct vectorize_ctx *ctx, unsigned new_bit_size,
 
    unsigned low_size = low->intrin->num_components * get_bit_size(low) / 8;
    /* The hole size can be less than 0 if low and high instructions overlap. */
-   unsigned hole_size =
-      MAX2(high->offset_signed - (low->offset_signed + low_size), 0);
+   int64_t hole_size = high->offset_signed - (low->offset_signed + low_size);
 
    if (!ctx->options->callback(low->align_mul,
                                low->align_offset,
@@ -1014,6 +1050,24 @@ may_alias(nir_shader *shader, struct entry *a, struct entry *b)
    if (a->key->var != b->key->var || a->key->resource != b->key->resource)
       return true;
 
+   bool is_a_buffer_amd = a->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
+                          a->intrin->intrinsic == nir_intrinsic_store_buffer_amd;
+   bool is_b_buffer_amd = b->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
+                          b->intrin->intrinsic == nir_intrinsic_store_buffer_amd;
+   if (is_a_buffer_amd || is_b_buffer_amd) {
+      if (is_a_buffer_amd != is_b_buffer_amd)
+         return true;
+      if ((a->access | b->access) & ACCESS_USES_FORMAT_AMD)
+         return true;
+      bool a_store = a->intrin->intrinsic == nir_intrinsic_store_buffer_amd;
+      bool b_store = b->intrin->intrinsic == nir_intrinsic_store_buffer_amd;
+      /* Check the scalar byte offset and index offset. */
+      if (!nir_srcs_equal(a->intrin->src[2 + a_store], b->intrin->src[2 + b_store]))
+         return true;
+      if (!nir_srcs_equal(a->intrin->src[3 + a_store], b->intrin->src[3 + b_store]))
+         return true;
+   }
+
    /* use adjacency information */
    /* TODO: we can look closer at the entry keys */
    int64_t diff = compare_entries(a, b);
@@ -1161,6 +1215,20 @@ can_vectorize(struct vectorize_ctx *ctx, struct entry *first, struct entry *seco
    if (first->info != second->info || first->access != second->access ||
        (first->access & ACCESS_VOLATILE) || first->info->is_atomic)
       return false;
+
+   if (first->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
+       first->intrin->intrinsic == nir_intrinsic_store_buffer_amd) {
+      if (first->access & ACCESS_USES_FORMAT_AMD)
+         return false;
+      if (nir_intrinsic_memory_modes(first->intrin) != nir_intrinsic_memory_modes(second->intrin))
+         return false;
+      bool store = first->intrin->intrinsic == nir_intrinsic_store_buffer_amd;
+      /* Check the scalar byte offset and index offset. */
+      if (!nir_srcs_equal(first->intrin->src[2 + store], second->intrin->src[2 + store]))
+         return false;
+      if (!nir_srcs_equal(first->intrin->src[3 + store], second->intrin->src[3 + store]))
+         return false;
+   }
 
    return true;
 }
@@ -1326,13 +1394,14 @@ vectorize_sorted_entries(struct vectorize_ctx *ctx, nir_function_impl *impl,
          struct entry *second = low->index < high->index ? high : low;
 
          uint64_t diff = high->offset_signed - low->offset_signed;
-         /* Allow overfetching by 4 bytes, which can be rejected
-          * by the callback if needed.
+         /* Allow overfetching by 28 bytes, which can be rejected by the
+          * callback if needed.  Driver callbacks will likely want to
+          * restrict this to a smaller value, say 4 bytes (or none).
           */
          unsigned max_hole =
             first->is_store ||
             (ctx->options->has_shared2_amd &&
-             get_variable_mode(first) == nir_var_mem_shared) ? 0 : 4;
+             get_variable_mode(first) == nir_var_mem_shared) ? 0 : 28;
          unsigned low_size = get_bit_size(low) / 8u * low->num_components;
          bool separate = diff > max_hole + low_size;
 
@@ -1489,7 +1558,9 @@ process_block(nir_function_impl *impl, struct vectorize_ctx *ctx, nir_block *blo
          continue;
 
       nir_variable_mode mode = info->mode;
-      if (!mode)
+      if (nir_intrinsic_has_memory_modes(intrin))
+         mode = nir_intrinsic_memory_modes(intrin);
+      else if (!mode)
          mode = nir_src_as_deref(intrin->src[info->deref_src])->modes;
       if (!(mode & aliasing_modes(ctx->options->modes)))
          continue;

@@ -285,12 +285,23 @@ emit_urb_config(struct blorp_batch *batch,
    blorp_pre_emit_urb_config(batch, &urb_cfg);
 
    for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
+#if GFX_VER >= 12
+      blorp_emit(batch, GENX(3DSTATE_URB_ALLOC_VS), urb) {
+         urb._3DCommandSubOpcode            += i;
+         urb.VSURBEntryAllocationSize        = urb_cfg.size[i] - 1;
+         urb.VSURBStartingAddressSlice0      = urb_cfg.start[i];
+         urb.VSURBStartingAddressSliceN      = urb_cfg.start[i];
+         urb.VSNumberofURBEntriesSlice0      = urb_cfg.entries[i];
+         urb.VSNumberofURBEntriesSliceN      = urb_cfg.entries[i];
+      }
+#else
       blorp_emit(batch, GENX(3DSTATE_URB_VS), urb) {
          urb._3DCommandSubOpcode      += i;
          urb.VSURBStartingAddress      = urb_cfg.start[i];
          urb.VSURBEntryAllocationSize  = urb_cfg.size[i] - 1;
          urb.VSNumberofURBEntries      = urb_cfg.entries[i];
       }
+#endif
    }
 
    if (batch->blorp->config.use_mesh_shading) {
@@ -582,6 +593,17 @@ blorp_emit_vertex_elements(struct blorp_batch *batch,
       }
    }
 
+   if (batch->flags & BLORP_BATCH_EMIT_3DSTATE_VF) {
+      blorp_emit(batch, GENX(3DSTATE_VF), vf) {
+#if GFX_VERx10 >= 125
+         /* Blorp shaders have no requirements that we need to disable geometry
+          * distribution.
+          */
+         vf.GeometryDistributionEnable = true;
+#endif
+      }
+   }
+
    blorp_emit(batch, GENX(3DSTATE_VF_TOPOLOGY), topo) {
       topo.PrimitiveTopologyType = _3DPRIM_RECTLIST;
    }
@@ -682,6 +704,10 @@ blorp_emit_vs_config(struct blorp_batch *batch,
          assert(vs_prog_data->base.dispatch_mode == INTEL_DISPATCH_MODE_SIMD8);
 #if GFX_VER < 20
          vs.SIMD8DispatchEnable = true;
+#endif
+
+#if GFX_VER >= 30
+         vs.RegistersPerThread = ptl_register_blocks(vs_prog_data->base.base.grf_used);
 #endif
       }
    }
@@ -879,6 +905,10 @@ blorp_emit_ps_config(struct blorp_batch *batch,
          ps.KernelStartPointer2 = params->wm_prog_kernel +
                                   brw_wm_prog_data_prog_offset(prog_data, ps, 2);
 #endif
+
+#if GFX_VER >= 30
+         ps.RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used);
+#endif
       }
    }
 
@@ -956,6 +986,9 @@ blorp_emit_blend_state(struct blorp_batch *batch,
             .WriteDisableGreen = params->color_write_disable & 2,
             .WriteDisableBlue = params->color_write_disable & 4,
             .WriteDisableAlpha = params->color_write_disable & 8,
+#if GFX_VER >= 30
+            .SimpleFloatBlendEnable = true,
+#endif
          };
          GENX(BLEND_STATE_ENTRY_pack)(NULL, pos, &entry);
          pos += GENX(BLEND_STATE_ENTRY_length);
@@ -1456,6 +1489,18 @@ blorp_emit_gfx8_hiz_op(struct blorp_batch *batch,
    if (params->depth.enabled && params->hiz_op == ISL_AUX_OP_FAST_CLEAR)
       blorp_emit_cc_viewport(batch);
 
+   /* Make sure to disable fragment shader, a previous draw might have enabled
+    * a SIMD32 shader and we could be dispatching threads here with MSAA 16x
+    * which does not support SIMD32.
+    *
+    * dEQP-VK.pipeline.monolithic.multisample.misc.clear_attachments.
+    * r8g8b8a8_unorm_r16g16b16a16_sfloat_r32g32b32a32_uint_d16_unorm.
+    * 16x.ds_resolve_sample_zero.sub_framebuffer
+    * exercises this case.
+    */
+   blorp_emit(batch, GENX(3DSTATE_PS), ps);
+   blorp_emit(batch, GENX(3DSTATE_PS_EXTRA), psx);
+
    /* According to the SKL PRM formula for WM_INT::ThreadDispatchEnable, the
     * 3DSTATE_WM::ForceThreadDispatchEnable field can force WM thread dispatch
     * even when WM_HZ_OP is active.  However, WM thread dispatch is normally
@@ -1717,6 +1762,9 @@ blorp_exec_compute(struct blorp_batch *batch, const struct blorp_params *params)
                                                          dispatch.group_size,
                                                          dispatch.simd_size),
          .NumberOfBarriers = cs_prog_data->uses_barrier,
+#if GFX_VER >= 30
+         .RegistersPerThread = ptl_register_blocks(prog_data->grf_used),
+#endif
       },
    };
 
@@ -1874,7 +1922,11 @@ xy_bcb_surf_dim(const struct isl_surf *surf)
 {
    switch (surf->dim) {
    case ISL_SURF_DIM_1D:
-      return XY_SURFTYPE_1D;
+      /* An undocumented assertion in simulation is that 1D surfaces must use
+       * LINEAR tiling. But that doesn't work, so instead consider 1D tiled
+       * surfaces as 2D with a Height=1.
+       */
+      return surf->tiling != ISL_TILING_LINEAR ? XY_SURFTYPE_2D: XY_SURFTYPE_1D;
    case ISL_SURF_DIM_2D:
       return XY_SURFTYPE_2D;
    case ISL_SURF_DIM_3D:

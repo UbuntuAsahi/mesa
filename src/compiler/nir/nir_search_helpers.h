@@ -542,7 +542,25 @@ is_used_by_non_fsat(const nir_alu_instr *instr)
 }
 
 static inline bool
-is_only_used_as_float(const nir_alu_instr *instr)
+is_used_by_non_ldc_nv(const nir_alu_instr *instr)
+{
+   nir_foreach_use(src, &instr->def) {
+      const nir_instr *const user_instr = nir_src_parent_instr(src);
+
+      if (user_instr->type != nir_instr_type_intrinsic)
+         return true;
+
+      const nir_intrinsic_instr *const user_intrin = nir_instr_as_intrinsic(user_instr);
+
+      if (user_intrin->intrinsic != nir_intrinsic_ldc_nv)
+         return true;
+   }
+
+   return false;
+}
+
+static inline bool
+is_only_used_as_float_impl(const nir_alu_instr *instr, unsigned depth)
 {
    nir_foreach_use(src, &instr->def) {
       const nir_instr *const user_instr = nir_src_parent_instr(src);
@@ -568,12 +586,32 @@ is_only_used_as_float(const nir_alu_instr *instr)
       assert(instr != user_alu);
 
       unsigned index = (nir_alu_src *)container_of(src, nir_alu_src, src) - user_alu->src;
+
+      /* bcsel acts like a move: if the bcsel is only used by float
+       * instructions, then the original value is (transitively) only used by
+       * float too.
+       *
+       * The unbounded recursion would terminate because use chains are acyclic
+       * in SSA. However, we limit the search depth regardless to avoid stack
+       * overflows in patholgical shaders and to reduce the worst-case time.
+       */
+      if (user_alu->op == nir_op_bcsel && index != 0 && depth < 8) {
+         if (is_only_used_as_float_impl(user_alu, depth + 1))
+            continue;
+      }
+
       nir_alu_type type = nir_op_infos[user_alu->op].input_types[index];
       if (nir_alu_type_get_base_type(type) != nir_type_float)
          return false;
    }
 
    return true;
+}
+
+static inline bool
+is_only_used_as_float(const nir_alu_instr *instr)
+{
+   return is_only_used_as_float_impl(instr, 0);
 }
 
 static inline bool

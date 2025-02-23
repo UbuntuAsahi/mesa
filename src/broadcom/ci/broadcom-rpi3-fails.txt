@@ -97,8 +97,6 @@ spec@khr_texture_compression_astc@basic-gl,Fail
 
 glx@glx-make-current,Fail
 glx@glx-swap-pixmap-bad,Fail
-glx@glx_arb_create_context_es2_profile@invalid opengl es version,Fail
-glx@glx_arb_create_context_no_error@no error,Fail
 
 # piglit: error: Test timed out.
 glx@glx_arb_sync_control@waitformsc,Fail
@@ -1226,6 +1224,12 @@ arm32-dEQP-GLES2.functional.uniform_api.random.79,Fail
 asan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
 asan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_clamp_non_square,Fail
 asan-dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
+
+# Already known failures
+ubsan-KHR-GLES2.core.internalformat.texture2d.depth_component_unsigned_int_depth_component16,Fail
+ubsan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
+ubsan-dEQP-GLES2.functional.texture.mipmap.2d.basic.nearest_linear_clamp_non_square,Fail
+ubsan-dEQP-GLES2.functional.texture.wrap.clamp_clamp_nearest_npot_etc1,Fail
 
 asan-dEQP-GLES2.functional.clipping.line.wide_line_clip_viewport_corner,Fail
 arm32-dEQP-GLES2.functional.texture.mipmap.2d.basic.linear_linear_mirror_non_square,Fail

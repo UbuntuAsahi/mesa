@@ -298,9 +298,12 @@ create_bci(struct zink_screen *screen, const struct pipe_resource *templ, unsign
                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                  VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT |
-                  VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
+                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+      if (screen->info.have_EXT_transform_feedback) {
+         bci.usage |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT |
+                      VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
+      }
    }
    if (screen->info.have_KHR_buffer_device_address)
       bci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -364,6 +367,12 @@ check_ici(struct zink_screen *screen, VkImageCreateInfo *ici, uint64_t modifier)
       image_props = props2.imageFormatProperties;
       if (screen->info.have_EXT_host_image_copy && ici->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT)
          optimalDeviceAccess = hic.optimalDeviceAccess;
+#if defined(MVK_VERSION)
+      // MoltenVK cannot allocate a depth buffer with VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT
+      // As hic.identicalMemoryLayout is set, it is not needed?
+      if (screen->info.have_EXT_host_image_copy && ici->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT && hic.identicalMemoryLayout)
+         optimalDeviceAccess = false;
+#endif
    } else
       ret = VKSCR(GetPhysicalDeviceImageFormatProperties)(screen->pdev, ici->format, ici->imageType,
                                                    ici->tiling, ici->usage, ici->flags, &image_props);
@@ -1192,15 +1201,8 @@ create_buffer(struct zink_screen *screen, struct zink_resource_object *obj,
      }
    }
 
-   if (modifiers_count) {
-      assert(modifiers_count == 3);
-      /* this is the DGC path because there's no other way to pass mem bits and I don't wanna copy/paste everything around */
-      reqs.size = modifiers[0];
-      reqs.alignment = modifiers[1];
-      reqs.memoryTypeBits = modifiers[2];
-   } else {
-      VKSCR(GetBufferMemoryRequirements)(screen->dev, obj->buffer, &reqs);
-   }
+   assert(!modifiers_count);
+   VKSCR(GetBufferMemoryRequirements)(screen->dev, obj->buffer, &reqs);
 
    if (templ->usage == PIPE_USAGE_STAGING)
       alloc_info->flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -2359,6 +2361,8 @@ zink_buffer_map(struct pipe_context *pctx,
          /* At this point, the buffer is always idle (we checked it above). */
          usage |= PIPE_MAP_UNSYNCHRONIZED;
       }
+   } else if (usage & ZINK_MAP_QBO) {
+      usage |= PIPE_MAP_UNSYNCHRONIZED;
    } else if (usage & PIPE_MAP_DONTBLOCK) {
       /* sparse/device-local will always need to wait since it has to copy */
       if (!res->obj->host_visible)
@@ -2429,7 +2433,7 @@ overwrite:
       // This is a known limitation of MoltenVK.
       // See https://github.com/KhronosGroup/MoltenVK/blob/master/Docs/MoltenVK_Runtime_UserGuide.md#known-moltenvk-limitations
 
-       || screen->instance_info.have_MVK_moltenvk
+       || screen->instance_info->have_MVK_moltenvk
 #endif
       ) {
       VkDeviceSize size = box->width;
@@ -3219,7 +3223,7 @@ zink_screen_resource_init(struct pipe_screen *pscreen)
    if (screen->info.have_EXT_external_memory_host) {
       pscreen->resource_from_user_memory = zink_resource_from_user_memory;
    }
-   if (screen->instance_info.have_KHR_external_memory_capabilities) {
+   if (screen->instance_info->have_KHR_external_memory_capabilities) {
       pscreen->memobj_create_from_handle = zink_memobj_create_from_handle;
       pscreen->memobj_destroy = zink_memobj_destroy;
       pscreen->resource_from_memobj = zink_resource_from_memobj;

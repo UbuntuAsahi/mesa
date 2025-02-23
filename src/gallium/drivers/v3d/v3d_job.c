@@ -426,6 +426,10 @@ v3d_get_job_for_fbo(struct v3d_context *v3d)
                         struct v3d_resource *rsc = v3d_resource(cbufs[i]->texture);
                         if (!rsc->writes)
                                 job->clear_tlb |= PIPE_CLEAR_COLOR0 << i;
+                        if (rsc->invalidated) {
+                                job->invalidated_load |= PIPE_CLEAR_COLOR0 << i;
+                                rsc->invalidated = false;
+                        }
                 }
         }
 
@@ -439,6 +443,16 @@ v3d_get_job_for_fbo(struct v3d_context *v3d)
 
                 if (!rsc->writes)
                         job->clear_tlb |= PIPE_CLEAR_STENCIL;
+                if (rsc->invalidated) {
+                        /* Currently gallium only applies invalidates if it
+                         * affects both depth and stencil together.
+                         */
+                         job->invalidated_load |=
+                                 PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL;
+                        rsc->invalidated = false;
+                        if (rsc->separate_stencil)
+                                rsc->separate_stencil->invalidated = false;
+                }
         }
 
         job->tile_desc.draw_x = DIV_ROUND_UP(v3d->framebuffer.width,
@@ -632,7 +646,7 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
                 v3d_X(devinfo, bcl_epilogue)(v3d, job);
 
         if (v3d->in_fence_fd >= 0) {
-                /* PIPE_CAP_NATIVE_FENCE */
+                /* pipe_caps.native_fence */
                 if (drmSyncobjImportSyncFile(v3d->fd, v3d->in_syncobj,
                                              v3d->in_fence_fd)) {
                    fprintf(stderr, "Failed to import native fence.\n");

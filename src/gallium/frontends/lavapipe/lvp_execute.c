@@ -82,7 +82,7 @@ struct lvp_render_attachment {
 
 struct rendering_state {
    struct pipe_context *pctx;
-   struct lvp_device *device; //for uniform inlining only
+   struct lvp_device *device;
    struct u_upload_mgr *uploader;
    struct cso_context *cso;
 
@@ -98,7 +98,6 @@ struct rendering_state {
    bool constbuf_dirty[LVP_SHADER_STAGES];
    bool pcbuf_dirty[LVP_SHADER_STAGES];
    bool has_pcbuf[LVP_SHADER_STAGES];
-   bool inlines_dirty[LVP_SHADER_STAGES];
    bool vp_dirty;
    bool scissor_dirty;
    bool ib_dirty;
@@ -205,6 +204,11 @@ struct rendering_state {
    struct util_dynarray internal_buffers;
 
    struct lvp_pipeline *exec_graph;
+
+   struct {
+      struct lvp_shader *compute_shader;
+      uint8_t push_constants[128 * 4];
+   } saved;
 };
 
 static struct pipe_resource *
@@ -296,93 +300,8 @@ update_pcbuf(struct rendering_state *state, enum pipe_shader_type pstage,
    state->pcbuf_dirty[api_stage] = false;
 }
 
-static void
-update_inline_shader_state(struct rendering_state *state, enum pipe_shader_type sh, bool pcbuf_dirty)
-{
-   unsigned stage = tgsi_processor_to_shader_stage(sh);
-   state->inlines_dirty[sh] = false;
-   struct lvp_shader *shader = state->shaders[stage];
-   if (!shader || !shader->inlines.can_inline)
-      return;
-   struct lvp_inline_variant v;
-   v.mask = shader->inlines.can_inline;
-   /* these buffers have already been flushed in llvmpipe, so they're safe to read */
-   nir_shader *base_nir = shader->pipeline_nir->nir;
-   if (stage == MESA_SHADER_TESS_EVAL && state->tess_ccw)
-      base_nir = shader->tess_ccw->nir;
-   nir_function_impl *impl = nir_shader_get_entrypoint(base_nir);
-   unsigned ssa_alloc = impl->ssa_alloc;
-   unsigned count = shader->inlines.count[0];
-   if (count && pcbuf_dirty) {
-      unsigned push_size = get_pcbuf_size(state, sh);
-      for (unsigned i = 0; i < count; i++) {
-         unsigned offset = shader->inlines.uniform_offsets[0][i];
-         if (offset < push_size) {
-            memcpy(&v.vals[0][i], &state->push_constants[offset], sizeof(uint32_t));
-         }
-      }
-      for (unsigned i = count; i < MAX_INLINABLE_UNIFORMS; i++)
-         v.vals[0][i] = 0;
-   }
-   bool found = false;
-   struct set_entry *entry = _mesa_set_search_or_add_pre_hashed(&shader->inlines.variants, v.mask, &v, &found);
-   void *shader_state;
-   if (found) {
-      const struct lvp_inline_variant *variant = entry->key;
-      shader_state = variant->cso;
-   } else {
-      nir_shader *nir = nir_shader_clone(NULL, base_nir);
-      NIR_PASS_V(nir, lvp_inline_uniforms, shader, v.vals[0], 0);
-      lvp_shader_optimize(nir);
-      impl = nir_shader_get_entrypoint(nir);
-      if (ssa_alloc - impl->ssa_alloc < ssa_alloc / 2 &&
-         !shader->inlines.must_inline) {
-         /* not enough change; don't inline further */
-         shader->inlines.can_inline = 0;
-         ralloc_free(nir);
-         shader->shader_cso = lvp_shader_compile(state->device, shader, nir_shader_clone(NULL, shader->pipeline_nir->nir), true);
-         _mesa_set_remove(&shader->inlines.variants, entry);
-         shader_state = shader->shader_cso;
-      } else {
-         shader_state = lvp_shader_compile(state->device, shader, nir, true);
-         struct lvp_inline_variant *variant = mem_dup(&v, sizeof(v));
-         variant->cso = shader_state;
-         entry->key = variant;
-      }
-   }
-   switch (sh) {
-   case MESA_SHADER_VERTEX:
-      state->pctx->bind_vs_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_TESS_CTRL:
-      state->pctx->bind_tcs_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_TESS_EVAL:
-      state->pctx->bind_tes_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_GEOMETRY:
-      state->pctx->bind_gs_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_TASK:
-      state->pctx->bind_ts_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_MESH:
-      state->pctx->bind_ms_state(state->pctx, shader_state);
-      break;
-   case MESA_SHADER_FRAGMENT:
-      state->pctx->bind_fs_state(state->pctx, shader_state);
-      state->noop_fs_bound = false;
-      break;
-   case MESA_SHADER_COMPUTE:
-      state->pctx->bind_compute_state(state->pctx, shader_state);
-      break;
-   default: break;
-   }
-}
-
 static void emit_compute_state(struct rendering_state *state)
 {
-   bool pcbuf_dirty = state->pcbuf_dirty[MESA_SHADER_COMPUTE];
    if (state->pcbuf_dirty[MESA_SHADER_COMPUTE])
       update_pcbuf(state, MESA_SHADER_COMPUTE, MESA_SHADER_COMPUTE);
 
@@ -393,12 +312,8 @@ static void emit_compute_state(struct rendering_state *state)
       state->constbuf_dirty[MESA_SHADER_COMPUTE] = false;
    }
 
-   if (state->inlines_dirty[MESA_SHADER_COMPUTE] &&
-       state->shaders[MESA_SHADER_COMPUTE]->inlines.can_inline) {
-      update_inline_shader_state(state, MESA_SHADER_COMPUTE, pcbuf_dirty);
-   } else if (state->compute_shader_dirty) {
+   if (state->compute_shader_dirty)
       state->pctx->bind_compute_state(state->pctx, state->shaders[MESA_SHADER_COMPUTE]->shader_cso);
-   }
 
    state->compute_shader_dirty = false;
 
@@ -564,8 +479,6 @@ static void emit_state(struct rendering_state *state)
       state->vb_dirty = false;
    }
 
-   bool pcbuf_dirty[LVP_SHADER_STAGES] = {false};
-
    lvp_forall_gfx_stage(sh) {
       if (state->constbuf_dirty[sh]) {
          for (unsigned idx = 0; idx < state->num_const_bufs[sh]; idx++)
@@ -576,14 +489,8 @@ static void emit_state(struct rendering_state *state)
    }
 
    lvp_forall_gfx_stage(sh) {
-      pcbuf_dirty[sh] = state->pcbuf_dirty[sh];
       if (state->pcbuf_dirty[sh])
          update_pcbuf(state, sh, sh);
-   }
-
-   lvp_forall_gfx_stage(sh) {
-      if (state->inlines_dirty[sh])
-         update_inline_shader_state(state, sh, pcbuf_dirty[sh]);
    }
 
    if (state->vp_dirty) {
@@ -598,12 +505,11 @@ static void emit_state(struct rendering_state *state)
 }
 
 static void
-handle_compute_shader(struct rendering_state *state, struct lvp_shader *shader, struct lvp_pipeline_layout *layout)
+handle_compute_shader(struct rendering_state *state, struct lvp_shader *shader)
 {
    state->shaders[MESA_SHADER_COMPUTE] = shader;
 
-   if ((layout->push_constant_stages & VK_SHADER_STAGE_COMPUTE_BIT) > 0)
-      state->has_pcbuf[MESA_SHADER_COMPUTE] = layout->push_constant_size > 0;
+   state->has_pcbuf[MESA_SHADER_COMPUTE] = shader->push_constant_size > 0;
 
    if (!state->has_pcbuf[MESA_SHADER_COMPUTE])
       state->pcbuf_dirty[MESA_SHADER_COMPUTE] = false;
@@ -611,9 +517,7 @@ handle_compute_shader(struct rendering_state *state, struct lvp_shader *shader, 
    state->dispatch_info.block[0] = shader->pipeline_nir->nir->info.workgroup_size[0];
    state->dispatch_info.block[1] = shader->pipeline_nir->nir->info.workgroup_size[1];
    state->dispatch_info.block[2] = shader->pipeline_nir->nir->info.workgroup_size[2];
-   state->inlines_dirty[MESA_SHADER_COMPUTE] = shader->inlines.can_inline;
-   if (!shader->inlines.can_inline)
-      state->compute_shader_dirty = true;
+   state->compute_shader_dirty = true;
 }
 
 static void handle_compute_pipeline(struct vk_cmd_queue_entry *cmd,
@@ -621,7 +525,7 @@ static void handle_compute_pipeline(struct vk_cmd_queue_entry *cmd,
 {
    LVP_FROM_HANDLE(lvp_pipeline, pipeline, cmd->u.bind_pipeline.pipeline);
 
-   handle_compute_shader(state, &pipeline->shaders[MESA_SHADER_COMPUTE], pipeline->layout);
+   handle_compute_shader(state, &pipeline->shaders[MESA_SHADER_COMPUTE]);
 }
 
 static void handle_ray_tracing_pipeline(struct vk_cmd_queue_entry *cmd,
@@ -633,8 +537,7 @@ static void handle_ray_tracing_pipeline(struct vk_cmd_queue_entry *cmd,
 
    state->shaders[MESA_SHADER_RAYGEN] = shader;
 
-   if ((pipeline->layout->push_constant_stages & LVP_RAY_TRACING_STAGES) > 0)
-      state->has_pcbuf[MESA_SHADER_RAYGEN] = pipeline->layout->push_constant_size > 0;
+   state->has_pcbuf[MESA_SHADER_RAYGEN] = shader->push_constant_size > 0;
 
    if (!state->has_pcbuf[MESA_SHADER_RAYGEN])
       state->pcbuf_dirty[MESA_SHADER_RAYGEN] = false;
@@ -697,53 +600,37 @@ handle_graphics_stages(struct rendering_state *state, VkShaderStageFlagBits shad
 
       switch (vk_stage) {
       case VK_SHADER_STAGE_FRAGMENT_BIT:
-         state->inlines_dirty[MESA_SHADER_FRAGMENT] = state->shaders[MESA_SHADER_FRAGMENT]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_FRAGMENT]->inlines.can_inline) {
-            state->pctx->bind_fs_state(state->pctx, state->shaders[MESA_SHADER_FRAGMENT]->shader_cso);
-            state->noop_fs_bound = false;
-         }
+         state->pctx->bind_fs_state(state->pctx, state->shaders[MESA_SHADER_FRAGMENT]->shader_cso);
+         state->noop_fs_bound = false;
          break;
       case VK_SHADER_STAGE_VERTEX_BIT:
-         state->inlines_dirty[MESA_SHADER_VERTEX] = state->shaders[MESA_SHADER_VERTEX]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_VERTEX]->inlines.can_inline)
-            state->pctx->bind_vs_state(state->pctx, state->shaders[MESA_SHADER_VERTEX]->shader_cso);
+         state->pctx->bind_vs_state(state->pctx, state->shaders[MESA_SHADER_VERTEX]->shader_cso);
          break;
       case VK_SHADER_STAGE_GEOMETRY_BIT:
-         state->inlines_dirty[MESA_SHADER_GEOMETRY] = state->shaders[MESA_SHADER_GEOMETRY]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_GEOMETRY]->inlines.can_inline)
-            state->pctx->bind_gs_state(state->pctx, state->shaders[MESA_SHADER_GEOMETRY]->shader_cso);
+         state->pctx->bind_gs_state(state->pctx, state->shaders[MESA_SHADER_GEOMETRY]->shader_cso);
          state->gs_output_lines = state->shaders[MESA_SHADER_GEOMETRY]->pipeline_nir->nir->info.gs.output_primitive == MESA_PRIM_LINES ? GS_OUTPUT_LINES : GS_OUTPUT_NOT_LINES;
          break;
       case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
-         state->inlines_dirty[MESA_SHADER_TESS_CTRL] = state->shaders[MESA_SHADER_TESS_CTRL]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_TESS_CTRL]->inlines.can_inline)
-            state->pctx->bind_tcs_state(state->pctx, state->shaders[MESA_SHADER_TESS_CTRL]->shader_cso);
+         state->pctx->bind_tcs_state(state->pctx, state->shaders[MESA_SHADER_TESS_CTRL]->shader_cso);
          break;
       case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
-         state->inlines_dirty[MESA_SHADER_TESS_EVAL] = state->shaders[MESA_SHADER_TESS_EVAL]->inlines.can_inline;
          state->tess_states[0] = NULL;
          state->tess_states[1] = NULL;
-         if (!state->shaders[MESA_SHADER_TESS_EVAL]->inlines.can_inline) {
-            if (dynamic_tess_origin) {
-               state->tess_states[0] = state->shaders[MESA_SHADER_TESS_EVAL]->shader_cso;
-               state->tess_states[1] = state->shaders[MESA_SHADER_TESS_EVAL]->tess_ccw_cso;
-               state->pctx->bind_tes_state(state->pctx, state->tess_states[state->tess_ccw]);
-            } else {
-               state->pctx->bind_tes_state(state->pctx, state->shaders[MESA_SHADER_TESS_EVAL]->shader_cso);
-            }
+         if (dynamic_tess_origin) {
+            state->tess_states[0] = state->shaders[MESA_SHADER_TESS_EVAL]->shader_cso;
+            state->tess_states[1] = state->shaders[MESA_SHADER_TESS_EVAL]->tess_ccw_cso;
+            state->pctx->bind_tes_state(state->pctx, state->tess_states[state->tess_ccw]);
+         } else {
+            state->pctx->bind_tes_state(state->pctx, state->shaders[MESA_SHADER_TESS_EVAL]->shader_cso);
          }
          if (!dynamic_tess_origin)
             state->tess_ccw = false;
          break;
       case VK_SHADER_STAGE_TASK_BIT_EXT:
-         state->inlines_dirty[MESA_SHADER_TASK] = state->shaders[MESA_SHADER_TASK]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_TASK]->inlines.can_inline)
-            state->pctx->bind_ts_state(state->pctx, state->shaders[MESA_SHADER_TASK]->shader_cso);
+         state->pctx->bind_ts_state(state->pctx, state->shaders[MESA_SHADER_TASK]->shader_cso);
          break;
       case VK_SHADER_STAGE_MESH_BIT_EXT:
-         state->inlines_dirty[MESA_SHADER_MESH] = state->shaders[MESA_SHADER_MESH]->inlines.can_inline;
-         if (!state->shaders[MESA_SHADER_MESH]->inlines.can_inline)
-            state->pctx->bind_ms_state(state->pctx, state->shaders[MESA_SHADER_MESH]->shader_cso);
+         state->pctx->bind_ms_state(state->pctx, state->shaders[MESA_SHADER_MESH]->shader_cso);
          break;
       default:
          assert(0);
@@ -796,13 +683,11 @@ unbind_graphics_stages(struct rendering_state *state, VkShaderStageFlagBits shad
 }
 
 static void
-handle_graphics_layout(struct rendering_state *state, gl_shader_stage stage, struct lvp_pipeline_layout *layout)
+handle_graphics_pushconsts(struct rendering_state *state, gl_shader_stage stage, struct lvp_shader *shader)
 {
-   if (layout->push_constant_stages & BITFIELD_BIT(stage)) {
-      state->has_pcbuf[stage] = layout->push_constant_size > 0;
-      if (!state->has_pcbuf[stage])
-         state->pcbuf_dirty[stage] = false;
-   }
+   state->has_pcbuf[stage] = shader->push_constant_size > 0;
+   if (!state->has_pcbuf[stage])
+      state->pcbuf_dirty[stage] = false;
 }
 
 static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
@@ -823,7 +708,7 @@ static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
 
    handle_graphics_stages(state, pipeline->graphics_state.shader_stages, dynamic_tess_origin);
    lvp_forall_gfx_stage(sh) {
-      handle_graphics_layout(state, sh, pipeline->layout);
+      handle_graphics_pushconsts(state, sh, &pipeline->shaders[sh]);
    }
 
    /* rasterization state */
@@ -870,8 +755,8 @@ static void handle_graphics_pipeline(struct lvp_pipeline *pipeline,
       if (!BITSET_TEST(ps->dynamic, MESA_VK_DYNAMIC_RS_DEPTH_BIAS_ENABLE))
          state->depth_bias.enabled = ps->rs->depth_bias.enable;
       if (!BITSET_TEST(ps->dynamic, MESA_VK_DYNAMIC_RS_DEPTH_BIAS_FACTORS)) {
-         state->depth_bias.offset_units = ps->rs->depth_bias.constant;
-         state->depth_bias.offset_scale = ps->rs->depth_bias.slope;
+         state->depth_bias.offset_units = ps->rs->depth_bias.constant_factor;
+         state->depth_bias.offset_scale = ps->rs->depth_bias.slope_factor;
          state->depth_bias.offset_clamp = ps->rs->depth_bias.clamp;
       }
 
@@ -1136,18 +1021,15 @@ static void handle_pipeline(struct vk_cmd_queue_entry *cmd,
    } else if (pipeline->type == LVP_PIPELINE_EXEC_GRAPH) {
       state->exec_graph = pipeline;
    }
-   state->push_size[pipeline->type] = pipeline->layout->push_constant_size;
-}
-
-static void
-handle_graphics_pipeline_group(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
-{
-   assert(cmd->u.bind_pipeline_shader_group_nv.pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS);
-   LVP_FROM_HANDLE(lvp_pipeline, pipeline, cmd->u.bind_pipeline_shader_group_nv.pipeline);
-   if (cmd->u.bind_pipeline_shader_group_nv.group_index)
-      pipeline = lvp_pipeline_from_handle(pipeline->groups[cmd->u.bind_pipeline_shader_group_nv.group_index - 1]);
-   handle_graphics_pipeline(pipeline, state);
-   state->push_size[pipeline->type] = pipeline->layout->push_constant_size;
+   if (pipeline->layout) {
+      state->push_size[pipeline->type] = pipeline->layout->push_constant_size;
+   } else {
+      for (unsigned i = 0; i < ARRAY_SIZE(pipeline->shaders); i++)
+         if (pipeline->shaders[i].push_constant_size) {
+            state->push_size[pipeline->type] = pipeline->shaders[i].push_constant_size;
+            break;
+         }
+   }
 }
 
 static void handle_vertex_buffers2(struct vk_cmd_queue_entry *cmd,
@@ -1238,8 +1120,7 @@ apply_dynamic_offsets(struct lvp_descriptor_set **out_set, const uint32_t *offse
 
    for (uint32_t i = 0; i < set->layout->binding_count; i++) {
       const struct lvp_descriptor_set_binding_layout *binding = &set->layout->binding[i];
-      if (binding->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC &&
-          binding->type != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+      if (!vk_descriptor_type_is_dynamic(binding->type))
          continue;
 
       struct lp_descriptor *desc = set->map;
@@ -2211,6 +2092,7 @@ copy_depth_rect(uint8_t * dst,
                                                       src, src_stride,
                                                       width, height);
       } else {
+         abort();
       }
    } else if (dst_format == PIPE_FORMAT_Z24X8_UNORM) {
       util_format_z24_unorm_s8_uint_unpack_z24(dst, dst_stride,
@@ -2221,6 +2103,8 @@ copy_depth_rect(uint8_t * dst,
          util_format_z32_float_s8x24_uint_unpack_z_float((float *)dst, dst_stride,
                                                          src, src_stride,
                                                          width, height);
+      } else {
+         abort();
       }
    } else if (dst_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT) {
       if (src_format == PIPE_FORMAT_Z32_FLOAT)
@@ -2231,15 +2115,19 @@ copy_depth_rect(uint8_t * dst,
          util_format_z32_float_s8x24_uint_pack_s_8uint(dst, dst_stride,
                                                        src, src_stride,
                                                        width, height);
+      else
+         abort();
    } else if (dst_format == PIPE_FORMAT_Z24_UNORM_S8_UINT) {
       if (src_format == PIPE_FORMAT_S8_UINT)
          util_format_z24_unorm_s8_uint_pack_s_8uint(dst, dst_stride,
                                                     src, src_stride,
                                                     width, height);
-      if (src_format == PIPE_FORMAT_Z24X8_UNORM)
+      else if (src_format == PIPE_FORMAT_Z24X8_UNORM)
          util_format_z24_unorm_s8_uint_pack_z24(dst, dst_stride,
                                                 src, src_stride,
                                                 width, height);
+      else
+         abort();
    }
 }
 
@@ -2439,6 +2327,34 @@ static void handle_copy_buffer_to_image(struct vk_cmd_queue_entry *cmd,
    }
 }
 
+static enum pipe_format
+find_depth_format(VkFormat format, VkImageAspectFlagBits aspect)
+{
+   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+      switch (format) {
+      case VK_FORMAT_D32_SFLOAT:
+      case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      case VK_FORMAT_D24_UNORM_S8_UINT:
+         return PIPE_FORMAT_Z32_FLOAT;
+      case VK_FORMAT_D16_UNORM:
+      case VK_FORMAT_D16_UNORM_S8_UINT:
+         return PIPE_FORMAT_Z16_UNORM;
+      default:
+         unreachable("unsupported format/aspect combo");
+      }
+   }
+   assert(aspect == VK_IMAGE_ASPECT_STENCIL_BIT);
+   switch (format) {
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+   case VK_FORMAT_D16_UNORM_S8_UINT:
+   case VK_FORMAT_S8_UINT:
+      return PIPE_FORMAT_S8_UINT;
+   default:
+      unreachable("unsupported format/aspect combo");
+   }
+}
+
 static void handle_copy_image(struct vk_cmd_queue_entry *cmd,
                               struct rendering_state *state)
 {
@@ -2454,30 +2370,73 @@ static void handle_copy_image(struct vk_cmd_queue_entry *cmd,
       const VkImageAspectFlagBits dst_aspects =
          copycmd->pRegions[i].dstSubresource.aspectMask;
       uint8_t dst_plane = lvp_image_aspects_to_plane(dst_image, dst_aspects);
-      struct pipe_box src_box;
+      struct pipe_box src_box, dst_box;
       src_box.x = region->srcOffset.x;
       src_box.y = region->srcOffset.y;
-      src_box.width = region->extent.width;
-      src_box.height = region->extent.height;
+      dst_box.x = region->dstOffset.x;
+      dst_box.y = region->dstOffset.y;
+      dst_box.width = src_box.width = region->extent.width;
+      dst_box.height = src_box.height = region->extent.height;
       if (src_image->planes[src_plane].bo->target == PIPE_TEXTURE_3D) {
-         src_box.depth = region->extent.depth;
+         dst_box.depth = src_box.depth = region->extent.depth;
          src_box.z = region->srcOffset.z;
+         dst_box.z = region->dstOffset.z;
       } else {
          src_box.depth = subresource_layercount(src_image, &region->srcSubresource);
+         dst_box.depth = subresource_layercount(dst_image, &region->dstSubresource);
          src_box.z = region->srcSubresource.baseArrayLayer;
+         dst_box.z = region->dstSubresource.baseArrayLayer;
       }
+
 
       unsigned dstz = dst_image->planes[dst_plane].bo->target == PIPE_TEXTURE_3D ?
                       region->dstOffset.z :
                       region->dstSubresource.baseArrayLayer;
-      state->pctx->resource_copy_region(state->pctx, dst_image->planes[dst_plane].bo,
-                                        region->dstSubresource.mipLevel,
-                                        region->dstOffset.x,
-                                        region->dstOffset.y,
-                                        dstz,
-                                        src_image->planes[src_plane].bo,
-                                        region->srcSubresource.mipLevel,
-                                        &src_box);
+      enum pipe_format src_format = src_image->planes[src_plane].bo->format,
+                       dst_format = dst_image->planes[dst_plane].bo->format;
+      /* special-casing for maintenance8 zs<->color copies */
+      if (util_format_is_depth_or_stencil(src_format) !=
+          util_format_is_depth_or_stencil(dst_format) &&
+          util_format_get_blocksize(src_format) != util_format_get_blocksize(dst_format)) {
+         if (util_format_is_depth_or_stencil(src_image->planes[src_plane].bo->format))
+            dst_format = find_depth_format(src_image->vk.format, region->srcSubresource.aspectMask);
+         else
+            src_format = find_depth_format(dst_image->vk.format, region->dstSubresource.aspectMask);
+         struct pipe_transfer *src_t, *dst_t;
+         void *src_data, *dst_data;
+         src_data = state->pctx->texture_map(state->pctx,
+                                             src_image->planes[src_plane].bo,
+                                             region->srcSubresource.mipLevel,
+                                             PIPE_MAP_READ,
+                                             &src_box,
+                                             &src_t);
+         dst_data = state->pctx->texture_map(state->pctx,
+                                             dst_image->planes[dst_plane].bo,
+                                             region->dstSubresource.mipLevel,
+                                             PIPE_MAP_WRITE,
+                                             &dst_box,
+                                             &dst_t);
+         copy_depth_box(dst_data, dst_format,
+                        dst_t->stride, dst_t->layer_stride,
+                        0, 0, 0,
+                        region->extent.width,
+                        region->extent.height,
+                        dst_box.depth,
+                        src_data, src_format,
+                        src_t->stride, src_t->layer_stride,
+                        0, 0, 0);
+         state->pctx->texture_unmap(state->pctx, src_t);
+         state->pctx->texture_unmap(state->pctx, dst_t);
+      } else {
+         state->pctx->resource_copy_region(state->pctx, dst_image->planes[dst_plane].bo,
+                                          region->dstSubresource.mipLevel,
+                                          region->dstOffset.x,
+                                          region->dstOffset.y,
+                                          dstz,
+                                          src_image->planes[src_plane].bo,
+                                          region->srcSubresource.mipLevel,
+                                          &src_box);
+      }
    }
 }
 
@@ -2558,14 +2517,24 @@ static void handle_blit_image(struct vk_cmd_queue_entry *cmd,
       assert_subresource_layers(info.dst.resource, dst_image, &blitcmd->pRegions[i].dstSubresource, blitcmd->pRegions[i].dstOffsets);
       if (src_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
          if (dstZ0 < dstZ1) {
-            info.dst.box.z = dstZ0;
+            if (dst_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
+               info.dst.box.z = dstZ0;
+               info.dst.box.depth = dstZ1 - dstZ0;
+            } else {
+               info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
+               info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
+            }
             info.src.box.z = srcZ0;
-            info.dst.box.depth = dstZ1 - dstZ0;
             info.src.box.depth = srcZ1 - srcZ0;
          } else {
-            info.dst.box.z = dstZ1;
+            if (dst_image->planes[0].bo->target == PIPE_TEXTURE_3D) {
+               info.dst.box.z = dstZ1;
+               info.dst.box.depth = dstZ0 - dstZ1;
+            } else {
+               info.dst.box.z = blitcmd->pRegions[i].dstSubresource.baseArrayLayer;
+               info.dst.box.depth = subresource_layercount(dst_image, &blitcmd->pRegions[i].dstSubresource);
+            }
             info.src.box.z = srcZ1;
-            info.dst.box.depth = dstZ0 - dstZ1;
             info.src.box.depth = srcZ0 - srcZ1;
          }
       } else {
@@ -2809,14 +2778,6 @@ static void handle_push_constants(struct vk_cmd_queue_entry *cmd,
    state->pcbuf_dirty[MESA_SHADER_TASK] |= (stage_flags & VK_SHADER_STAGE_TASK_BIT_EXT) > 0;
    state->pcbuf_dirty[MESA_SHADER_MESH] |= (stage_flags & VK_SHADER_STAGE_MESH_BIT_EXT) > 0;
    state->pcbuf_dirty[MESA_SHADER_RAYGEN] |= (stage_flags & LVP_RAY_TRACING_STAGES) > 0;
-   state->inlines_dirty[MESA_SHADER_VERTEX] |= (stage_flags & VK_SHADER_STAGE_VERTEX_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_FRAGMENT] |= (stage_flags & VK_SHADER_STAGE_FRAGMENT_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_GEOMETRY] |= (stage_flags & VK_SHADER_STAGE_GEOMETRY_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_TESS_CTRL] |= (stage_flags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_TESS_EVAL] |= (stage_flags & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_COMPUTE] |= (stage_flags & VK_SHADER_STAGE_COMPUTE_BIT) > 0;
-   state->inlines_dirty[MESA_SHADER_TASK] |= (stage_flags & VK_SHADER_STAGE_TASK_BIT_EXT) > 0;
-   state->inlines_dirty[MESA_SHADER_MESH] |= (stage_flags & VK_SHADER_STAGE_MESH_BIT_EXT) > 0;
 }
 
 static void lvp_execute_cmd_buffer(struct list_head *cmds,
@@ -2955,6 +2916,10 @@ static void handle_reset_query_pool(struct vk_cmd_queue_entry *cmd,
 {
    struct vk_cmd_reset_query_pool *qcmd = &cmd->u.reset_query_pool;
    LVP_FROM_HANDLE(lvp_query_pool, pool, qcmd->query_pool);
+
+   if (pool->base_type >= PIPE_QUERY_TYPES)
+      return;
+
    for (unsigned i = qcmd->first_query; i < qcmd->first_query + qcmd->query_count; i++) {
       if (pool->queries[i]) {
          state->pctx->destroy_query(state->pctx, pool->queries[i]);
@@ -3391,7 +3356,7 @@ static void handle_begin_transform_feedback(struct vk_cmd_queue_entry *cmd,
                        &offsets[i]);
    }
    state->pctx->set_stream_output_targets(state->pctx, state->num_so_targets,
-                                          state->so_targets, offsets);
+                                          state->so_targets, offsets, MESA_PRIM_UNKNOWN);
 }
 
 static void handle_end_transform_feedback(struct vk_cmd_queue_entry *cmd,
@@ -3414,7 +3379,7 @@ static void handle_end_transform_feedback(struct vk_cmd_queue_entry *cmd,
                            &offset);
       }
    }
-   state->pctx->set_stream_output_targets(state->pctx, 0, NULL, NULL);
+   state->pctx->set_stream_output_targets(state->pctx, 0, NULL, NULL, 0);
 }
 
 static void handle_draw_indirect_byte_count(struct vk_cmd_queue_entry *cmd,
@@ -3852,12 +3817,12 @@ handle_shaders(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
       unbind_graphics_stages(state, null_stages & all_gfx);
       handle_graphics_stages(state, vkstages & all_gfx, true);
       u_foreach_bit(i, new_stages) {
-         handle_graphics_layout(state, i, state->shaders[i]->layout);
+         handle_graphics_pushconsts(state, i, state->shaders[i]);
       }
    }
    /* ignore compute unbinds */
    if (new_stages & BITFIELD_BIT(MESA_SHADER_COMPUTE)) {
-      handle_compute_shader(state, state->shaders[MESA_SHADER_COMPUTE], state->shaders[MESA_SHADER_COMPUTE]->layout);
+      handle_compute_shader(state, state->shaders[MESA_SHADER_COMPUTE]);
    }
 
    if (gfx) {
@@ -3937,228 +3902,6 @@ get_buffer(struct rendering_state *state, const uint8_t *ptr, size_t *offset)
    }
    fprintf(stderr, "unrecognized BDA!\n");
    abort();
-}
-
-static size_t
-process_sequence(struct rendering_state *state,
-                 VkPipeline pipeline, struct lvp_indirect_command_layout_nv *dlayout,
-                 struct list_head *list, uint8_t *pbuf, size_t max_size,
-                 uint8_t **map_streams, const VkIndirectCommandsStreamNV *pstreams, uint32_t seq, bool print_cmds)
-{
-   size_t size = 0;
-
-   for (uint32_t t = 0; t < dlayout->token_count; t++){
-      const VkIndirectCommandsLayoutTokenNV *token = &dlayout->tokens[t];
-      uint32_t stride = dlayout->stream_strides[token->stream];
-      uint8_t *stream = map_streams[token->stream];
-      uint32_t offset = stride * seq + token->offset;
-      uint32_t draw_offset = offset + pstreams[token->stream].offset;
-      void *input = stream + offset;
-
-      struct vk_cmd_queue_entry *cmd = (struct vk_cmd_queue_entry*)(pbuf + size);
-      size_t cmd_size = vk_cmd_queue_type_sizes[lvp_nv_dgc_token_to_cmd_type(token)];
-      uint8_t *cmdptr = (void*)(pbuf + size + cmd_size);
-
-      if (print_cmds)
-         fprintf(stderr, "DGC %s\n", vk_IndirectCommandsTokenTypeNV_to_str(token->tokenType));
-
-      if (max_size < size + cmd_size)
-         abort();
-      cmd->type = lvp_nv_dgc_token_to_cmd_type(token);
-
-      switch (token->tokenType) {
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_SHADER_GROUP_NV: {
-         VkBindShaderGroupIndirectCommandNV *bind = input;
-         cmd->u.bind_pipeline_shader_group_nv.pipeline_bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
-         cmd->u.bind_pipeline_shader_group_nv.pipeline = pipeline;
-         cmd->u.bind_pipeline_shader_group_nv.group_index = bind->groupIndex;
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_STATE_FLAGS_NV: {
-         VkSetStateFlagsIndirectCommandNV *state = input;
-         if (token->indirectStateFlags & VK_INDIRECT_STATE_FLAG_FRONTFACE_BIT_NV) {
-            if (state->data & BITFIELD_BIT(VK_FRONT_FACE_CLOCKWISE)) {
-               cmd->u.set_front_face.front_face = VK_FRONT_FACE_CLOCKWISE;
-            } else {
-               cmd->u.set_front_face.front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-            }
-         } else {
-            /* skip this if unrecognized state flag */
-            continue;
-         }
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_PUSH_CONSTANT_NV: {
-         uint32_t *data = input;
-         cmd_size += token->pushconstantSize + sizeof(VkPushConstantsInfoKHR);
-         if (max_size < size + cmd_size)
-            abort();
-         cmd->u.push_constants2.push_constants_info = (void*)cmdptr;
-         VkPushConstantsInfoKHR *pci = cmd->u.push_constants2.push_constants_info;
-         pci->layout = token->pushconstantPipelineLayout;
-         pci->stageFlags = token->pushconstantShaderStageFlags;
-         pci->offset = token->pushconstantOffset;
-         pci->size = token->pushconstantSize;
-         pci->pValues = (void*)((uint8_t*)cmdptr + sizeof(VkPushConstantsInfoKHR));
-         memcpy((void*)pci->pValues, data, token->pushconstantSize);
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_INDEX_BUFFER_NV: {
-         VkBindIndexBufferIndirectCommandNV *data = input;
-         cmd->u.bind_index_buffer.offset = 0;
-         if (data->bufferAddress)
-            cmd->u.bind_index_buffer.buffer = get_buffer(state, (void*)(uintptr_t)data->bufferAddress, (size_t*)&cmd->u.bind_index_buffer.offset);
-         else
-            cmd->u.bind_index_buffer.buffer = VK_NULL_HANDLE;
-         cmd->u.bind_index_buffer.index_type = data->indexType;
-         for (unsigned i = 0; i < token->indexTypeCount; i++) {
-            if (data->indexType == token->pIndexTypeValues[i]) {
-               cmd->u.bind_index_buffer.index_type = token->pIndexTypes[i];
-               break;
-            }
-         }
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_VERTEX_BUFFER_NV: {
-         VkBindVertexBufferIndirectCommandNV *data = input;
-         cmd_size += sizeof(*cmd->u.bind_vertex_buffers2.buffers) + sizeof(*cmd->u.bind_vertex_buffers2.offsets);
-         cmd_size += sizeof(*cmd->u.bind_vertex_buffers2.sizes) + sizeof(*cmd->u.bind_vertex_buffers2.strides);
-         if (max_size < size + cmd_size)
-            abort();
-
-         cmd->u.bind_vertex_buffers2.first_binding = token->vertexBindingUnit;
-         cmd->u.bind_vertex_buffers2.binding_count = 1;
-
-         cmd->u.bind_vertex_buffers2.buffers = (void*)cmdptr;
-         uint32_t alloc_offset = sizeof(*cmd->u.bind_vertex_buffers2.buffers);
-
-         cmd->u.bind_vertex_buffers2.offsets = (void*)(cmdptr + alloc_offset);
-         alloc_offset += sizeof(*cmd->u.bind_vertex_buffers2.offsets);
-
-         cmd->u.bind_vertex_buffers2.sizes = (void*)(cmdptr + alloc_offset);
-         alloc_offset += sizeof(*cmd->u.bind_vertex_buffers2.sizes);
-
-         cmd->u.bind_vertex_buffers2.offsets[0] = 0;
-         cmd->u.bind_vertex_buffers2.buffers[0] = data->bufferAddress ? get_buffer(state, (void*)(uintptr_t)data->bufferAddress, (size_t*)&cmd->u.bind_vertex_buffers2.offsets[0]) : VK_NULL_HANDLE;
-         cmd->u.bind_vertex_buffers2.sizes[0] = data->size;
-
-         if (token->vertexDynamicStride) {
-            cmd->u.bind_vertex_buffers2.strides = (void*)(cmdptr + alloc_offset);
-            cmd->u.bind_vertex_buffers2.strides[0] = data->stride;
-         } else {
-            cmd->u.bind_vertex_buffers2.strides = NULL;
-         }
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_NV: {
-         cmd->u.draw_indexed_indirect.buffer = pstreams[token->stream].buffer;
-         cmd->u.draw_indexed_indirect.offset = draw_offset;
-         cmd->u.draw_indexed_indirect.draw_count = 1;
-         cmd->u.draw_indexed_indirect.stride = 0;
-         break;
-      }
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_NV: {
-         cmd->u.draw_indirect.buffer = pstreams[token->stream].buffer;
-         cmd->u.draw_indirect.offset = draw_offset;
-         cmd->u.draw_indirect.draw_count = 1;
-         cmd->u.draw_indirect.stride = 0;
-         break;
-      }
-      // only available if VK_EXT_mesh_shader is supported
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_MESH_TASKS_NV: {
-         cmd->u.draw_mesh_tasks_indirect_ext.buffer = pstreams[token->stream].buffer;
-         cmd->u.draw_mesh_tasks_indirect_ext.offset = draw_offset;
-         cmd->u.draw_mesh_tasks_indirect_ext.draw_count = 1;
-         cmd->u.draw_mesh_tasks_indirect_ext.stride = 0;
-         break;
-      }
-      // only available if VK_NV_mesh_shader is supported
-      case VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_TASKS_NV:
-         unreachable("NV_mesh_shader unsupported!");
-      default:
-         unreachable("unknown token type");
-         break;
-      }
-      size += cmd_size;
-      list_addtail(&cmd->cmd_link, list);
-   }
-   return size;
-}
-
-static void
-handle_preprocess_generated_commands(struct vk_cmd_queue_entry *cmd, struct rendering_state *state, bool print_cmds)
-{
-   VkGeneratedCommandsInfoNV *pre = cmd->u.preprocess_generated_commands_nv.generated_commands_info;
-   VK_FROM_HANDLE(lvp_indirect_command_layout_nv, dlayout, pre->indirectCommandsLayout);
-   struct pipe_transfer *stream_maps[16];
-   uint8_t *streams[16];
-   for (unsigned i = 0; i < pre->streamCount; i++) {
-      struct lvp_buffer *buf = lvp_buffer_from_handle(pre->pStreams[i].buffer);
-      streams[i] = pipe_buffer_map(state->pctx, buf->bo, PIPE_MAP_READ, &stream_maps[i]);
-      streams[i] += pre->pStreams[i].offset;
-   }
-   LVP_FROM_HANDLE(lvp_buffer, pbuf, pre->preprocessBuffer);
-   LVP_FROM_HANDLE(lvp_buffer, seqc, pre->sequencesCountBuffer);
-   LVP_FROM_HANDLE(lvp_buffer, seqi, pre->sequencesIndexBuffer);
-
-   unsigned seq_count = pre->sequencesCount;
-   if (seqc) {
-      unsigned count = 0;
-      pipe_buffer_read(state->pctx, seqc->bo, pre->sequencesCountOffset, sizeof(uint32_t), &count);
-      seq_count = MIN2(count, seq_count);
-   }
-   uint32_t *seq = NULL;
-   struct pipe_transfer *seq_map = NULL;
-   if (seqi) {
-      seq = pipe_buffer_map(state->pctx, seqi->bo, PIPE_MAP_READ, &seq_map);
-      seq = (uint32_t*)(((uint8_t*)seq) + pre->sequencesIndexOffset);
-   }
-
-   struct pipe_transfer *pmap;
-   uint8_t *p = pipe_buffer_map(state->pctx, pbuf->bo, PIPE_MAP_WRITE, &pmap);
-   p += pre->preprocessOffset;
-   struct list_head *list = (void*)p;
-   size_t size = sizeof(struct list_head);
-   size_t max_size = pre->preprocessSize;
-   if (size > max_size)
-      abort();
-   list_inithead(list);
-
-   size_t offset = size;
-   for (unsigned i = 0; i < seq_count; i++) {
-      uint32_t s = seq ? seq[i] : i;
-      offset += process_sequence(state, pre->pipeline, dlayout, list, p + offset, max_size, streams, pre->pStreams, s, print_cmds);
-   }
-
-   /* vk_cmd_queue will copy the binary and break the list, so null the tail pointer */
-   list->prev->next = NULL;
-
-   for (unsigned i = 0; i < pre->streamCount; i++)
-      state->pctx->buffer_unmap(state->pctx, stream_maps[i]);
-   state->pctx->buffer_unmap(state->pctx, pmap);
-   if (seq_map)
-      state->pctx->buffer_unmap(state->pctx, seq_map);
-}
-
-static void
-handle_execute_generated_commands(struct vk_cmd_queue_entry *cmd, struct rendering_state *state, bool print_cmds)
-{
-   VkGeneratedCommandsInfoNV *gen = cmd->u.execute_generated_commands_nv.generated_commands_info;
-   struct vk_cmd_execute_generated_commands_nv *exec = &cmd->u.execute_generated_commands_nv;
-   if (!exec->is_preprocessed) {
-      struct vk_cmd_queue_entry pre;
-      pre.u.preprocess_generated_commands_nv.generated_commands_info = exec->generated_commands_info;
-      handle_preprocess_generated_commands(&pre, state, print_cmds);
-   }
-   LVP_FROM_HANDLE(lvp_buffer, pbuf, gen->preprocessBuffer);
-   struct pipe_transfer *pmap;
-   uint8_t *p = pipe_buffer_map(state->pctx, pbuf->bo, PIPE_MAP_WRITE, &pmap);
-   p += gen->preprocessOffset;
-   struct list_head *list = (void*)p;
-
-   lvp_execute_cmd_buffer(list, state, print_cmds);
-
-   state->pctx->buffer_unmap(state->pctx, pmap);
 }
 
 static size_t
@@ -4495,7 +4238,7 @@ bind_db_samplers(struct rendering_state *state, enum lvp_pipeline_type pipeline_
       return;
    }
    uint8_t *db = state->desc_buffer_addrs[buffer_index] + state->desc_buffer_offsets[pipeline_type][set].offset;
-   uint8_t did_update = 0;
+   uint32_t did_update = 0;
    for (uint32_t binding_index = 0; binding_index < set_layout->binding_count; binding_index++) {
       const struct lvp_descriptor_set_binding_layout *bind_layout = &set_layout->binding[binding_index];
       if (!bind_layout->immutable_samplers)
@@ -4624,7 +4367,7 @@ dispatch_graph(struct rendering_state *state, const VkDispatchGraphInfoAMDX *inf
       for (uint32_t z = 0; z < dispatch.z; z++) {
          for (uint32_t y = 0; y < dispatch.y; y++) {
             for (uint32_t x = 0; x < dispatch.x; x++) {
-               handle_compute_shader(state, shader, pipeline->layout);
+               handle_compute_shader(state, shader);
                emit_compute_state(state);
 
                state->dispatch_info.grid_base[0] = x;
@@ -4748,15 +4491,6 @@ handle_copy_acceleration_structure_to_memory(struct vk_cmd_queue_entry *cmd, str
    }
 
    memcpy(&dst->instances[dst->instance_count], src, accel_struct->size);
-}
-
-static void
-handle_build_acceleration_structures(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
-{
-   struct vk_cmd_build_acceleration_structures_khr *build = &cmd->u.build_acceleration_structures_khr;
-
-   for (uint32_t i = 0; i < build->info_count; i++)
-      lvp_build_acceleration_structure(&build->infos[i], build->pp_build_range_infos[i]);
 }
 
 static void
@@ -4923,6 +4657,84 @@ handle_trace_rays_indirect2(struct vk_cmd_queue_entry *cmd, struct rendering_sta
    state->pctx->launch_grid(state->pctx, &state->trace_rays_info);
 }
 
+static void
+handle_write_buffer_cp(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   struct lvp_cmd_write_buffer_cp *write = cmd->driver_data;
+
+   finish_fence(state);
+
+   memcpy((void *)(uintptr_t)write->addr, write->data, write->size);
+}
+
+static void
+handle_dispatch_unaligned(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   assert(cmd->u.dispatch.group_count_y == 1);
+   assert(cmd->u.dispatch.group_count_z == 1);
+
+   uint32_t last_block_size = state->dispatch_info.block[0];
+
+   state->dispatch_info.grid[0] = cmd->u.dispatch.group_count_x / last_block_size;
+   state->dispatch_info.grid[1] = 1;
+   state->dispatch_info.grid[2] = 1;
+   state->dispatch_info.grid_base[0] = 0;
+   state->dispatch_info.grid_base[1] = 0;
+   state->dispatch_info.grid_base[2] = 0;
+   state->dispatch_info.indirect = NULL;
+   state->pctx->launch_grid(state->pctx, &state->dispatch_info);
+
+   if (cmd->u.dispatch.group_count_x % last_block_size) {
+      state->dispatch_info.block[0] = cmd->u.dispatch.group_count_x % last_block_size;
+      state->dispatch_info.grid[0] = 1;
+      state->dispatch_info.grid_base[0] = cmd->u.dispatch.group_count_x / last_block_size;
+      state->pctx->launch_grid(state->pctx, &state->dispatch_info);
+      state->dispatch_info.block[0] = last_block_size;
+   }
+}
+
+static void
+handle_fill_buffer_addr(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   struct lvp_cmd_fill_buffer_addr *fill = cmd->driver_data;
+
+   finish_fence(state);
+
+   uint32_t *dst = (void *)(uintptr_t)fill->addr;
+   for (uint32_t i = 0; i < fill->size / 4; i++) {
+      dst[i] = fill->data;
+   }
+}
+
+static void
+handle_encode_as(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   struct lvp_cmd_encode_as *encode = cmd->driver_data;
+
+   finish_fence(state);
+
+   lvp_encode_as(encode->dst, encode->intermediate_as_addr,
+                 encode->intermediate_header_addr, encode->leaf_count,
+                 encode->geometry_type);
+}
+
+static void
+handle_save_state(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   state->saved.compute_shader = state->shaders[MESA_SHADER_COMPUTE];
+   memcpy(state->saved.push_constants, state->push_constants, sizeof(state->push_constants));
+}
+
+static void
+handle_restore_state(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
+{
+   if (state->saved.compute_shader)
+      handle_compute_shader(state, state->saved.compute_shader);
+
+   memcpy(state->push_constants, state->saved.push_constants, sizeof(state->push_constants));
+   state->pcbuf_dirty[MESA_SHADER_COMPUTE] = true;
+}
+
 void lvp_add_enqueue_cmd_entrypoints(struct vk_device_dispatch_table *disp)
 {
    struct vk_device_dispatch_table cmd_enqueue_dispatch;
@@ -5071,7 +4883,6 @@ void lvp_add_enqueue_cmd_entrypoints(struct vk_device_dispatch_table *disp)
    ENQUEUE_CMD(CmdCopyAccelerationStructureKHR)
    ENQUEUE_CMD(CmdCopyMemoryToAccelerationStructureKHR)
    ENQUEUE_CMD(CmdCopyAccelerationStructureToMemoryKHR)
-   ENQUEUE_CMD(CmdBuildAccelerationStructuresKHR)
    ENQUEUE_CMD(CmdBuildAccelerationStructuresIndirectKHR)
    ENQUEUE_CMD(CmdWriteAccelerationStructuresPropertiesKHR)
 
@@ -5090,6 +4901,25 @@ static void lvp_execute_cmd_buffer(struct list_head *cmds,
    bool did_flush = false;
 
    LIST_FOR_EACH_ENTRY(cmd, cmds, cmd_link) {
+      if (cmd->type >= VK_CMD_TYPE_COUNT) {
+         uint32_t type = cmd->type;
+         if (type == LVP_CMD_WRITE_BUFFER_CP) {
+            handle_write_buffer_cp(cmd, state);
+         } else if (type == LVP_CMD_DISPATCH_UNALIGNED) {
+            emit_compute_state(state);
+            handle_dispatch_unaligned(cmd, state);
+         } else if (type == LVP_CMD_FILL_BUFFER_ADDR) {
+            handle_fill_buffer_addr(cmd, state);
+         } else if (type == LVP_CMD_ENCODE_AS) {
+            handle_encode_as(cmd, state);
+         } else if (type == LVP_CMD_SAVE_STATE) {
+            handle_save_state(cmd, state);
+         } else if (type == LVP_CMD_RESTORE_STATE) {
+            handle_restore_state(cmd, state);
+         }
+         continue;
+      }
+
       if (print_cmds)
          fprintf(stderr, "%s\n", vk_cmd_queue_type_names[cmd->type]);
       switch ((unsigned)cmd->type) {
@@ -5411,15 +5241,6 @@ static void lvp_execute_cmd_buffer(struct list_head *cmds,
          emit_state(state);
          handle_draw_mesh_tasks_indirect_count(cmd, state);
          break;
-      case VK_CMD_BIND_PIPELINE_SHADER_GROUP_NV:
-         handle_graphics_pipeline_group(cmd, state);
-         break;
-      case VK_CMD_PREPROCESS_GENERATED_COMMANDS_NV:
-         handle_preprocess_generated_commands(cmd, state, print_cmds);
-         break;
-      case VK_CMD_EXECUTE_GENERATED_COMMANDS_NV:
-         handle_execute_generated_commands(cmd, state, print_cmds);
-         break;
       case VK_CMD_PREPROCESS_GENERATED_COMMANDS_EXT:
          handle_preprocess_generated_commands_ext(cmd, state, print_cmds);
          break;
@@ -5460,9 +5281,6 @@ static void lvp_execute_cmd_buffer(struct list_head *cmds,
          break;
       case VK_CMD_COPY_ACCELERATION_STRUCTURE_TO_MEMORY_KHR:
          handle_copy_acceleration_structure_to_memory(cmd, state);
-         break;
-      case VK_CMD_BUILD_ACCELERATION_STRUCTURES_KHR:
-         handle_build_acceleration_structures(cmd, state);
          break;
       case VK_CMD_BUILD_ACCELERATION_STRUCTURES_INDIRECT_KHR:
          break;

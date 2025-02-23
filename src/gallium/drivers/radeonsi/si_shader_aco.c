@@ -26,6 +26,7 @@
 #include "si_pipe.h"
 #include "ac_hw_stage.h"
 #include "aco_interface.h"
+#include "nir.h"
 
 static void
 si_aco_compiler_debug(void *private_data, enum aco_compiler_debug_level level,
@@ -69,10 +70,6 @@ si_fill_aco_shader_info(struct si_shader *shader, struct aco_shader_info *info,
 
    info->wave_size = shader->wave_size;
    info->workgroup_size = si_get_max_workgroup_size(shader);
-   /* aco need non-zero value */
-   if (!info->workgroup_size)
-      info->workgroup_size = info->wave_size;
-
    info->merged_shader_compiled_separately = !shader->is_gs_copy_shader &&
       si_is_multi_part_shader(shader) && !shader->is_monolithic;
 
@@ -80,14 +77,17 @@ si_fill_aco_shader_info(struct si_shader *shader, struct aco_shader_info *info,
    info->hw_stage = si_select_hw_stage(stage, key, gfx_level);
 
    if (stage <= MESA_SHADER_GEOMETRY && key->ge.as_ngg && !key->ge.as_es) {
-      info->has_ngg_culling = si_shader_culling_enabled(shader);
-      info->has_ngg_early_prim_export = gfx10_ngg_export_prim_early(shader);
+      info->schedule_ngg_pos_exports = sel->screen->info.gfx_level < GFX11 &&
+                                       si_shader_culling_enabled(shader) &&
+                                       gfx10_ngg_export_prim_early(shader);
    }
 
    switch (stage) {
    case MESA_SHADER_TESS_CTRL:
       info->vs.tcs_in_out_eq = key->ge.opt.same_patch_vertices;
-      info->vs.tcs_temp_only_input_mask = sel->info.tcs_vgpr_only_inputs;
+      info->vs.any_tcs_inputs_via_lds = sel->info.tcs_inputs_via_lds ||
+                                        (!shader->key.ge.opt.same_patch_vertices &&
+                                         sel->info.tcs_inputs_via_temp);
       info->tcs.tcs_offchip_layout = args->tcs_offchip_layout;
       break;
    case MESA_SHADER_FRAGMENT:
@@ -145,43 +145,32 @@ si_aco_build_shader_binary(void **data, const struct ac_shader_config *config,
 }
 
 bool
-si_aco_compile_shader(struct si_shader *shader,
-                      struct si_shader_args *args,
-                      struct nir_shader *nir,
+si_aco_compile_shader(struct si_shader *shader, struct si_linked_shaders *linked,
                       struct util_debug_callback *debug)
 {
    const struct si_shader_selector *sel = shader->selector;
+   nir_shader *nir = linked->consumer.nir;
 
    struct aco_compiler_options options = {0};
-   si_fill_aco_options(sel->screen, sel->stage, &options, debug);
+   si_fill_aco_options(sel->screen, nir->info.stage, &options, debug);
 
    struct aco_shader_info info = {0};
-   si_fill_aco_shader_info(shader, &info, args);
+   si_fill_aco_shader_info(shader, &info, &linked->consumer.args);
 
+   const struct ac_shader_args *args = &linked->consumer.args.ac;
    nir_shader *shaders[2];
    unsigned num_shaders = 0;
 
-   bool free_nir = false;
-   struct si_shader prev_shader = {};
-   struct si_shader_args prev_args;
-
    /* For merged shader stage. */
-   if (shader->is_monolithic && sel->screen->info.gfx_level >= GFX9 &&
-       (sel->stage == MESA_SHADER_TESS_CTRL || sel->stage == MESA_SHADER_GEOMETRY)) {
-
-      shaders[num_shaders++] =
-         si_get_prev_stage_nir_shader(shader, &prev_shader, &prev_args, &free_nir);
-
-      args = &prev_args;
+   if (linked->producer.nir) {
+      shaders[num_shaders++] = linked->producer.nir;
+      args = &linked->producer.args.ac;
    }
 
    shaders[num_shaders++] = nir;
 
-   aco_compile_shader(&options, &info, num_shaders, shaders, &args->ac,
+   aco_compile_shader(&options, &info, num_shaders, shaders, args,
                       si_aco_build_shader_binary, (void **)shader);
-
-   if (free_nir)
-      ralloc_free(shaders[0]);
 
    return true;
 }
@@ -256,8 +245,8 @@ si_aco_build_shader_part_binary(void** priv_ptr, uint32_t num_sgprs, uint32_t nu
       result->binary.disasm_size = disasm_size;
    }
 
-   result->config.num_sgprs = num_sgprs;
-   result->config.num_vgprs = num_vgprs;
+   result->num_sgprs = num_sgprs;
+   result->num_vgprs = num_vgprs;
 }
 
 static bool
@@ -281,6 +270,9 @@ si_aco_build_ps_prolog(struct aco_compiler_options *options,
       .force_linear_center_interp = key->ps_prolog.states.force_linear_center_interp,
 
       .samplemask_log_ps_iter = key->ps_prolog.states.samplemask_log_ps_iter,
+      .get_frag_coord_from_pixel_coord = key->ps_prolog.states.get_frag_coord_from_pixel_coord,
+      .pixel_center_integer = key->ps_prolog.pixel_center_integer,
+      .force_samplemask_to_helper_invocation = key->ps_prolog.states.force_samplemask_to_helper_invocation,
       .num_interp_inputs = key->ps_prolog.num_interp_inputs,
       .colors_read = key->ps_prolog.colors_read,
       .color_interp_vgpr_index[0] = key->ps_prolog.color_interp_vgpr_index[0],
@@ -312,14 +304,18 @@ si_aco_build_ps_epilog(struct aco_compiler_options *options,
       .spi_shader_col_format = key->ps_epilog.states.spi_shader_col_format,
       .color_is_int8 = key->ps_epilog.states.color_is_int8,
       .color_is_int10 = key->ps_epilog.states.color_is_int10,
-      .mrt0_is_dual_src = key->ps_epilog.states.dual_src_blend_swizzle,
-      .color_types = key->ps_epilog.color_types,
-      .clamp_color = key->ps_epilog.states.clamp_color,
+      .writes_all_cbufs = key->ps_epilog.writes_all_cbufs,
+      .alpha_func = key->ps_epilog.states.alpha_func,
       .alpha_to_one = key->ps_epilog.states.alpha_to_one,
       .alpha_to_coverage_via_mrtz = key->ps_epilog.states.alpha_to_coverage_via_mrtz,
+      .clamp_color = key->ps_epilog.states.clamp_color,
+      .mrt0_is_dual_src = key->ps_epilog.states.dual_src_blend_swizzle,
+      /* rbplus_depth_only_opt only affects registers, not the shader */
+      .kill_depth = key->ps_epilog.states.kill_z,
+      .kill_stencil = key->ps_epilog.states.kill_stencil,
+      .kill_samplemask = key->ps_epilog.states.kill_samplemask,
       .skip_null_export = options->gfx_level >= GFX10 && !key->ps_epilog.uses_discard,
-      .broadcast_last_cbuf = key->ps_epilog.states.last_cbuf,
-      .alpha_func = key->ps_epilog.states.alpha_func,
+      .color_types = key->ps_epilog.color_types,
       .color_map = { 0, 1, 2, 3, 4, 5, 6, 7 },
    };
 

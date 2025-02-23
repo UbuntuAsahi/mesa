@@ -226,16 +226,14 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
             flags |= RADEON_SURF_NO_HTILE;
       }
 
-      /* The kernel code translating tiling flags into a modifier was wrong
-       * until .58, so don't set these attributes for older versions.
-       */
-      bool supports_display_dcc = sscreen->info.drm_minor >= 58;
-      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) || supports_display_dcc)) {
+      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) ||
+                           sscreen->info.gfx12_supports_display_dcc)) {
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */
          surface->u.gfx9.color.dcc_number_type = ac_get_cb_number_type(format);
          surface->u.gfx9.color.dcc_data_format = ac_get_cb_format(sscreen->info.gfx_level, format);
+         surface->u.gfx9.color.dcc_write_compress_disable = false;
       }
 
       if (modifier == DRM_FORMAT_MOD_INVALID &&
@@ -385,6 +383,9 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
 
    if (ptex->flags & PIPE_RESOURCE_FLAG_SPARSE)
       flags |= RADEON_SURF_PRT;
+
+   if (ptex->bind & (PIPE_BIND_VIDEO_DECODE_DPB | PIPE_BIND_VIDEO_ENCODE_DPB))
+      flags |= RADEON_SURF_VIDEO_REFERENCE;
 
    surface->modifier = modifier;
 
@@ -803,10 +804,12 @@ static bool si_texture_get_handle(struct pipe_screen *screen, struct pipe_contex
       }
 
       const bool debug_disable_dcc = sscreen->debug_flags & DBG(NO_EXPORTED_DCC);
-      /* Since shader image stores don't support DCC on GFX9 and older,
-       * disable it for external clients that want write access.
+      /* Disable DCC for external clients that might use shader image stores.
+       * They don't support DCC on GFX9 and older. GFX10/10.3 is also problematic
+       * if the view formats between clients are incompatible or if DCC clear is
+       * used.
        */
-      const bool shader_write = sscreen->info.gfx_level <= GFX9 &&
+      const bool shader_write = sscreen->info.gfx_level < GFX11 &&
                                 usage & PIPE_HANDLE_USAGE_SHADER_WRITE &&
                                 !tex->is_depth &&
                                 tex->surface.meta_offset;
@@ -1145,20 +1148,17 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
       tex->depth_clear_value[i] = 1.0;
 
    if (tex->surface.flags & RADEON_SURF_TC_COMPATIBLE_HTILE) {
+      assert(sscreen->info.gfx_level < GFX12);
+
       /* On GFX8, HTILE uses different tiling depending on the TC_COMPATIBLE_HTILE
        * setting, so we have to enable it if we enabled it at allocation.
        *
-       * GFX11 has Z corruption if we don't enable TC-compatible HTILE, see:
-       * https://gitlab.freedesktop.org/mesa/mesa/-/issues/11891
-       *
-       * GFX9 and later use the same tiling for both, so TC-compatible HTILE can be
+       * GFX9+ and later use the same tiling for both, so TC-compatible HTILE can be
        * enabled on demand.
        */
       tex->tc_compatible_htile = sscreen->info.gfx_level == GFX8 ||
-                                 sscreen->info.gfx_level >= GFX11 ||
                                  /* Mipmapping always starts TC-compatible. */
                                  (sscreen->info.gfx_level >= GFX9 &&
-                                  sscreen->info.gfx_level < GFX11 &&
                                   tex->buffer.b.b.last_level > 0);
    }
 
@@ -1304,10 +1304,12 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
 
    /* Execute the clears. */
    if (num_clears) {
-      struct si_context *sctx = si_get_aux_context(&sscreen->aux_context.compute_resource_init);
+      struct si_aux_context *auxctx = tex->buffer.flags & RADEON_FLAG_ENCRYPTED ?
+         &sscreen->aux_context.general : &sscreen->aux_context.compute_resource_init;
+      struct si_context *sctx = si_get_aux_context(auxctx);
 
       si_execute_clears(sctx, clears, num_clears, false);
-      si_put_aux_context_flush(&sscreen->aux_context.compute_resource_init);
+      si_put_aux_context_flush(auxctx);
    }
 
    /* Initialize the CMASK base register value. */
@@ -1406,16 +1408,9 @@ si_texture_create_with_modifier(struct pipe_screen *screen,
 
    bool is_flushed_depth = templ->flags & SI_RESOURCE_FLAG_FLUSHED_DEPTH ||
                            templ->flags & SI_RESOURCE_FLAG_FORCE_LINEAR;
-   /* We enable TC-compatible HTILE for all Z/S on GFX11+ by default because non-TC-compatible
-    * HTILE causes corruption on Navi31.
-    *
-    * See: https://gitlab.freedesktop.org/mesa/mesa/-/issues/11891
-    */
    bool tc_compatible_htile = is_zs && !is_flushed_depth &&
                               !(sscreen->debug_flags & DBG(NO_HYPERZ)) &&
-                              sscreen->info.has_tc_compatible_htile &&
-                              (sscreen->info.gfx_level >= GFX11 ||
-                               templ->flags & PIPE_RESOURCE_FLAG_TEXTURING_MORE_LIKELY);
+                              sscreen->info.has_tc_compatible_htile;
 
    enum radeon_surf_mode tile_mode = si_choose_tiling(sscreen, templ, tc_compatible_htile);
 
@@ -2071,7 +2066,8 @@ static void *si_texture_transfer_map(struct pipe_context *ctx, struct pipe_resou
             tex->buffer.domains & RADEON_DOMAIN_VRAM || tex->buffer.flags & RADEON_FLAG_GTT_WC;
       /* Write & linear only: */
       else if (si_cs_is_buffer_referenced(sctx, tex->buffer.buf, RADEON_USAGE_READWRITE) ||
-               !sctx->ws->buffer_wait(sctx->ws, tex->buffer.buf, 0, RADEON_USAGE_READWRITE)) {
+               !sctx->ws->buffer_wait(sctx->ws, tex->buffer.buf, 0,
+                                      RADEON_USAGE_READWRITE | RADEON_USAGE_DISALLOW_SLOW_REPLY)) {
          /* It's busy. */
          if (si_can_invalidate_texture(sctx->screen, tex, usage, box))
             si_texture_invalidate_storage(sctx, tex);

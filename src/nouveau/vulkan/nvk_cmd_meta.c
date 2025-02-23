@@ -38,13 +38,14 @@ nvk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
 VkResult
 nvk_device_init_meta(struct nvk_device *dev)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    VkResult result = vk_meta_device_init(&dev->vk, &dev->meta);
    if (result != VK_SUCCESS)
       return result;
 
-   dev->meta.use_gs_for_layer = pdev->info.cls_eng3d < MAXWELL_B,
+   dev->meta.use_gs_for_layer = pdev->info.cls_eng3d < MAXWELL_B;
+   dev->meta.use_rect_list_pipeline = true;
    dev->meta.cmd_bind_map_buffer = nvk_cmd_bind_map_buffer;
    dev->meta.max_bind_map_buffer_size_B = 64 * 1024; /* TODO */
 

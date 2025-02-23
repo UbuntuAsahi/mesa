@@ -164,14 +164,11 @@ genX(streamout_prologue)(struct anv_cmd_buffer *cmd_buffer)
 #endif
 }
 
-#if GFX_VER >= 12
+#if GFX_VER >= 12 && GFX_VER < 30
 static uint32_t
-get_cps_state_offset(const struct anv_device *device, bool cps_enabled,
+get_cps_state_offset(const struct anv_device *device,
                      const struct vk_fragment_shading_rate_state *fsr)
 {
-   if (!cps_enabled)
-      return device->cps_states.offset;
-
    uint32_t offset;
    static const uint32_t size_index[] = {
       [1] = 0,
@@ -197,7 +194,32 @@ get_cps_state_offset(const struct anv_device *device, bool cps_enabled,
 
    return device->cps_states.offset + offset;
 }
-#endif /* GFX_VER >= 12 */
+#endif /* GFX_VER >= 12 && GFX_VER < 30 */
+
+#if GFX_VER >= 30
+static uint32_t
+get_cps_size(uint32_t size)
+{
+   switch (size) {
+   case 1:
+      return CPSIZE_1;
+   case 2:
+      return CPSIZE_2;
+   case 4:
+      return CPSIZE_4;
+   default:
+      unreachable("Invalid size");
+   }
+}
+
+static const uint32_t vk_to_intel_shading_rate_combiner_op[] = {
+   [VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR] = CPS_COMB_OP_PASSTHROUGH,
+   [VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR] = CPS_COMB_OP_OVERRIDE,
+   [VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR] = CPS_COMB_OP_HIGH_QUALITY,
+   [VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR] = CPS_COMB_OP_LOW_QUALITY,
+   [VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MUL_KHR] = CPS_COMB_OP_RELATIVE,
+};
+#endif
 
 static bool
 has_ds_feedback_loop(const struct vk_dynamic_graphics_state *dyn)
@@ -956,21 +978,23 @@ update_cps(struct anv_gfx_dynamic_state *hw_state,
            const struct vk_dynamic_graphics_state *dyn,
            const struct anv_graphics_pipeline *pipeline)
 {
-   const struct brw_wm_prog_data *wm_prog_data = get_wm_prog_data(pipeline);
-   if (!wm_prog_data)
-      return;
-
-   const bool cps_enable =
-      brw_wm_prog_data_is_coarse(wm_prog_data, hw_state->fs_msaa_flags);
-
-#if GFX_VER == 11
-   SET(CPS, cps.CoarsePixelShadingMode,
-            cps_enable ? CPS_MODE_CONSTANT : CPS_MODE_NONE);
-   SET(CPS, cps.MinCPSizeX, dyn->fsr.fragment_size.width);
-   SET(CPS, cps.MinCPSizeY, dyn->fsr.fragment_size.height);
+#if GFX_VER >= 30
+   SET(COARSE_PIXEL, coarse_pixel.CPSizeX,
+       get_cps_size(dyn->fsr.fragment_size.width));
+   SET(COARSE_PIXEL, coarse_pixel.CPSizeY,
+       get_cps_size(dyn->fsr.fragment_size.height));
+   SET(COARSE_PIXEL, coarse_pixel.CPSizeCombiner0Opcode,
+       vk_to_intel_shading_rate_combiner_op[dyn->fsr.combiner_ops[0]]);
+   SET(COARSE_PIXEL, coarse_pixel.CPSizeCombiner1Opcode,
+       vk_to_intel_shading_rate_combiner_op[dyn->fsr.combiner_ops[1]]);
 #elif GFX_VER >= 12
    SET(CPS, cps.CoarsePixelShadingStateArrayPointer,
-            get_cps_state_offset(device, cps_enable, &dyn->fsr));
+       get_cps_state_offset(device, &dyn->fsr));
+#else
+   STATIC_ASSERT(GFX_VER == 11);
+   SET(CPS, cps.CoarsePixelShadingMode, CPS_MODE_CONSTANT);
+   SET(CPS, cps.MinCPSizeX, dyn->fsr.fragment_size.width);
+   SET(CPS, cps.MinCPSizeY, dyn->fsr.fragment_size.height);
 #endif
 }
 #endif
@@ -1127,8 +1151,8 @@ update_clip_raster(struct anv_gfx_dynamic_state *hw_state,
    SET(RASTER, raster.GlobalDepthOffsetEnableSolid, dyn->rs.depth_bias.enable);
    SET(RASTER, raster.GlobalDepthOffsetEnableWireframe, dyn->rs.depth_bias.enable);
    SET(RASTER, raster.GlobalDepthOffsetEnablePoint, dyn->rs.depth_bias.enable);
-   SET(RASTER, raster.GlobalDepthOffsetConstant, dyn->rs.depth_bias.constant);
-   SET(RASTER, raster.GlobalDepthOffsetScale, dyn->rs.depth_bias.slope);
+   SET(RASTER, raster.GlobalDepthOffsetConstant, dyn->rs.depth_bias.constant_factor);
+   SET(RASTER, raster.GlobalDepthOffsetScale, dyn->rs.depth_bias.slope_factor);
    SET(RASTER, raster.GlobalDepthOffsetClamp, dyn->rs.depth_bias.clamp);
    SET(RASTER, raster.FrontFaceFillMode, vk_to_intel_fillmode[dyn->rs.polygon_mode]);
    SET(RASTER, raster.BackFaceFillMode, vk_to_intel_fillmode[dyn->rs.polygon_mode]);
@@ -1334,14 +1358,29 @@ update_blend_state(struct anv_gfx_dynamic_state *hw_state,
        *
        *   "Enabling LogicOp and Color Buffer Blending at the same time is
        *   UNDEFINED"
+       *
+       * The Vulkan spec also says:
+       *   "Logical operations are not applied to floating-point or sRGB format
+       *   color attachments."
+       * and
+       *   "Any attachments using color formats for which logical operations
+       *   are not supported simply pass through the color values unmodified."
        */
+      bool ignores_logic_op =
+         vk_format_is_float(gfx->color_att[att].vk_format) ||
+         vk_format_is_srgb(gfx->color_att[att].vk_format);
       SET(BLEND_STATE, blend.rts[rt].LogicOpFunction,
                        vk_to_intel_logic_op[dyn->cb.logic_op]);
-      SET(BLEND_STATE, blend.rts[rt].LogicOpEnable, dyn->cb.logic_op_enable);
+      SET(BLEND_STATE, blend.rts[rt].LogicOpEnable,
+                       dyn->cb.logic_op_enable && !ignores_logic_op);
 
       SET(BLEND_STATE, blend.rts[rt].ColorClampRange, COLORCLAMP_RTFORMAT);
       SET(BLEND_STATE, blend.rts[rt].PreBlendColorClampEnable, true);
       SET(BLEND_STATE, blend.rts[rt].PostBlendColorClampEnable, true);
+
+#if GFX_VER >= 30
+      SET(BLEND_STATE, blend.rts[rt].SimpleFloatBlendEnable, true);
+#endif
 
       /* Setup blend equation. */
       SET(BLEND_STATE, blend.rts[rt].ColorBlendFunction,
@@ -1806,9 +1845,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
 
 #if GFX_VER >= 11
    if (device->vk.enabled_extensions.KHR_fragment_shading_rate &&
-       ((gfx->dirty & ANV_CMD_DIRTY_PIPELINE) ||
-        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_FSR) ||
-        BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_FS_MSAA_FLAGS)))
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_FSR))
       update_cps(hw_state, device, dyn, pipeline);
 #endif /* GFX_VER >= 11 */
 
@@ -1980,6 +2017,9 @@ genX(cmd_buffer_flush_gfx_runtime_state)(struct anv_cmd_buffer *cmd_buffer)
 static void
 emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
 {
+   /* For Wa_16012775297, ensure VF_STATISTICS is emitted before 3DSTATE_VF
+    */
+   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_STATISTICS), zero);
 #if GFX_VERx10 >= 125
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VFG), vfg) {
       vfg.DistributionMode = RR_STRICT;
@@ -2001,7 +2041,6 @@ emit_wa_18020335297_dummy_draw(struct anv_cmd_buffer *cmd_buffer)
       rr.BackFaceFillMode = FILL_MODE_SOLID;
    }
 
-   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_STATISTICS), zero);
    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_VF_SGVS), zero);
 
 #if GFX_VER >= 11
@@ -2136,6 +2175,12 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF_SGVS_2))
       anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline, final.vf_sgvs_2);
 #endif
+
+   if (device->physical->instance->vf_component_packing &&
+       BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VF_COMPONENT_PACKING)) {
+      anv_batch_emit_pipeline_state(&cmd_buffer->batch, pipeline,
+                                    final.vf_component_packing);
+   }
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VS)) {
       anv_batch_emit_pipeline_state_protected(&cmd_buffer->batch, pipeline,
@@ -2430,6 +2475,17 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       }
    }
 
+#if GFX_VER >= 30
+   if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_COARSE_PIXEL)) {
+      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_COARSE_PIXEL), coarse_pixel) {
+         coarse_pixel.DisableCPSPointers = true;
+         SET(coarse_pixel, coarse_pixel, CPSizeX);
+         SET(coarse_pixel, coarse_pixel, CPSizeY);
+         SET(coarse_pixel, coarse_pixel, CPSizeCombiner0Opcode);
+         SET(coarse_pixel, coarse_pixel, CPSizeCombiner1Opcode);
+      }
+   }
+#else
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_CPS)) {
 #if GFX_VER == 11
       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_CPS), cps) {
@@ -2461,6 +2517,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       }
 #endif
    }
+#endif /* GFX_VER >= 30 */
 
    if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_SF)) {
       anv_batch_emit_merge(&cmd_buffer->batch, GENX(3DSTATE_SF),
@@ -2610,6 +2667,8 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
 #if GFX_VERx10 >= 125
          vf.GeometryDistributionEnable = true;
 #endif
+         vf.ComponentPackingEnable =
+            device->physical->instance->vf_component_packing;
          SET(vf, vf, IndexedDrawCutIndexEnable);
          SET(vf, vf, CutIndex);
       }
@@ -2700,6 +2759,9 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
             INIT(blend.rts[i], LogicOpEnable),
             INIT(blend.rts[i], ColorBufferBlendEnable),
             INIT(blend.rts[i], ColorClampRange),
+#if GFX_VER >= 30
+            INIT(blend.rts[i], SimpleFloatBlendEnable),
+#endif
             INIT(blend.rts[i], PreBlendColorClampEnable),
             INIT(blend.rts[i], PostBlendColorClampEnable),
             INIT(blend.rts[i], SourceBlendFactor),
@@ -2786,6 +2848,15 @@ genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer)
     * Put potential workarounds here if you need to reemit an instruction
     * because of another one is changing.
     */
+
+   /* Reproduce the programming done on Windows drivers.
+    * Fixes flickering issues with multiple workloads.
+    */
+   if (BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP) ||
+       BITSET_TEST(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC_PTR)) {
+      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_SF_CLIP);
+      BITSET_SET(hw_state->dirty, ANV_GFX_STATE_VIEWPORT_CC_PTR);
+   }
 
    /* Wa_16012775297 - Emit dummy VF statistics before each 3DSTATE_VF. */
 #if INTEL_WA_16012775297_GFX_VER

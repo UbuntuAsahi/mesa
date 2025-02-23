@@ -5,18 +5,9 @@
  */
 
 #include "geometry.h"
+#include "libagx_intrinsics.h"
 #include "query.h"
 #include "tessellator.h"
-
-/* Compatible with util/u_math.h */
-static inline uint
-util_logbase2_ceil(uint n)
-{
-   if (n <= 1)
-      return 0;
-   else
-      return 32 - clz(n - 1);
-}
 
 /* Swap the two non-provoking vertices third vert in odd triangles. This
  * generates a vertex ID list with a consistent winding order.
@@ -229,10 +220,68 @@ vertex_id_for_topology(enum mesa_prim mode, bool flatshade_first, uint prim,
    }
 }
 
+uint
+libagx_map_to_line_adj(uint id)
+{
+   /* Sequence (1, 2), (5, 6), (9, 10), ... */
+   return ((id & ~1) * 2) + (id & 1) + 1;
+}
+
+uint
+libagx_map_to_line_strip_adj(uint id)
+{
+   /* Sequence (1, 2), (2, 3), (4, 5), .. */
+   uint prim = id / 2;
+   uint vert = id & 1;
+   return prim + vert + 1;
+}
+
+uint
+libagx_map_to_tri_strip_adj(uint id)
+{
+   /* Sequence (0, 2, 4), (2, 6, 4), (4, 6, 8), (6, 10, 8)
+    *
+    * Although tri strips with adjacency have 6 cases in general, after
+    * disregarding the vertices only available in a geometry shader, there are
+    * only even/odd cases. In other words, it's just a triangle strip subject to
+    * extra padding.
+    *
+    * Dividing through by two, the sequence is:
+    *
+    *   (0, 1, 2), (1, 3, 2), (2, 3, 4), (3, 5, 4)
+    */
+   uint prim = id / 3;
+   uint vtx = id % 3;
+
+   /* Flip the winding order of odd triangles */
+   if ((prim % 2) == 1) {
+      if (vtx == 1)
+         vtx = 2;
+      else if (vtx == 2)
+         vtx = 1;
+   }
+
+   return 2 * (prim + vtx);
+}
+
+static void
+store_index(uintptr_t index_buffer, uint index_size_B, uint id, uint value)
+{
+   global uint32_t *out_32 = (global uint32_t *)index_buffer;
+   global uint16_t *out_16 = (global uint16_t *)index_buffer;
+   global uint8_t *out_8 = (global uint8_t *)index_buffer;
+
+   if (index_size_B == 4)
+      out_32[id] = value;
+   else if (index_size_B == 2)
+      out_16[id] = value;
+   else
+      out_8[id] = value;
+}
+
 static uint
-libagx_load_index_buffer_internal(uintptr_t index_buffer,
-                                  uint32_t index_buffer_range_el, uint id,
-                                  uint index_size)
+load_index(uintptr_t index_buffer, uint32_t index_buffer_range_el, uint id,
+           uint index_size)
 {
    bool oob = id >= index_buffer_range_el;
 
@@ -265,38 +314,60 @@ uint
 libagx_load_index_buffer(constant struct agx_ia_state *p, uint id,
                          uint index_size)
 {
-   return libagx_load_index_buffer_internal(
-      p->index_buffer, p->index_buffer_range_el, id, index_size);
+   return load_index(p->index_buffer, p->index_buffer_range_el, id, index_size);
 }
 
 static void
-increment_ia_counters(global uint32_t *ia_vertices,
-                      global uint32_t *vs_invocations, uint count)
+increment_counters(global uint32_t *a, global uint32_t *b, global uint32_t *c,
+                   uint count)
 {
-   if (ia_vertices) {
-      *ia_vertices += count;
-   }
+   global uint32_t *ptr[] = {a, b, c};
 
-   if (vs_invocations) {
-      *vs_invocations += count;
+   for (uint i = 0; i < 3; ++i) {
+      if (ptr[i]) {
+         *(ptr[i]) += count;
+      }
+   }
+}
+
+static unsigned
+decomposed_prims_for_vertices_with_tess(enum mesa_prim prim, int vertices,
+                                        unsigned verts_per_patch)
+{
+   if (prim >= MESA_PRIM_PATCHES) {
+      return vertices / verts_per_patch;
+   } else {
+      return u_decomposed_prims_for_vertices(prim, vertices);
    }
 }
 
 KERNEL(1)
 libagx_increment_ia(global uint32_t *ia_vertices,
-                    global uint32_t *vs_invocations, constant uint32_t *draw)
+                    global uint32_t *ia_primitives,
+                    global uint32_t *vs_invocations, global uint32_t *c_prims,
+                    global uint32_t *c_invs, constant uint32_t *draw,
+                    enum mesa_prim prim, unsigned verts_per_patch)
 {
-   increment_ia_counters(ia_vertices, vs_invocations, draw[0] * draw[1]);
+   increment_counters(ia_vertices, vs_invocations, NULL, draw[0] * draw[1]);
+
+   uint prims =
+      decomposed_prims_for_vertices_with_tess(prim, draw[0], verts_per_patch) *
+      draw[1];
+
+   increment_counters(ia_primitives, c_prims, c_invs, prims);
 }
 
 KERNEL(1024)
 libagx_increment_ia_restart(global uint32_t *ia_vertices,
+                            global uint32_t *ia_primitives,
                             global uint32_t *vs_invocations,
+                            global uint32_t *c_prims, global uint32_t *c_invs,
                             constant uint32_t *draw, uint64_t index_buffer,
                             uint32_t index_buffer_range_el,
-                            uint32_t restart_index, uint32_t index_size_B)
+                            uint32_t restart_index, uint32_t index_size_B,
+                            enum mesa_prim prim, unsigned verts_per_patch)
 {
-   uint tid = get_global_id(0);
+   uint tid = cl_global_id.x;
    unsigned count = draw[0];
    local uint scratch;
 
@@ -305,8 +376,8 @@ libagx_increment_ia_restart(global uint32_t *ia_vertices,
 
    /* Count non-restart indices */
    for (uint i = tid; i < count; i += 1024) {
-      uint index = libagx_load_index_buffer_internal(
-         index_buffer, index_buffer_range_el, start + i, index_size_B);
+      uint index = load_index(index_buffer, index_buffer_range_el, start + i,
+                              index_size_B);
 
       if (index != restart_index)
          partial++;
@@ -320,7 +391,30 @@ libagx_increment_ia_restart(global uint32_t *ia_vertices,
 
    /* Elect a single thread from the workgroup to increment the counters */
    if (tid == 0) {
-      increment_ia_counters(ia_vertices, vs_invocations, scratch * draw[1]);
+      increment_counters(ia_vertices, vs_invocations, NULL, scratch * draw[1]);
+   }
+
+   /* TODO: We should vectorize this */
+   if ((ia_primitives || c_prims || c_invs) && tid == 0) {
+      uint accum = 0;
+      int last_restart = -1;
+      for (uint i = 0; i < count; ++i) {
+         uint index = load_index(index_buffer, index_buffer_range_el, start + i,
+                                 index_size_B);
+
+         if (index == restart_index) {
+            accum += decomposed_prims_for_vertices_with_tess(
+               prim, i - last_restart - 1, verts_per_patch);
+            last_restart = i;
+         }
+      }
+
+      {
+         accum += decomposed_prims_for_vertices_with_tess(
+            prim, count - last_restart - 1, verts_per_patch);
+      }
+
+      increment_counters(ia_primitives, c_prims, c_invs, accum * draw[1]);
    }
 }
 
@@ -332,10 +426,11 @@ static uint
 first_true_thread_in_workgroup(bool cond, local uint *scratch)
 {
    barrier(CLK_LOCAL_MEM_FENCE);
-   scratch[get_sub_group_id()] = nir_ballot(cond);
+   scratch[get_sub_group_id()] = sub_group_ballot(cond)[0];
    barrier(CLK_LOCAL_MEM_FENCE);
 
-   uint first_group = ctz(nir_ballot(scratch[get_sub_group_local_id()]));
+   uint first_group =
+      ctz(sub_group_ballot(scratch[get_sub_group_local_id()])[0]);
    uint off = ctz(first_group < 32 ? scratch[first_group] : 0);
    return (first_group * 32) + off;
 }
@@ -379,15 +474,14 @@ setup_unroll_for_draw(global struct agx_geometry_state *heap,
 KERNEL(1024)
 libagx_unroll_restart(global struct agx_geometry_state *heap,
                       uint64_t index_buffer, constant uint *in_draw,
-                      global uint32_t *out_draw, uint64_t zero_sink,
-                      uint32_t max_draws, uint32_t restart_index,
-                      uint32_t index_buffer_size_el,
+                      global uint32_t *out_draw, uint32_t max_draws,
+                      uint32_t restart_index, uint32_t index_buffer_size_el,
                       uint32_t index_size_log2__3, uint32_t flatshade_first,
                       uint mode__11)
 {
    uint32_t index_size_B = 1 << index_size_log2__3;
    enum mesa_prim mode = libagx_uncompact_prim(mode__11);
-   uint tid = get_local_id(0);
+   uint tid = cl_local_id.x;
    uint count = in_draw[0];
 
    local uintptr_t out_ptr;
@@ -397,12 +491,9 @@ libagx_unroll_restart(global struct agx_geometry_state *heap,
    }
 
    barrier(CLK_LOCAL_MEM_FENCE);
-   global uint32_t *out_32 = (global uint32_t *)out_ptr;
-   global uint16_t *out_16 = (global uint16_t *)out_ptr;
-   global uint8_t *out_8 = (global uint8_t *)out_ptr;
 
    uintptr_t in_ptr = (uintptr_t)(libagx_index_buffer(
-      index_buffer, index_buffer_size_el, in_draw[2], index_size_B, zero_sink));
+      index_buffer, index_buffer_size_el, in_draw[2], index_size_B));
 
    local uint scratch[32];
 
@@ -414,9 +505,9 @@ libagx_unroll_restart(global struct agx_geometry_state *heap,
       uint next_restart = needle;
       for (;;) {
          uint idx = next_restart + tid;
-         bool restart = idx >= count || libagx_load_index_buffer_internal(
-                                           in_ptr, index_buffer_size_el, idx,
-                                           index_size_B) == restart_index;
+         bool restart =
+            idx >= count || load_index(in_ptr, index_buffer_size_el, idx,
+                                       index_size_B) == restart_index;
 
          uint next_offs = first_true_thread_in_workgroup(restart, scratch);
 
@@ -436,15 +527,10 @@ libagx_unroll_restart(global struct agx_geometry_state *heap,
             uint offset = needle + id;
 
             uint x = ((out_prims_base + i) * per_prim) + vtx;
-            uint y = libagx_load_index_buffer_internal(
-               in_ptr, index_buffer_size_el, offset, index_size_B);
+            uint y =
+               load_index(in_ptr, index_buffer_size_el, offset, index_size_B);
 
-            if (index_size_B == 4)
-               out_32[x] = y;
-            else if (index_size_B == 2)
-               out_16[x] = y;
-            else
-               out_8[x] = y;
+            store_index(out_ptr, index_size_B, x, y);
          }
       }
 
@@ -522,17 +608,13 @@ libagx_build_gs_draw(global struct agx_geometry_params *p, uint vertices,
    p->output_index_buffer =
       (global uint *)(state->heap + index_buffer_offset_B);
    state->heap_bottom += (indices * 4);
+   assert(state->heap_bottom < state->heap_size);
 
    descriptor[0] = indices;                   /* count */
    descriptor[1] = 1;                         /* instance count */
    descriptor[2] = index_buffer_offset_B / 4; /* start */
    descriptor[3] = 0;                         /* index bias */
    descriptor[4] = 0;                         /* start instance */
-
-   if (state->heap_bottom > state->heap_size) {
-      global uint *foo = (global uint *)(uintptr_t)0xdeadbeef;
-      *foo = 0x1234;
-   }
 }
 
 KERNEL(1)
@@ -540,7 +622,7 @@ libagx_gs_setup_indirect(
    uint64_t index_buffer, constant uint *draw,
    global uintptr_t *vertex_buffer /* output */,
    global struct agx_ia_state *ia /* output */,
-   global struct agx_geometry_params *p /* output */, uint64_t zero_sink,
+   global struct agx_geometry_params *p /* output */,
    uint64_t vs_outputs /* Vertex (TES) output mask */,
    uint32_t index_size_B /* 0 if no index bffer */,
    uint32_t index_buffer_range_el,
@@ -572,7 +654,7 @@ libagx_gs_setup_indirect(
     */
    if (index_size_B) {
       ia->index_buffer = libagx_index_buffer(
-         index_buffer, index_buffer_range_el, draw[2], index_size_B, zero_sink);
+         index_buffer, index_buffer_range_el, draw[2], index_size_B);
 
       ia->index_buffer_range_el =
          libagx_index_buffer_range_el(index_buffer_range_el, draw[2]);
@@ -591,13 +673,9 @@ libagx_gs_setup_indirect(
    p->input_buffer = (uintptr_t)(state->heap + state->heap_bottom);
    *vertex_buffer = p->input_buffer;
    state->heap_bottom += align(vertex_buffer_size, 4);
+   assert(state->heap_bottom < state->heap_size);
 
    p->input_mask = vs_outputs;
-
-   if (state->heap_bottom > state->heap_size) {
-      global uint *foo = (global uint *)(uintptr_t)0x1deadbeef;
-      *foo = 0x1234;
-   }
 }
 
 /*
@@ -643,7 +721,7 @@ KERNEL(1024)
 _libagx_prefix_sum(global uint *buffer, uint len, uint words, uint word)
 {
    local uint scratch[32];
-   uint tid = get_local_id(0);
+   uint tid = cl_local_id.x;
 
    /* Main loop: complete workgroups processing 1024 values at once */
    uint i, count = 0;
@@ -675,7 +753,7 @@ KERNEL(1024)
 libagx_prefix_sum_geom(constant struct agx_geometry_params *p)
 {
    _libagx_prefix_sum(p->count_buffer, p->input_primitives,
-                      p->count_buffer_stride / 4, get_group_id(0));
+                      p->count_buffer_stride / 4, cl_group_id.x);
 }
 
 KERNEL(1024)
@@ -687,7 +765,7 @@ libagx_prefix_sum_tess(global struct libagx_tess_args *p)
     * index buffer now. Elect a thread for the allocation.
     */
    barrier(CLK_LOCAL_MEM_FENCE);
-   if (get_local_id(0) != 0)
+   if (cl_local_id.x != 0)
       return;
 
    /* The last element of an inclusive prefix sum is the total sum */

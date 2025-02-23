@@ -266,8 +266,8 @@ d3d12_video_encode_supported_resolution_range(const D3D12_VIDEO_ENCODER_CODEC &a
 
    minResolution = capOutputResolutionData.MinResolutionSupported;
    maxResolution = capOutputResolutionData.MaxResolutionSupported;
-   alignment.bits.log2_width_alignment = std::log2(capOutputResolutionData.ResolutionWidthMultipleRequirement);
-   alignment.bits.log2_height_alignment = std::log2(capOutputResolutionData.ResolutionHeightMultipleRequirement);
+   alignment.bits.log2_width_alignment = static_cast<uint32_t>(std::log2(capOutputResolutionData.ResolutionWidthMultipleRequirement));
+   alignment.bits.log2_height_alignment = static_cast<uint32_t>(std::log2(capOutputResolutionData.ResolutionHeightMultipleRequirement));
 
    return true;
 }
@@ -443,8 +443,8 @@ d3d12_video_encode_supported_tile_structures(const D3D12_VIDEO_ENCODER_CODEC &co
          av1TileSupport.TilesConfiguration.ColCount = std::max(av1TileSupport.MinTileCols, 1u);
          av1TileSupport.TilesConfiguration.RowCount = std::max(av1TileSupport.MinTileRows, 1u);
          // Try for uniform grid tiles
-         UINT tileWPixel = capDataTilesSupport.FrameResolution.Width / av1TileSupport.TilesConfiguration.ColCount;
-         UINT tileHPixel = capDataTilesSupport.FrameResolution.Height / av1TileSupport.TilesConfiguration.RowCount;
+         UINT tileWPixel = static_cast<UINT>(capDataTilesSupport.FrameResolution.Width / av1TileSupport.TilesConfiguration.ColCount);
+         UINT tileHPixel = static_cast<UINT>(capDataTilesSupport.FrameResolution.Height / av1TileSupport.TilesConfiguration.RowCount);
          for (UINT i = 0; i < av1TileSupport.TilesConfiguration.ColCount; i++)
             av1TileSupport.TilesConfiguration.ColWidths[i] = (tileWPixel / superBlockSize);
          for (UINT j = 0; j < av1TileSupport.TilesConfiguration.RowCount; j++)
@@ -960,6 +960,9 @@ d3d12_has_video_encode_support(struct pipe_screen *pscreen,
       case PIPE_VIDEO_PROFILE_HEVC_MAIN:
       case PIPE_VIDEO_PROFILE_HEVC_MAIN_10:
       case PIPE_VIDEO_PROFILE_HEVC_MAIN_444:
+      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_444:
+      case PIPE_VIDEO_PROFILE_HEVC_MAIN_422:
+      case PIPE_VIDEO_PROFILE_HEVC_MAIN10_422:
       {
          D3D12_VIDEO_ENCODER_PROFILE_DESC profDesc = {};
          D3D12_VIDEO_ENCODER_PROFILE_HEVC profHEVC =
@@ -1019,8 +1022,8 @@ d3d12_has_video_encode_support(struct pipe_screen *pscreen,
 
                uint8_t minCuSize = d3d12_video_encoder_convert_12cusize_to_pixel_size_hevc(codecSupport.hevc_support.d3d12_caps.MinLumaCodingUnitSize);
                uint8_t maxCuSize = d3d12_video_encoder_convert_12cusize_to_pixel_size_hevc(codecSupport.hevc_support.d3d12_caps.MaxLumaCodingUnitSize);
-               uint8_t MinCbLog2SizeY = std::log2(minCuSize);
-               uint8_t CtbLog2SizeY = std::log2(maxCuSize);
+               uint8_t MinCbLog2SizeY = static_cast<uint8_t>(std::log2(minCuSize));
+               uint8_t CtbLog2SizeY = static_cast<uint8_t>(std::log2(maxCuSize));
                uint8_t minTuSize = d3d12_video_encoder_convert_12tusize_to_pixel_size_hevc(codecSupport.hevc_support.d3d12_caps.MinLumaTransformUnitSize);
                uint8_t maxTuSize = d3d12_video_encoder_convert_12tusize_to_pixel_size_hevc(codecSupport.hevc_support.d3d12_caps.MaxLumaTransformUnitSize);
 
@@ -1558,7 +1561,7 @@ d3d12_screen_get_video_param_decode(struct pipe_screen *pscreen,
          }
          return 0;
       } break;
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
          return (profile == PIPE_VIDEO_PROFILE_UNKNOWN) ? PIPE_FORMAT_NV12 : d3d12_get_pipe_format(d3d12_convert_pipe_video_profile_to_dxgi_format(profile));
       case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
          return false;
@@ -1663,7 +1666,7 @@ d3d12_screen_get_video_param_postproc(struct pipe_screen *pscreen,
       case PIPE_VIDEO_CAP_MIN_WIDTH:
       case PIPE_VIDEO_CAP_MIN_HEIGHT:
       case PIPE_VIDEO_CAP_SUPPORTED:
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
       case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
       case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
       case PIPE_VIDEO_CAP_SUPPORTS_CONTIGUOUS_PLANES_MAP:
@@ -1705,7 +1708,7 @@ d3d12_screen_get_video_param_postproc(struct pipe_screen *pscreen,
          if (d3d12_has_video_process_support(pscreen, supportCaps, minSupportedInput, maxSupportedInput)) {
             if (param == PIPE_VIDEO_CAP_SUPPORTED) {
                return true;
-            } else if (param == PIPE_VIDEO_CAP_PREFERED_FORMAT) {
+            } else if (param == PIPE_VIDEO_CAP_PREFERRED_FORMAT) {
                return  PIPE_FORMAT_NV12;
             } else if (param == PIPE_VIDEO_CAP_SUPPORTS_INTERLACED) {
                return false;
@@ -1951,7 +1954,7 @@ d3d12_screen_get_video_param_encode(struct pipe_screen *pscreen,
          }
          return 0;
       } break;
-      case PIPE_VIDEO_CAP_PREFERED_FORMAT:
+      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
          return (profile == PIPE_VIDEO_PROFILE_UNKNOWN) ? PIPE_FORMAT_NV12 : d3d12_get_pipe_format(d3d12_convert_pipe_video_profile_to_dxgi_format(profile));
       case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
          return false;
@@ -2135,7 +2138,12 @@ is_d3d12_video_allowed_format(enum pipe_format format, enum pipe_video_entrypoin
    if (entrypoint == PIPE_VIDEO_ENTRYPOINT_BITSTREAM) {
       return ((format == PIPE_FORMAT_NV12) || (format == PIPE_FORMAT_P010));
    } else if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
-      return ((format == PIPE_FORMAT_NV12) || (format == PIPE_FORMAT_P010) || (format == PIPE_FORMAT_AYUV));
+      return ((format == PIPE_FORMAT_NV12) ||
+              (format == PIPE_FORMAT_P010) ||
+              (format == PIPE_FORMAT_AYUV) ||
+              (format == PIPE_FORMAT_YUYV /*maps to DXGI_FORMAT_YUY2*/) ||
+              (format == PIPE_FORMAT_Y210) ||
+              (format == PIPE_FORMAT_Y410));
    } else if (entrypoint == PIPE_VIDEO_ENTRYPOINT_PROCESSING) {
       return (format == PIPE_FORMAT_NV12) || (format == PIPE_FORMAT_P010)
          || (format == PIPE_FORMAT_R8G8B8A8_UNORM) || (format == PIPE_FORMAT_R8G8B8A8_UINT)

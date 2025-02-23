@@ -28,7 +28,7 @@
 struct panvk_cmd_buffer;
 
 struct panvk_attrib_buf {
-   mali_ptr address;
+   uint64_t address;
    unsigned size;
 };
 
@@ -40,6 +40,7 @@ struct panvk_resolve_attachment {
 struct panvk_rendering_state {
    VkRenderingFlags flags;
    uint32_t layer_count;
+   uint32_t view_mask;
 
    enum vk_rp_attachment_flags bound_attachments;
    struct {
@@ -50,6 +51,7 @@ struct panvk_rendering_state {
    } color_attachments;
 
    struct pan_image_view zs_pview;
+   struct pan_image_view s_pview;
 
    struct {
       struct panvk_image_view *iview;
@@ -69,11 +71,24 @@ struct panvk_rendering_state {
 
 #if PAN_ARCH >= 10
    struct panfrost_ptr fbds;
-   mali_ptr tiler;
+   uint64_t tiler;
 
    /* When a secondary command buffer has to flush draws, it disturbs the
     * inherited context, and the primary command buffer needs to know. */
    bool invalidate_inherited_ctx;
+
+   /* True if the last render pass was suspended. */
+   bool suspended;
+
+   struct {
+      /* != 0 if the render pass contains one or more occlusion queries to
+       * signal. */
+      uint64_t chain;
+
+      /* Point to the syncobj of the last occlusion query that was passed
+       * to a draw. */
+      uint64_t last;
+   } oq;
 #endif
 };
 
@@ -85,7 +100,8 @@ enum panvk_cmd_graphics_dirty_state {
    PANVK_CMD_GRAPHICS_DIRTY_OQ,
    PANVK_CMD_GRAPHICS_DIRTY_DESC_STATE,
    PANVK_CMD_GRAPHICS_DIRTY_RENDER_STATE,
-   PANVK_CMD_GRAPHICS_DIRTY_PUSH_UNIFORMS,
+   PANVK_CMD_GRAPHICS_DIRTY_VS_PUSH_UNIFORMS,
+   PANVK_CMD_GRAPHICS_DIRTY_FS_PUSH_UNIFORMS,
    PANVK_CMD_GRAPHICS_DIRTY_STATE_COUNT,
 };
 
@@ -107,18 +123,20 @@ struct panvk_cmd_graphics_state {
    struct {
       const struct panvk_shader *shader;
       struct panvk_shader_desc_state desc;
+      uint64_t push_uniforms;
       bool required;
 #if PAN_ARCH <= 7
-      mali_ptr rsd;
+      uint64_t rsd;
 #endif
    } fs;
 
    struct {
       const struct panvk_shader *shader;
       struct panvk_shader_desc_state desc;
+      uint64_t push_uniforms;
 #if PAN_ARCH <= 7
-      mali_ptr attribs;
-      mali_ptr attrib_bufs;
+      uint64_t attribs;
+      uint64_t attrib_bufs;
 #endif
    } vs;
 
@@ -140,14 +158,12 @@ struct panvk_cmd_graphics_state {
 
    struct panvk_rendering_state render;
 
-   mali_ptr push_uniforms;
-
 #if PAN_ARCH <= 7
-   mali_ptr vpd;
+   uint64_t vpd;
 #endif
 
 #if PAN_ARCH >= 10
-   mali_ptr tsd;
+   uint64_t tsd;
 #endif
 
    BITSET_DECLARE(dirty, PANVK_CMD_GRAPHICS_DIRTY_STATE_COUNT);
@@ -169,26 +185,29 @@ struct panvk_cmd_graphics_state {
 #define gfx_state_set_all_dirty(__cmdbuf)                                      \
    BITSET_ONES((__cmdbuf)->state.gfx.dirty)
 
+#define set_gfx_sysval(__cmdbuf, __dirty, __name, __val)                       \
+   do {                                                                        \
+      struct panvk_graphics_sysvals __new_sysval;                              \
+      __new_sysval.__name = __val;                                             \
+      if (memcmp(&(__cmdbuf)->state.gfx.sysvals.__name, &__new_sysval.__name,  \
+                 sizeof(__new_sysval.__name))) {                               \
+         (__cmdbuf)->state.gfx.sysvals.__name = __new_sysval.__name;           \
+         BITSET_SET_RANGE(__dirty, sysval_fau_start(graphics, __name),         \
+                          sysval_fau_end(graphics, __name));                   \
+      }                                                                        \
+   } while (0)
+
 static inline uint32_t
 panvk_select_tiler_hierarchy_mask(const struct panvk_physical_device *phys_dev,
                                   const struct panvk_cmd_graphics_state *state)
 {
    struct panfrost_tiler_features tiler_features =
       panfrost_query_tiler_features(&phys_dev->kmod.props);
-   uint32_t max_fb_wh = MAX2(state->render.fb.info.width,
-                             state->render.fb.info.height);
-   uint32_t last_hierarchy_bit = util_last_bit(DIV_ROUND_UP(max_fb_wh, 16));
-   uint32_t hierarchy_mask = BITFIELD_MASK(tiler_features.max_levels);
 
-   /* Always enable the level covering the whole FB, and disable the finest
-    * levels if we don't have enough to cover everything.
-    * This is suboptimal for small primitives, since it might force
-    * primitives to be walked multiple times even if they don't cover the
-    * the tile being processed. On the other hand, it's hard to guess
-    * the draw pattern, so it's probably good enough for now.
-    */
-   if (last_hierarchy_bit > tiler_features.max_levels)
-      hierarchy_mask <<= last_hierarchy_bit - tiler_features.max_levels;
+   uint32_t hierarchy_mask =
+      pan_select_tiler_hierarchy_mask(state->render.fb.info.width,
+                                      state->render.fb.info.height,
+                                      tiler_features.max_levels);
 
    /* For effective tile size larger than 16x16, disable first level */
    if (state->render.fb.info.tile_size > 16 * 16)
@@ -224,6 +243,12 @@ fs_required(const struct panvk_cmd_graphics_state *state,
     * if we don't have a color attachment, so depth/stencil updates can be
     * discarded if alpha, and thus coverage, is 0. */
    if (dyn_state->ms.alpha_to_coverage_enable)
+      return true;
+
+   /* If the sample mask is updated, we need to run the fragment shader,
+    * otherwise the fixed-function depth/stencil results will apply to all
+    * samples. */
+   if (fs_info->outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))
       return true;
 
    /* If depth is written and not implied we need to execute.
@@ -270,12 +295,15 @@ cached_fs_required(ASSERTED const struct panvk_cmd_graphics_state *state,
    do {                                                                        \
       bool __set_fs_dirty =                                                    \
          (__cmdbuf)->state.gfx.fs.shader != get_fs(__cmdbuf);                  \
+      bool __set_fs_push_dirty =                                               \
+         __set_fs_dirty && gfx_state_dirty(__cmdbuf, FS_PUSH_UNIFORMS);        \
       vk_dynamic_graphics_state_clear_dirty(                                   \
          &(__cmdbuf)->vk.dynamic_graphics_state);                              \
       gfx_state_clear_all_dirty(__cmdbuf);                                     \
-      desc_state_clear_all_dirty(&(__cmdbuf)->state.gfx.desc_state);           \
       if (__set_fs_dirty)                                                      \
          gfx_state_set_dirty(__cmdbuf, FS);                                    \
+      if (__set_fs_push_dirty)                                                 \
+         gfx_state_set_dirty(__cmdbuf, FS_PUSH_UNIFORMS);                      \
    } while (0)
 
 void
@@ -291,5 +319,39 @@ panvk_per_arch(cmd_preload_render_area_border)(struct panvk_cmd_buffer *cmdbuf,
                                                const VkRenderingInfo *render_info);
 
 void panvk_per_arch(cmd_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf);
+
+struct panvk_draw_info {
+   struct {
+      uint32_t size;
+      uint32_t offset;
+   } index;
+
+   struct {
+#if PAN_ARCH <= 7
+      int32_t raw_offset;
+#endif
+      int32_t base;
+      uint32_t count;
+   } vertex;
+
+   struct {
+      int32_t base;
+      uint32_t count;
+   } instance;
+
+   struct {
+      uint64_t buffer_dev_addr;
+      uint32_t draw_count;
+      uint32_t stride;
+   } indirect;
+
+#if PAN_ARCH <= 7
+   uint32_t layer_id;
+#endif
+};
+
+void
+panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
+                                         const struct panvk_draw_info *info);
 
 #endif

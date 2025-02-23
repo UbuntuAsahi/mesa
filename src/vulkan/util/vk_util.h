@@ -23,9 +23,11 @@
 #ifndef VK_UTIL_H
 #define VK_UTIL_H
 
+#include "compiler/shader_enums.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
-#include "compiler/shader_enums.h"
+#include "c99_compat.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -381,6 +383,19 @@ vk_index_to_restart(VkIndexType type)
    case VK_INDEX_TYPE_UINT16:    return 0xffff;
    case VK_INDEX_TYPE_UINT32:    return 0xffffffff;
    default:                      unreachable("unexpected index type");
+   }
+}
+
+static inline bool
+vk_descriptor_type_is_dynamic(VkDescriptorType type)
+{
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      return true;
+
+   default:
+      return false;
    }
 }
 

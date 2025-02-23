@@ -16,6 +16,7 @@
 #include "panvk_cmd_desc_state.h"
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
+#include "panvk_macros.h"
 #include "panvk_meta.h"
 #include "panvk_physical_device.h"
 
@@ -26,11 +27,35 @@
 
 #include <vulkan/vulkan_core.h>
 
-struct panvk_dispatch_info {
-   struct pan_compute_dim wg_count;
-   mali_ptr tsd;
-   mali_ptr push_uniforms;
-};
+uint64_t
+panvk_per_arch(cmd_dispatch_prepare_tls)(struct panvk_cmd_buffer *cmdbuf,
+                                         const struct panvk_shader *shader,
+                                         const struct pan_compute_dim *dim,
+                                         bool indirect)
+{
+   struct panvk_batch *batch = cmdbuf->cur_batch;
+
+   assert(batch);
+   assert(!indirect && "Indirect not supported yet!");
+
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(cmdbuf->vk.base.device->physical);
+
+   panvk_per_arch(cmd_alloc_tls_desc)(cmdbuf, false);
+
+   batch->tlsinfo.tls.size = shader->info.tls_size;
+   batch->tlsinfo.wls.size = shader->info.wls_size;
+   if (batch->tlsinfo.wls.size) {
+      unsigned core_id_range;
+
+      panfrost_query_core_count(&phys_dev->kmod.props, &core_id_range);
+      batch->tlsinfo.wls.instances = pan_wls_instances(dim);
+      batch->wls_total_size = pan_wls_adjust_size(batch->tlsinfo.wls.size) *
+                              batch->tlsinfo.wls.instances * core_id_range;
+   }
+
+   return batch->tls.gpu;
+}
 
 VKAPI_ATTR void VKAPI_CALL
 panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
@@ -49,12 +74,11 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
    if (!panvk_priv_mem_dev_addr(shader->rsd))
       return;
 
-   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
-   struct panvk_physical_device *phys_dev =
-      to_panvk_physical_device(dev->vk.physical);
-   struct panvk_dispatch_info dispatch = {
-      .wg_count = {groupCountX, groupCountY, groupCountZ},
+   struct panvk_dispatch_info info = {
+      .wg_base = {baseGroupX, baseGroupY, baseGroupZ},
+      .direct.wg_count = {groupCountX, groupCountY, groupCountZ},
    };
+   struct pan_compute_dim wg_count = {groupCountX, groupCountY, groupCountZ};
 
    panvk_per_arch(cmd_close_batch)(cmdbuf);
    struct panvk_batch *batch = panvk_per_arch(cmd_open_batch)(cmdbuf);
@@ -64,24 +88,13 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
    struct panvk_shader_desc_state *cs_desc_state =
       &cmdbuf->state.compute.cs.desc;
 
-   panvk_per_arch(cmd_alloc_tls_desc)(cmdbuf, false);
-   dispatch.tsd = batch->tls.gpu;
+   uint64_t tsd = panvk_per_arch(cmd_dispatch_prepare_tls)(
+      cmdbuf, shader, &wg_count, false);
 
    result = panvk_per_arch(cmd_prepare_push_descs)(
       cmdbuf, desc_state, shader->desc_info.used_set_mask);
    if (result != VK_SUCCESS)
       return;
-
-   struct panvk_compute_sysvals *sysvals = &cmdbuf->state.compute.sysvals;
-   sysvals->base.x = baseGroupX;
-   sysvals->base.y = baseGroupY;
-   sysvals->base.z = baseGroupZ;
-   sysvals->num_work_groups.x = groupCountX;
-   sysvals->num_work_groups.y = groupCountY;
-   sysvals->num_work_groups.z = groupCountZ;
-   sysvals->local_group_size.x = shader->local_size.x;
-   sysvals->local_group_size.y = shader->local_size.y;
-   sysvals->local_group_size.z = shader->local_size.z;
 
    if (compute_state_dirty(cmdbuf, CS) ||
        compute_state_dirty(cmdbuf, DESC_STATE)) {
@@ -89,27 +102,14 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
                                                      cs_desc_state);
       if (result != VK_SUCCESS)
          return;
-
-      sysvals->desc.dyn_ssbos = cs_desc_state->dyn_ssbos;
    }
 
-   for (uint32_t i = 0; i < MAX_SETS; i++) {
-      if (shader->desc_info.used_set_mask & BITFIELD_BIT(i))
-         sysvals->desc.sets[i] = desc_state->sets[i]->descs.dev;
-   }
+   panvk_per_arch(cmd_prepare_dispatch_sysvals)(cmdbuf, &info);
 
-   /* We unconditionally update the sysvals, so push_uniforms is always dirty. */
-   compute_state_set_dirty(cmdbuf, PUSH_UNIFORMS);
-
-   if (compute_state_dirty(cmdbuf, PUSH_UNIFORMS)) {
-      cmdbuf->state.compute.push_uniforms = panvk_per_arch(
-         cmd_prepare_push_uniforms)(cmdbuf, &cmdbuf->state.compute.sysvals,
-                                    sizeof(cmdbuf->state.compute.sysvals));
-      if (!cmdbuf->state.compute.push_uniforms)
-         return;
-   }
-
-   dispatch.push_uniforms = cmdbuf->state.compute.push_uniforms;
+   result = panvk_per_arch(cmd_prepare_push_uniforms)(
+      cmdbuf, cmdbuf->state.compute.shader);
+   if (result != VK_SUCCESS)
+      return;
 
    struct panfrost_ptr copy_desc_job = {0};
 
@@ -135,9 +135,9 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
    util_dynarray_append(&batch->jobs, void *, job.cpu);
 
    panfrost_pack_work_groups_compute(
-      pan_section_ptr(job.cpu, COMPUTE_JOB, INVOCATION), dispatch.wg_count.x,
-      dispatch.wg_count.y, dispatch.wg_count.z, shader->local_size.x,
-      shader->local_size.y, shader->local_size.z, false, false);
+      pan_section_ptr(job.cpu, COMPUTE_JOB, INVOCATION), wg_count.x, wg_count.y,
+      wg_count.z, shader->local_size.x, shader->local_size.y,
+      shader->local_size.z, false, false);
 
    pan_section_pack(job.cpu, COMPUTE_JOB, PARAMETERS, cfg) {
       cfg.job_task_split = util_logbase2_ceil(shader->local_size.x + 1) +
@@ -150,9 +150,9 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
       cfg.attributes = cs_desc_state->img_attrib_table;
       cfg.attribute_buffers =
          cs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_IMG];
-      cfg.thread_storage = dispatch.tsd;
+      cfg.thread_storage = tsd;
       cfg.uniform_buffers = cs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_UBO];
-      cfg.push_uniforms = dispatch.push_uniforms;
+      cfg.push_uniforms = cmdbuf->state.compute.push_uniforms;
       cfg.textures = cs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_TEXTURE];
       cfg.samplers = cs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_SAMPLER];
    }
@@ -165,17 +165,6 @@ panvk_per_arch(CmdDispatchBase)(VkCommandBuffer commandBuffer,
 
    pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_COMPUTE, false, false, 0,
                   copy_desc_dep, &job, false);
-
-   batch->tlsinfo.tls.size = shader->info.tls_size;
-   batch->tlsinfo.wls.size = shader->info.wls_size;
-   if (batch->tlsinfo.wls.size) {
-      unsigned core_id_range;
-
-      panfrost_query_core_count(&phys_dev->kmod.props, &core_id_range);
-      batch->tlsinfo.wls.instances = pan_wls_instances(&dispatch.wg_count);
-      batch->wls_total_size = pan_wls_adjust_size(batch->tlsinfo.wls.size) *
-                              batch->tlsinfo.wls.instances * core_id_range;
-   }
 
    panvk_per_arch(cmd_close_batch)(cmdbuf);
    clear_dirty_after_dispatch(cmdbuf);

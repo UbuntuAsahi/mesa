@@ -11,6 +11,7 @@
 #include "util/memstream.h"
 
 #include "ac_gpu_info.h"
+#include "nir.h"
 #include <array>
 #include <iostream>
 #include <vector>
@@ -173,11 +174,10 @@ aco_postprocess_shader(const struct aco_compiler_options* options,
       validate(program.get());
    }
 
-   ssa_elimination(program.get());
-   jump_threading(program.get());
-
    /* Lower to HW Instructions */
+   ssa_elimination(program.get());
    lower_to_hw_instr(program.get());
+   lower_branches(program.get());
    validate(program.get());
 
    if (!options->optimisations_disabled && !(debug_flags & DEBUG_NO_SCHED_VOPD))
@@ -422,6 +422,7 @@ aco_compile_trap_handler(const struct aco_compiler_options* options,
    validate(program.get());
 
    lower_to_hw_instr(program.get());
+   lower_branches(program.get());
    validate(program.get());
 
    insert_waitcnt(program.get());
@@ -446,7 +447,8 @@ aco_get_codegen_flags()
    init();
    /* Exclude flags which don't affect code generation. */
    uint64_t exclude =
-      DEBUG_VALIDATE_IR | DEBUG_VALIDATE_RA | DEBUG_PERF_INFO | DEBUG_LIVE_INFO;
+      DEBUG_VALIDATE_IR | DEBUG_VALIDATE_RA | DEBUG_PERF_INFO | DEBUG_LIVE_INFO |
+      DEBUG_NO_VALIDATE_IR | DEBUG_VALIDATE_LIVE_VARS;
    return debug_flags & ~exclude;
 }
 
@@ -464,6 +466,7 @@ aco_is_gpu_supported(const struct radeon_info* info)
    case GFX10_3:
    case GFX11:
    case GFX11_5:
+   case GFX12:
       return true;
    default:
       return false;

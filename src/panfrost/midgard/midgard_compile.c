@@ -92,7 +92,10 @@ schedule_barrier(compiler_context *ctx)
 /* Helpers to generate midgard_instruction's using macro magic, since every
  * driver seems to do it that way */
 
-#define EMIT(op, ...) emit_mir_instruction(ctx, v_##op(__VA_ARGS__));
+#define EMIT(op, ...) do {                                                     \
+   struct midgard_instruction ins = v_##op(__VA_ARGS__);                       \
+   emit_mir_instruction(ctx, &ins);                                            \
+} while(0)
 
 #define M_LOAD_STORE(name, store, T)                                           \
    static midgard_instruction m_##name(unsigned ssa, unsigned address)         \
@@ -351,25 +354,6 @@ mem_access_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
 
    unsigned num_comps = MIN2(bytes / (bit_size / 8), 4);
 
-   /* Push constants require 32-bit loads. */
-   if (intrin == nir_intrinsic_load_push_constant) {
-      if (align_mul >= 4) {
-         /* If align_mul is bigger than 4 we can use align_offset to find
-          * the exact number of words we need to read.
-          */
-         num_comps = DIV_ROUND_UP((align_offset % 4) + bytes, 4);
-      } else {
-         /* If bytes is aligned on 32-bit, the access might still cross one
-          * word at the beginning, and one word at the end. If bytes is not
-          * aligned on 32-bit, the extra two words should cover for both the
-          * size and offset mis-alignment.
-          */
-         num_comps = (bytes / 4) + 2;
-      }
-
-      bit_size = MIN2(bit_size, 32);
-   }
-
    return (nir_mem_access_size_align){
       .num_components = num_comps,
       .bit_size = bit_size,
@@ -384,69 +368,90 @@ lower_vec816_alu(const nir_instr *instr, const void *cb_data)
   return 4;
 }
 
+static bool
+lower_halt_to_return(nir_builder *b, nir_instr *instr, UNUSED void *_data)
+{
+   if (instr->type != nir_instr_type_jump)
+      return false;
+
+   nir_jump_instr *jump = nir_instr_as_jump(instr);
+   if (jump->type != nir_jump_halt)
+      return false;
+
+   assert(b->impl == nir_shader_get_entrypoint(b->shader));
+   jump->type = nir_jump_return;
+   return true;
+}
+
 void
 midgard_preprocess_nir(nir_shader *nir, unsigned gpu_id)
 {
    unsigned quirks = midgard_get_quirks(gpu_id);
 
+   /* Ensure that halt are translated to returns and get ride of them */
+   NIR_PASS(_, nir, nir_shader_instructions_pass, lower_halt_to_return,
+            nir_metadata_all, NULL);
+   NIR_PASS(_, nir, nir_lower_returns);
+
    /* Lower gl_Position pre-optimisation, but after lowering vars to ssa
     * (so we don't accidentally duplicate the epilogue since mesa/st has
     * messed with our I/O quite a bit already).
     */
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
-      NIR_PASS_V(nir, nir_lower_viewport_transform);
-      NIR_PASS_V(nir, nir_lower_point_size, 1.0, 0.0);
+      NIR_PASS(_, nir, pan_nir_lower_vertex_id);
+      NIR_PASS(_, nir, nir_lower_viewport_transform);
+      NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0);
    }
 
-   NIR_PASS_V(nir, nir_lower_var_copies);
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
-   NIR_PASS_V(nir, nir_split_var_copies);
-   NIR_PASS_V(nir, nir_lower_var_copies);
-   NIR_PASS_V(nir, nir_lower_global_vars_to_local);
-   NIR_PASS_V(nir, nir_lower_var_copies);
-   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_split_var_copies);
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
-   NIR_PASS_V(nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
-              glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
+   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+            glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       /* nir_lower[_explicit]_io is lazy and emits mul+add chains even
        * for offsets it could figure out are constant.  Do some
        * constant folding before pan_nir_lower_store_component below.
        */
-      NIR_PASS_V(nir, nir_opt_constant_folding);
-      NIR_PASS_V(nir, pan_nir_lower_store_component);
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+      NIR_PASS(_, nir, pan_nir_lower_store_component);
    }
 
    /* Could be eventually useful for Vulkan, but we don't expect it to have
     * the support, so limit it to compute */
    if (gl_shader_stage_is_compute(nir->info.stage)) {
       nir_lower_mem_access_bit_sizes_options mem_size_options = {
-         .modes = nir_var_mem_ubo | nir_var_mem_push_const | nir_var_mem_ssbo |
+         .modes = nir_var_mem_ubo | nir_var_mem_ssbo |
                   nir_var_mem_constant | nir_var_mem_task_payload |
                   nir_var_shader_temp | nir_var_function_temp |
                   nir_var_mem_global | nir_var_mem_shared,
          .callback = mem_access_size_align_cb,
       };
 
-      NIR_PASS_V(nir, nir_lower_mem_access_bit_sizes, &mem_size_options);
-      NIR_PASS_V(nir, nir_lower_alu_width, lower_vec816_alu, NULL);
-      NIR_PASS_V(nir, nir_lower_alu_vec8_16_srcs);
+      NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &mem_size_options);
+      NIR_PASS(_, nir, nir_lower_alu_width, lower_vec816_alu, NULL);
+      NIR_PASS(_, nir, nir_lower_alu_vec8_16_srcs);
    }
 
-   NIR_PASS_V(nir, nir_lower_ssbo, NULL);
-   NIR_PASS_V(nir, pan_nir_lower_zs_store);
+   NIR_PASS(_, nir, nir_lower_ssbo, NULL);
+   NIR_PASS(_, nir, pan_nir_lower_zs_store);
 
-   NIR_PASS_V(nir, nir_lower_frexp);
-   NIR_PASS_V(nir, midgard_nir_lower_global_load);
+   NIR_PASS(_, nir, nir_lower_frexp);
+   NIR_PASS(_, nir, midgard_nir_lower_global_load);
 
    nir_lower_idiv_options idiv_options = {
       .allow_fp16 = true,
    };
 
-   NIR_PASS_V(nir, nir_lower_idiv, &idiv_options);
+   NIR_PASS(_, nir, nir_lower_idiv, &idiv_options);
 
    nir_lower_tex_options lower_tex_options = {
       .lower_txs_lod = true,
@@ -456,30 +461,30 @@ midgard_preprocess_nir(nir_shader *nir, unsigned gpu_id)
       .lower_invalid_implicit_lod = true,
    };
 
-   NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
-   NIR_PASS_V(nir, nir_lower_image_atomics_to_global);
+   NIR_PASS(_, nir, nir_lower_tex, &lower_tex_options);
+   NIR_PASS(_, nir, nir_lower_image_atomics_to_global, NULL, NULL);
 
    /* TEX_GRAD fails to apply sampler descriptor settings on some
     * implementations, requiring a lowering.
     */
    if (quirks & MIDGARD_BROKEN_LOD)
-      NIR_PASS_V(nir, midgard_nir_lod_errata);
+      NIR_PASS(_, nir, midgard_nir_lod_errata);
 
    /* lower MSAA image operations to 3D load before coordinate lowering */
-   NIR_PASS_V(nir, pan_nir_lower_image_ms);
+   NIR_PASS(_, nir, pan_nir_lower_image_ms);
 
    /* Midgard image ops coordinates are 16-bit instead of 32-bit */
-   NIR_PASS_V(nir, midgard_nir_lower_image_bitsize);
+   NIR_PASS(_, nir, midgard_nir_lower_image_bitsize);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS_V(nir, nir_lower_helper_writes, true);
+      NIR_PASS(_, nir, nir_lower_helper_writes, true);
 
-   NIR_PASS_V(nir, pan_lower_helper_invocation);
-   NIR_PASS_V(nir, pan_lower_sample_pos);
-   NIR_PASS_V(nir, midgard_nir_lower_algebraic_early);
-   NIR_PASS_V(nir, nir_lower_alu_to_scalar, mdg_should_scalarize, NULL);
-   NIR_PASS_V(nir, nir_lower_flrp, 16 | 32 | 64, false /* always_precise */);
-   NIR_PASS_V(nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, pan_lower_helper_invocation);
+   NIR_PASS(_, nir, pan_lower_sample_pos);
+   NIR_PASS(_, nir, midgard_nir_lower_algebraic_early);
+   NIR_PASS(_, nir, nir_lower_alu_to_scalar, mdg_should_scalarize, NULL);
+   NIR_PASS(_, nir, nir_lower_flrp, 16 | 32 | 64, false /* always_precise */);
+   NIR_PASS(_, nir, nir_lower_var_copies);
 }
 
 static void
@@ -509,7 +514,7 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend)
                NULL);
    } while (progress);
 
-   NIR_PASS_V(nir, nir_lower_alu_to_scalar, mdg_should_scalarize, NULL);
+   NIR_PASS(_, nir, nir_lower_alu_to_scalar, mdg_should_scalarize, NULL);
 
    /* Run after opts so it can hit more */
    if (!is_blend)
@@ -533,7 +538,7 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend)
    /* Now that booleans are lowered, we can run out late opts */
    NIR_PASS(progress, nir, midgard_nir_lower_algebraic_late);
    NIR_PASS(progress, nir, midgard_nir_cancel_inot);
-   NIR_PASS_V(nir, midgard_nir_type_csel);
+   NIR_PASS(_, nir, midgard_nir_type_csel);
 
    /* Clean up after late opts */
    do {
@@ -550,18 +555,18 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend)
                                nir_move_load_input | nir_move_comparisons |
                                nir_move_copies | nir_move_load_ssbo;
 
-   NIR_PASS_V(nir, nir_opt_sink, move_all);
-   NIR_PASS_V(nir, nir_opt_move, move_all);
+   NIR_PASS(_, nir, nir_opt_sink, move_all);
+   NIR_PASS(_, nir, nir_opt_move, move_all);
 
    /* Take us out of SSA */
-   NIR_PASS(progress, nir, nir_convert_from_ssa, true);
+   NIR_PASS(progress, nir, nir_convert_from_ssa, true, false);
 
    /* We are a vector architecture; write combine where possible */
    NIR_PASS(progress, nir, nir_move_vec_src_uses_to_dest, false);
    NIR_PASS(progress, nir, nir_lower_vec_to_regs, NULL, NULL);
 
    NIR_PASS(progress, nir, nir_opt_dce);
-   NIR_PASS_V(nir, nir_trivialize_registers);
+   nir_trivialize_registers(nir);
 }
 
 /* Do not actually emit a load; instead, cache the constant for inlining */
@@ -615,7 +620,7 @@ emit_explicit_constant(compiler_context *ctx, unsigned node)
       midgard_instruction ins =
          v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), node);
       attach_constants(ctx, &ins, constant_value, node + 1);
-      emit_mir_instruction(ctx, ins);
+      emit_mir_instruction(ctx, &ins);
    }
 }
 
@@ -1051,7 +1056,7 @@ emit_alu(compiler_context *ctx, nir_alu_instr *instr)
       ins.is_pack = true;
    }
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 #undef ALU_CASE
@@ -1132,7 +1137,7 @@ emit_ubo_read(compiler_context *ctx, nir_instr *instr, unsigned dest,
 
    midgard_pack_ubo_index_imm(&ins.load_store, index);
 
-   return emit_mir_instruction(ctx, ins);
+   return emit_mir_instruction(ctx, &ins);
 }
 
 /* Globals are like UBOs if you squint. And shared memory is like globals if
@@ -1229,7 +1234,7 @@ emit_global(compiler_context *ctx, nir_instr *instr, bool is_read,
          ins.swizzle[0][i] = first_component;
    }
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static midgard_load_store_op
@@ -1308,7 +1313,7 @@ emit_atomic(compiler_context *ctx, nir_intrinsic_instr *instr)
 
    mir_set_intr_mask(&instr->instr, &ins, true);
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static void
@@ -1379,7 +1384,7 @@ emit_varying_read(compiler_context *ctx, unsigned dest, unsigned offset,
                                                         : midgard_op_ld_vary_16;
    }
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static midgard_instruction
@@ -1437,7 +1442,7 @@ emit_image_op(compiler_context *ctx, nir_intrinsic_instr *instr)
    } else
       ins.load_store.index_reg = REGISTER_LDST_ZERO;
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 
    return ins;
 }
@@ -1468,7 +1473,7 @@ emit_attr_read(compiler_context *ctx, unsigned dest, unsigned offset,
       break;
    }
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static unsigned
@@ -1531,7 +1536,7 @@ emit_fragment_store(compiler_context *ctx, unsigned src, unsigned src_z,
    }
 
    /* Emit the branch */
-   br = emit_mir_instruction(ctx, ins);
+   br = emit_mir_instruction(ctx, &ins);
    schedule_barrier(ctx);
    ctx->writeout_branch[rt][sample_iter] = br;
 
@@ -1549,14 +1554,14 @@ emit_compute_builtin(compiler_context *ctx, nir_intrinsic_instr *instr)
    ins.mask = mask_of(3);
    ins.swizzle[0][3] = COMPONENT_X; /* xyzx */
    ins.load_store.arg_reg = compute_builtin_arg(instr->intrinsic);
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static unsigned
 vertex_builtin_arg(nir_intrinsic_op op)
 {
    switch (op) {
-   case nir_intrinsic_load_vertex_id_zero_base:
+   case nir_intrinsic_load_raw_vertex_id_pan:
       return PAN_VERTEX_ID;
    case nir_intrinsic_load_instance_id:
       return PAN_INSTANCE_ID;
@@ -1586,7 +1591,7 @@ emit_special(compiler_context *ctx, nir_intrinsic_instr *instr, unsigned idx)
    for (int i = 0; i < 4; ++i)
       ld.swizzle[0][i] = COMPONENT_X;
 
-   emit_mir_instruction(ctx, ld);
+   emit_mir_instruction(ctx, &ld);
 }
 
 static void
@@ -1599,7 +1604,7 @@ emit_control_barrier(compiler_context *ctx)
       .op = midgard_tex_op_barrier,
    };
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static uint8_t
@@ -1644,7 +1649,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
       ins.dest_type = ins.src_types[1] = nir_type_uint | instr->def.bit_size;
 
       ins.mask = BITFIELD_MASK(instr->def.num_components);
-      emit_mir_instruction(ctx, ins);
+      emit_mir_instruction(ctx, &ins);
       break;
    }
 
@@ -1659,7 +1664,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
          discard.src_types[0] = nir_type_uint32;
       }
 
-      emit_mir_instruction(ctx, discard);
+      emit_mir_instruction(ctx, &discard);
       schedule_barrier(ctx);
 
       break;
@@ -1738,8 +1743,10 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
 
          if (*input == ~0)
             *input = reg;
-         else
-            emit_mir_instruction(ctx, v_mov(*input, reg));
+         else {
+            struct midgard_instruction ins = v_mov(*input, reg);
+            emit_mir_instruction(ctx, &ins);
+         }
       } else if (ctx->stage == MESA_SHADER_VERTEX) {
          emit_attr_read(ctx, reg, offset, nr_comp, t);
       } else {
@@ -1786,7 +1793,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
          ld.load_store.index_reg = REGISTER_LDST_ZERO;
       }
 
-      emit_mir_instruction(ctx, ld);
+      emit_mir_instruction(ctx, &ld);
       break;
    }
 
@@ -1817,7 +1824,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
          ld.load_store.index_reg = REGISTER_LDST_ZERO;
       }
 
-      emit_mir_instruction(ctx, ld);
+      emit_mir_instruction(ctx, &ld);
       break;
    }
 
@@ -1861,7 +1868,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
             unsigned out = make_compiler_temp(ctx);
 
             midgard_instruction ins = v_mov(reg_2, out);
-            emit_mir_instruction(ctx, ins);
+            emit_mir_instruction(ctx, &ins);
 
             ctx->blend_src1 = out;
          }
@@ -1926,7 +1933,7 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                src_component++;
          }
 
-         emit_mir_instruction(ctx, st);
+         emit_mir_instruction(ctx, &st);
       } else {
          unreachable("Unknown store");
       }
@@ -1970,7 +1977,9 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
       emit_compute_builtin(ctx, instr);
       break;
 
-   case nir_intrinsic_load_vertex_id_zero_base:
+   case nir_intrinsic_load_raw_vertex_id_pan:
+      ctx->info->midgard.vs.reads_raw_vertex_id = true;
+      FALLTHROUGH;
    case nir_intrinsic_load_instance_id:
       emit_vertex_builtin(ctx, instr);
       break;
@@ -2153,7 +2162,7 @@ set_tex_coord(compiler_context *ctx, nir_tex_instr *instr,
       ld.mask = 0x3; /* xy */
       ld.load_store.bitsize_toggle = true;
       ld.swizzle[1][3] = COMPONENT_X;
-      emit_mir_instruction(ctx, ld);
+      emit_mir_instruction(ctx, &ld);
 
       /* We packed cube coordiates (X,Y,Z) into (X,Y), update the
        * written mask accordingly and decrement the number of
@@ -2188,7 +2197,7 @@ set_tex_coord(compiler_context *ctx, nir_tex_instr *instr,
       mov.mask = 1 << COMPONENT_Z;
       written_mask |= 1 << COMPONENT_Z;
       ins->swizzle[1][COMPONENT_Z] = COMPONENT_Z;
-      emit_mir_instruction(ctx, mov);
+      emit_mir_instruction(ctx, &mov);
    }
 
    /* Texelfetch coordinates uses all four elements (xyz/index) regardless
@@ -2204,7 +2213,7 @@ set_tex_coord(compiler_context *ctx, nir_tex_instr *instr,
          v_mov(SSA_FIXED_REGISTER(REGISTER_CONSTANT), ins->src[1]);
       mov.has_constants = true;
       mov.mask = (written_mask | write_mask) ^ 0xF;
-      emit_mir_instruction(ctx, mov);
+      emit_mir_instruction(ctx, &mov);
       for (unsigned c = 0; c < MIR_VEC_COMPONENTS; c++) {
          if (mov.mask & (1 << c))
             ins->swizzle[1][c] = c;
@@ -2228,7 +2237,7 @@ set_tex_coord(compiler_context *ctx, nir_tex_instr *instr,
       }
 
       mov.mask = write_mask;
-      emit_mir_instruction(ctx, mov);
+      emit_mir_instruction(ctx, &mov);
    }
 }
 
@@ -2324,7 +2333,7 @@ emit_texop_native(compiler_context *ctx, nir_tex_instr *instr,
       }
    }
 
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 }
 
 static void
@@ -2359,7 +2368,7 @@ emit_jump(compiler_context *ctx, nir_jump_instr *instr)
       struct midgard_instruction br = v_branch(false, false);
       br.branch.target_type = TARGET_BREAK;
       br.branch.target_break = ctx->current_loop_depth;
-      emit_mir_instruction(ctx, br);
+      emit_mir_instruction(ctx, &br);
       break;
    }
 
@@ -2458,9 +2467,9 @@ inline_alu_constants(compiler_context *ctx, midgard_block *block)
                &block->base.instructions, midgard_instruction, link);
 
             if (alu == first) {
-               mir_insert_instruction_before(ctx, alu, ins);
+               mir_insert_instruction_before(ctx, alu, &ins);
             } else {
-               mir_insert_instruction_before(ctx, mir_prev_op(alu), ins);
+               mir_insert_instruction_before(ctx, mir_prev_op(alu), &ins);
             }
          }
       }
@@ -2468,7 +2477,7 @@ inline_alu_constants(compiler_context *ctx, midgard_block *block)
 }
 
 unsigned
-max_bitsize_for_alu(midgard_instruction *ins)
+max_bitsize_for_alu(const midgard_instruction *ins)
 {
    unsigned max_bitsize = 0;
    for (int i = 0; i < MIR_SRC_COUNT; i++) {
@@ -2704,7 +2713,7 @@ emit_fragment_epilogue(compiler_context *ctx, unsigned rt, unsigned sample_iter)
    ins.branch.target_block = ctx->block_count - 1;
    ins.constants.u32[0] = br->constants.u32[0];
    memcpy(&ins.src_types, &br->src_types, sizeof(ins.src_types));
-   emit_mir_instruction(ctx, ins);
+   emit_mir_instruction(ctx, &ins);
 
    ctx->current_block->epilogue = true;
    schedule_barrier(ctx);
@@ -2820,7 +2829,7 @@ emit_loop(struct compiler_context *ctx, nir_loop *nloop)
    /* Branch back to loop back */
    struct midgard_instruction br_back = v_branch(false, false);
    br_back.branch.target_block = start_idx;
-   emit_mir_instruction(ctx, br_back);
+   emit_mir_instruction(ctx, &br_back);
 
    /* Mark down that branch in the graph. */
    pan_block_add_successor(&start_block->base, &loop_block->base);
@@ -2958,7 +2967,7 @@ mir_add_writeout_loops(compiler_context *ctx)
             midgard_instruction uncond = v_branch(false, false);
             uncond.branch.target_block = popped;
             uncond.branch.target_type = TARGET_GOTO;
-            emit_mir_instruction(ctx, uncond);
+            emit_mir_instruction(ctx, &uncond);
             pan_block_add_successor(&ctx->current_block->base,
                                     &(mir_get_block(ctx, popped)->base));
             schedule_barrier(ctx);
@@ -2995,7 +3004,7 @@ midgard_compile_shader_nir(nir_shader *nir,
 
    /* Collect varyings after lowering I/O */
    info->quirk_no_auto32 = (ctx->quirks & MIDGARD_NO_AUTO32);
-   pan_nir_collect_varyings(nir, info);
+   pan_nir_collect_varyings(nir, info, PAN_MEDIUMP_VARY_SMOOTH_16BIT);
 
    /* Optimisation passes */
    optimise_nir(nir, ctx->quirks, inputs->is_blend);
@@ -3019,7 +3028,7 @@ midgard_compile_shader_nir(nir_shader *nir,
          struct midgard_instruction wait = v_branch(false, false);
          wait.branch.target_type = TARGET_TILEBUF_WAIT;
 
-         emit_mir_instruction(ctx, wait);
+         emit_mir_instruction(ctx, &wait);
 
          ++ctx->instruction_count;
       }

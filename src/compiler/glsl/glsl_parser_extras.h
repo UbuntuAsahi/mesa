@@ -858,6 +858,8 @@ struct _mesa_glsl_parse_state {
    bool EXT_blend_func_extended_warn;
    bool EXT_clip_cull_distance_enable;
    bool EXT_clip_cull_distance_warn;
+   bool EXT_conservative_depth_enable;
+   bool EXT_conservative_depth_warn;
    bool EXT_demote_to_helper_invocation_enable;
    bool EXT_demote_to_helper_invocation_warn;
    bool EXT_draw_buffers_enable;
@@ -1015,6 +1017,9 @@ struct _mesa_glsl_parse_state {
     * so we can check totals aren't too large.
     */
    unsigned clip_dist_size, cull_dist_size;
+
+   /* for OVR_multiview */
+   uint32_t view_mask;
 };
 
 # define YYLLOC_DEFAULT(Current, Rhs, N)                        \
@@ -1083,6 +1088,14 @@ extern "C" {
 
 struct glcpp_parser;
 struct _mesa_glsl_parse_state;
+
+struct gl_context;
+struct gl_shader;
+
+extern void
+_mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
+                          FILE *dump_ir_file, bool dump_ast, bool dump_hir,
+                          bool force_recompile);
 
 typedef void (*glcpp_extension_iterator)(
               struct _mesa_glsl_parse_state *state,

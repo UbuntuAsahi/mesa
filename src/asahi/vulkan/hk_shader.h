@@ -23,7 +23,7 @@
 #include "shader_enums.h"
 #include "vk_pipeline_cache.h"
 
-#include "nir.h"
+#include "nir_defines.h"
 
 #include "vk_shader.h"
 
@@ -312,6 +312,11 @@ hk_pre_gs_variant(struct hk_api_shader *obj, bool rast_disc)
 
 struct hk_linked_shader {
    struct agx_linked_shader b;
+
+   /* True if the VS prolog uses software indexing, either for geom/tess or
+    * adjacency primitives.
+    */
+   bool sw_indexing;
 
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.

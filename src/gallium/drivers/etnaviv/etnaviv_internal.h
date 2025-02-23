@@ -70,7 +70,7 @@ struct etna_specs {
    /* needs z=(z+w)/2, for older GCxxx */
    unsigned vs_need_z_div : 1;
    /* can use VS_RANGE, PS_RANGE registers*/
-   unsigned has_shader_range_registers : 1;
+   unsigned has_unified_instmem : 1;
    /* has the new sin/cos/log functions */
    unsigned has_new_transcendentals : 1;
    /* has no limit on the number of constant sources per instruction */
@@ -180,6 +180,7 @@ struct compiled_framebuffer_state {
    uint32_t PE_DEPTH_STRIDE;
    uint32_t PE_HDEPTH_CONTROL;
    uint32_t PE_DEPTH_NORMALIZE;
+   float depth_mrd;
    struct etna_reloc PE_COLOR_ADDR;
    struct etna_reloc PE_PIPE_COLOR_ADDR[ETNA_MAX_PIXELPIPES];
    uint32_t PE_COLOR_STRIDE;
@@ -233,6 +234,7 @@ struct compiled_shader_state {
    uint32_t PA_ATTRIBUTE_ELEMENT_COUNT;
    uint32_t PA_CONFIG;
    uint32_t PA_SHADER_ATTRIBUTES[VIVS_PA_SHADER_ATTRIBUTES__LEN];
+   int pa_shader_attributes_states;
    uint32_t VS_END_PC;
    uint32_t VS_OUTPUT_COUNT; /* number of outputs if point size per vertex disabled */
    uint32_t VS_OUTPUT_COUNT_PSIZE; /* number of outputs of point size per vertex enabled */
@@ -251,7 +253,9 @@ struct compiled_shader_state {
    uint32_t PS_START_PC;
    uint32_t GL_VARYING_TOTAL_COMPONENTS;
    uint32_t GL_VARYING_NUM_COMPONENTS[2];
-   uint32_t GL_VARYING_COMPONENT_USE[2];
+   uint32_t GL_VARYING_COMPONENT_USE[4];
+   uint32_t GL_HALTI5_SHADER_ATTRIBUTES[VIVS_GL_HALTI5_SHADER_ATTRIBUTES__LEN];
+   int halti5_shader_attributes_states;
    uint32_t GL_HALTI5_SH_SPECIALS;
    uint32_t FE_HALTI5_ID_CONFIG;
    unsigned vs_inst_mem_size;

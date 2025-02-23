@@ -39,6 +39,8 @@
 #include "panvk_instance.h"
 #include "panvk_physical_device.h"
 #include "panvk_priv_bo.h"
+#include "panvk_tracepoints.h"
+#include "panvk_utrace.h"
 
 #include "pan_desc.h"
 #include "pan_encoder.h"
@@ -138,7 +140,7 @@ finish_cs(struct panvk_cmd_buffer *cmdbuf, uint32_t subqueue)
 
       cs_move32_to(b, one, 1);
       cs_load64_to(b, debug_sync_addr, cs_subqueue_ctx_reg(b),
-                   offsetof(struct panvk_cs_subqueue_context, debug_syncobjs));
+                   offsetof(struct panvk_cs_subqueue_context, debug.syncobjs));
       cs_wait_slot(b, SB_ID(LS), false);
       cs_add64(b, debug_sync_addr, debug_sync_addr,
                sizeof(struct panvk_cs_sync32) * subqueue);
@@ -146,7 +148,7 @@ finish_cs(struct panvk_cmd_buffer *cmdbuf, uint32_t subqueue)
                    offsetof(struct panvk_cs_sync32, error));
       cs_wait_slots(b, SB_ALL_MASK, false);
       if (cmdbuf->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-         cs_sync32_add(b, true, MALI_CS_SYNC_SCOPE_SYSTEM, one,
+         cs_sync32_add(b, true, MALI_CS_SYNC_SCOPE_CSG, one,
                        debug_sync_addr, cs_now());
       cs_match(b, error, cmp_scratch) {
          cs_case(b, 0) {
@@ -169,7 +171,7 @@ finish_cs(struct panvk_cmd_buffer *cmdbuf, uint32_t subqueue)
     * simple with this all-or-nothing approach. */
    if ((instance->debug_flags & PANVK_DEBUG_CS) &&
        cmdbuf->vk.level != VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
-       !(cmdbuf->state.gfx.render.flags & VK_RENDERING_SUSPENDING_BIT)) {
+       !cmdbuf->state.gfx.render.suspended) {
       cs_update_cmdbuf_regs(b) {
          /* Poison all cmdbuf registers to make sure we don't inherit state from
           * a previously executed cmdbuf. */
@@ -177,6 +179,8 @@ finish_cs(struct panvk_cmd_buffer *cmdbuf, uint32_t subqueue)
             cs_move32_to(b, cs_reg32(b, i), 0xdead | i << 24);
       }
    }
+
+   trace_end_cmdbuf(&cmdbuf->utrace.uts[subqueue], cmdbuf, cmdbuf->flags);
 
    cs_finish(&cmdbuf->state.cs[subqueue].builder);
 }
@@ -322,7 +326,8 @@ add_memory_dependency(struct panvk_cache_flush_info *cache_flush,
    const VkAccessFlags2 ro_l1_access =
       VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-      VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+      VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+      VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT;
 
    /* visibility op */
    if (dst_access & ro_l1_access)
@@ -399,7 +404,7 @@ collect_cs_deps(struct panvk_cmd_buffer *cmdbuf,
    add_execution_dependency(wait_masks, src_stages, dst_stages);
 
    /* within a render pass */
-   if (cmdbuf->state.gfx.render.tiler) {
+   if (cmdbuf->state.gfx.render.tiler || inherits_render_ctx(cmdbuf)) {
       if (should_split_render_pass(wait_masks, src_access, dst_access)) {
          deps->needs_draw_flush = true;
       } else {
@@ -679,6 +684,7 @@ init_cs_builders(struct panvk_cmd_buffer *cmdbuf)
    };
 
    for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->state.cs); i++) {
+      struct cs_builder *b = &cmdbuf->state.cs[i].builder;
       /* Lazy allocation of the root CS. */
       struct cs_buffer root_cs = {0};
 
@@ -701,7 +707,17 @@ init_cs_builders(struct panvk_cmd_buffer *cmdbuf)
          conf.reg_perm = cs_reg_perm;
       }
 
-      cs_builder_init(&cmdbuf->state.cs[i].builder, &conf, root_cs);
+      cs_builder_init(b, &conf, root_cs);
+
+      if (instance->debug_flags & PANVK_DEBUG_TRACE) {
+         cmdbuf->state.cs[i].tracing = (struct cs_tracing_ctx){
+            .enabled = true,
+            .ctx_reg = cs_subqueue_ctx_reg(b),
+            .tracebuf_addr_offset =
+               offsetof(struct panvk_cs_subqueue_context, debug.tracebuf.cs),
+            .ls_sb_slot = SB_ID(LS),
+         };
+      }
    }
 }
 
@@ -713,6 +729,7 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
       container_of(vk_cmdbuf, struct panvk_cmd_buffer, vk);
    struct panvk_cmd_pool *pool =
       container_of(vk_cmdbuf->pool, struct panvk_cmd_pool, vk);
+   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
 
    vk_command_buffer_reset(&cmdbuf->vk);
 
@@ -721,6 +738,12 @@ panvk_reset_cmdbuf(struct vk_command_buffer *vk_cmdbuf,
    panvk_pool_reset(&cmdbuf->tls_pool);
    list_splicetail(&cmdbuf->push_sets, &pool->push_sets);
    list_inithead(&cmdbuf->push_sets);
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->utrace.uts); i++) {
+      struct u_trace *ut = &cmdbuf->utrace.uts[i];
+      u_trace_fini(ut);
+      u_trace_init(ut, &dev->utrace.utctx);
+   }
 
    memset(&cmdbuf->state, 0, sizeof(cmdbuf->state));
    init_cs_builders(cmdbuf);
@@ -734,6 +757,9 @@ panvk_destroy_cmdbuf(struct vk_command_buffer *vk_cmdbuf)
    struct panvk_cmd_pool *pool =
       container_of(vk_cmdbuf->pool, struct panvk_cmd_pool, vk);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+
+   for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->utrace.uts); i++)
+      u_trace_fini(&cmdbuf->utrace.uts[i]);
 
    panvk_pool_cleanup(&cmdbuf->cs_pool);
    panvk_pool_cleanup(&cmdbuf->desc_pool);
@@ -803,6 +829,9 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
    panvk_pool_init(&cmdbuf->tls_pool, device, &pool->tls_bo_pool,
                    &tls_pool_props);
 
+   for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->utrace.uts); i++)
+      u_trace_init(&cmdbuf->utrace.uts[i], &device->utrace.utctx);
+
    init_cs_builders(cmdbuf);
    *cmdbuf_out = &cmdbuf->vk;
    return VK_SUCCESS;
@@ -819,24 +848,21 @@ panvk_per_arch(BeginCommandBuffer)(VkCommandBuffer commandBuffer,
                                    const VkCommandBufferBeginInfo *pBeginInfo)
 {
    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
-   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_instance *instance =
-      to_panvk_instance(dev->vk.physical->instance);
+      to_panvk_instance(cmdbuf->vk.base.device->physical->instance);
 
    vk_command_buffer_begin(&cmdbuf->vk, pBeginInfo);
    cmdbuf->flags = pBeginInfo->flags;
 
-   /* The descriptor ringbuf trips out pandecode because we always point to the
-    * next tiler/framebuffer descriptor after CS execution, which means we're
-    * decoding an uninitialized or stale descriptor.
-    * FIXME: find a way to trace the simultaneous path that doesn't crash. One
-    * option would be to disable CS intepretation and dump the RUN_xxx context
-    * on the side at execution time.
-    */
-   if (instance->debug_flags & PANVK_DEBUG_TRACE)
-      cmdbuf->flags &= ~VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+   if (instance->debug_flags & PANVK_DEBUG_FORCE_SIMULTANEOUS) {
+      cmdbuf->flags |= VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+      cmdbuf->flags &= ~VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+   }
 
    panvk_per_arch(cmd_inherit_render_state)(cmdbuf, pBeginInfo);
+
+   for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
+      trace_begin_cmdbuf(&cmdbuf->utrace.uts[i], cmdbuf);
 
    return VK_SUCCESS;
 }
@@ -896,14 +922,20 @@ panvk_per_arch(CmdExecuteCommands)(VkCommandBuffer commandBuffer,
             cs_move64_to(prim_b, addr, cs_root_chunk_gpu_addr(sec_b));
             cs_move32_to(prim_b, size, cs_root_chunk_size(sec_b));
             cs_call(prim_b, addr, size);
+
+            struct u_trace *prim_ut = &primary->utrace.uts[j];
+            struct u_trace *sec_ut = &secondary->utrace.uts[j];
+            u_trace_clone_append(u_trace_begin_iterator(sec_ut),
+                                 u_trace_end_iterator(sec_ut), prim_ut, prim_b,
+                                 panvk_per_arch(utrace_copy_buffer));
          }
       }
 
       /* We need to propagate the suspending state of the secondary command
        * buffer if we want to avoid poisoning the reg file when the secondary
        * command buffer suspended the render pass. */
-      if (secondary->state.gfx.render.flags & VK_RENDERING_SUSPENDING_BIT)
-         primary->state.gfx.render.flags = secondary->state.gfx.render.flags;
+      primary->state.gfx.render.suspended =
+         secondary->state.gfx.render.suspended;
 
       /* If the render context we passed to the secondary command buffer got
        * invalidated, reset the FB/tiler descs and treat things as if we

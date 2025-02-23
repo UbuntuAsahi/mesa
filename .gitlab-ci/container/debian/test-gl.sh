@@ -10,7 +10,7 @@ set -o xtrace
 uncollapsed_section_start debian_setup "Base Debian system setup"
 
 export DEBIAN_FRONTEND=noninteractive
-export LLVM_VERSION="${LLVM_VERSION:=15}"
+: "${LLVM_VERSION:?llvm version not set!}"
 
 apt-get install -y libelogind0  # this interfere with systemd deps, install separately
 
@@ -44,6 +44,7 @@ EPHEMERAL=(
     libxrandr-dev
     libxrender-dev
     "llvm-${LLVM_VERSION}-dev"
+    "lld-${LLVM_VERSION}"
     make
     meson
     ocl-icd-opencl-dev
@@ -54,24 +55,6 @@ EPHEMERAL=(
 )
 
 DEPS=(
-    clinfo
-    iptables
-    kmod
-    "libclang-common-${LLVM_VERSION}-dev"
-    "libclang-cpp${LLVM_VERSION}"
-    libcap2
-    libegl1
-    libepoxy0
-    libfdt1
-    libxcb-shm0
-    ocl-icd-libopencl1
-    python3-lxml
-    python3-renderdoc
-    python3-simplejson
-    spirv-tools
-    sysvinit-core
-    weston
-    xwayland
 )
 
 apt-get update
@@ -83,6 +66,13 @@ apt-get install -y --no-remove "${DEPS[@]}" "${EPHEMERAL[@]}" \
 . .gitlab-ci/container/container_pre_build.sh
 
 section_end debian_setup
+
+############### Build ANGLE
+
+if [ "$DEBIAN_ARCH" == "arm64" ]; then
+  ANGLE_TARGET=linux \
+  . .gitlab-ci/container/build-angle.sh
+fi
 
 ############### Build piglit
 
@@ -117,10 +107,6 @@ DEQP_TARGET=surfaceless \
 . .gitlab-ci/container/build-deqp.sh
 
 rm -rf /VK-GL-CTS
-
-############### Build apitrace
-
-. .gitlab-ci/container/build-apitrace.sh
 
 ############### Build validation layer for zink
 

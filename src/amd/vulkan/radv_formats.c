@@ -19,6 +19,7 @@
 #include "vk_log.h"
 #include "vk_util.h"
 
+#include "util/compiler.h"
 #include "util/format_r11g11b10f.h"
 #include "util/format_rgb9e5.h"
 #include "util/format_srgb.h"
@@ -627,10 +628,10 @@ radv_get_modifier_flags(struct radv_physical_device *pdev, VkFormat format, uint
          return 0;
 
       /* Only disable support for STORAGE_IMAGE on modifiers that
-       * do not support DCC image stores.
+       * do not support DCC image stores or when explicitly disabled.
        */
       if (!ac_modifier_supports_dcc_image_stores(pdev->info.gfx_level, modifier) ||
-          radv_is_atomic_format_supported(format))
+          radv_is_atomic_format_supported(format) || instance->drirc.disable_dcc_stores)
          features &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
 
       if (instance->debug_flags & (RADV_DEBUG_NO_DCC | RADV_DEBUG_NO_DISPLAY_DCC))
@@ -674,8 +675,14 @@ radv_list_drm_format_modifiers(struct radv_physical_device *pdev, VkFormat forma
       if (!features)
          continue;
 
-      unsigned planes =
-         vk_format_get_plane_count(format) + ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      unsigned planes = vk_format_get_plane_count(format);
+
+      if (pdev->info.gfx_level < GFX12) {
+         /* DCC is transparent to the userspace driver on GFX12 so it doesn't
+          * need additional planes.
+          */
+         planes += ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      }
 
       vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out, out_props)
       {
@@ -725,8 +732,14 @@ radv_list_drm_format_modifiers_2(struct radv_physical_device *pdev, VkFormat for
       if (!features)
          continue;
 
-      unsigned planes =
-         vk_format_get_plane_count(format) + ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      unsigned planes = vk_format_get_plane_count(format);
+
+      if (pdev->info.gfx_level < GFX12) {
+         /* DCC is transparent to the userspace driver on GFX12 so it doesn't
+          * need additional planes.
+          */
+         planes += ac_modifier_has_dcc(mods[i]) + ac_modifier_has_dcc_retile(mods[i]);
+      }
 
       vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out, out_props)
       {
@@ -746,9 +759,6 @@ radv_check_modifier_support(struct radv_physical_device *pdev, const VkPhysicalD
                             VkImageFormatProperties *props, VkFormat format, uint64_t modifier)
 {
    uint32_t max_width, max_height;
-
-   if (info->type != VK_IMAGE_TYPE_2D)
-      return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    if (radv_is_format_emulated(pdev, format))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -1088,8 +1098,6 @@ get_external_image_format_properties(struct radv_physical_device *pdev,
          break;
       FALLTHROUGH;
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
-      if (pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
-         break;
       flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
       if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT &&
           pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR)
@@ -1219,8 +1227,8 @@ radv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
           *    vkGetPhysicalDeviceImageFormatProperties2 returns
           *    VK_ERROR_FORMAT_NOT_SUPPORTED.
           */
-         result = vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED, "unsupported VkExternalMemoryTypeFlagBitsKHR 0x%x",
-                            external_info->handleType);
+         result = vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED, "unsupported VkExternalMemoryHandleTypeFlagBits %s",
+                            vk_ExternalMemoryHandleTypeFlagBits_to_str(external_info->handleType));
          goto fail;
       }
    }

@@ -24,6 +24,10 @@
 #include "nir_instr_set.h"
 #include "util/half_float.h"
 #include "nir_vla.h"
+#include "nir.h"
+
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 
 /* This function determines if uses of an instruction can safely be rewritten
  * to use another identical instruction instead. Note that this function must
@@ -70,8 +74,6 @@ instr_can_rewrite(const nir_instr *instr)
          return nir_intrinsic_can_reorder(intr);
       }
    }
-   case nir_instr_type_debug_info:
-      return nir_instr_as_debug_info(instr)->type == nir_debug_info_string;
    case nir_instr_type_call:
    case nir_instr_type_jump:
    case nir_instr_type_undef:
@@ -275,13 +277,6 @@ hash_tex(uint32_t hash, const nir_tex_instr *instr)
    return hash;
 }
 
-static uint32_t
-hash_debug_info(uint32_t hash, const nir_debug_info_instr *instr)
-{
-   assert(instr->type == nir_debug_info_string);
-   return XXH32(instr->string, instr->string_length, hash);
-}
-
 /* Computes a hash of an instruction for use in a hash table. Note that this
  * will only work for instructions where instr_can_rewrite() returns true, and
  * it should return identical hashes for two instructions that are the same
@@ -313,9 +308,6 @@ hash_instr(const void *data)
    case nir_instr_type_tex:
       hash = hash_tex(hash, nir_instr_as_tex(instr));
       break;
-   case nir_instr_type_debug_info:
-      hash = hash_debug_info(hash, nir_instr_as_debug_info(instr));
-      break;
    default:
       unreachable("Invalid instruction type");
    }
@@ -335,11 +327,11 @@ nir_srcs_equal(nir_src src1, nir_src src2)
  * returned.
  */
 static nir_alu_instr *
-get_neg_instr(nir_src s)
+get_neg_instr(nir_src s, nir_alu_type base_type)
 {
    nir_alu_instr *alu = nir_src_as_alu_instr(s);
 
-   return alu != NULL && (alu->op == nir_op_fneg || alu->op == nir_op_ineg)
+   return alu != NULL && (alu->op == (base_type == nir_type_float ? nir_op_fneg : nir_op_ineg))
              ? alu
              : NULL;
 }
@@ -385,38 +377,16 @@ nir_const_value_negative_equal(nir_const_value c1,
    return false;
 }
 
-/**
- * Shallow compare of ALU srcs to determine if one is the negation of the other
- *
- * This function detects cases where \p alu1 is a constant and \p alu2 is a
- * constant that is its negation.  It will also detect cases where \p alu2 is
- * an SSA value that is a \c nir_op_fneg applied to \p alu1 (and vice versa).
- *
- * This function does not detect the general case when \p alu1 and \p alu2 are
- * SSA values that are the negations of each other (e.g., \p alu1 represents
- * (a * b) and \p alu2 represents (-a * b)).
- *
- * \warning
- * It is the responsibility of the caller to ensure that the component counts,
- * write masks, and base types of the sources being compared are compatible.
- */
 bool
-nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
-                            const nir_alu_instr *alu2,
-                            unsigned src1, unsigned src2)
+nir_alu_srcs_negative_equal_typed(const nir_alu_instr *alu1,
+                                  const nir_alu_instr *alu2,
+                                  unsigned src1, unsigned src2,
+                                  nir_alu_type base_type)
 {
 #ifndef NDEBUG
    for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++) {
       assert(nir_alu_instr_channel_used(alu1, src1, i) ==
              nir_alu_instr_channel_used(alu2, src2, i));
-   }
-
-   if (nir_alu_type_get_base_type(nir_op_infos[alu1->op].input_types[src1]) == nir_type_float) {
-      assert(nir_op_infos[alu1->op].input_types[src1] ==
-             nir_op_infos[alu2->op].input_types[src2]);
-   } else {
-      assert(nir_op_infos[alu1->op].input_types[src1] == nir_type_int);
-      assert(nir_op_infos[alu2->op].input_types[src2] == nir_type_int);
    }
 #endif
 
@@ -436,8 +406,7 @@ nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
           nir_src_bit_size(alu2->src[src2].src))
          return false;
 
-      const nir_alu_type full_type = nir_op_infos[alu1->op].input_types[src1] |
-                                     nir_src_bit_size(alu1->src[src1].src);
+      const nir_alu_type full_type = base_type | nir_src_bit_size(alu1->src[src1].src);
       for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++) {
          if (nir_alu_instr_channel_used(alu1, src1, i) &&
              !nir_const_value_negative_equal(const1[alu1->src[src1].swizzle[i]],
@@ -451,7 +420,7 @@ nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
 
    uint8_t alu1_swizzle[NIR_MAX_VEC_COMPONENTS] = { 0 };
    nir_src alu1_actual_src;
-   nir_alu_instr *neg1 = get_neg_instr(alu1->src[src1].src);
+   nir_alu_instr *neg1 = get_neg_instr(alu1->src[src1].src, base_type);
    bool parity = false;
 
    if (neg1) {
@@ -469,7 +438,7 @@ nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
 
    uint8_t alu2_swizzle[NIR_MAX_VEC_COMPONENTS] = { 0 };
    nir_src alu2_actual_src;
-   nir_alu_instr *neg2 = get_neg_instr(alu2->src[src2].src);
+   nir_alu_instr *neg2 = get_neg_instr(alu2->src[src2].src, base_type);
 
    if (neg2) {
       parity = !parity;
@@ -495,6 +464,41 @@ nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
    }
 
    return true;
+}
+
+/**
+ * Shallow compare of ALU srcs to determine if one is the negation of the other
+ *
+ * This function detects cases where \p alu1 is a constant and \p alu2 is a
+ * constant that is its negation.  It will also detect cases where \p alu2 is
+ * an SSA value that is a \c nir_op_fneg applied to \p alu1 (and vice versa).
+ *
+ * This function does not detect the general case when \p alu1 and \p alu2 are
+ * SSA values that are the negations of each other (e.g., \p alu1 represents
+ * (a * b) and \p alu2 represents (-a * b)).
+ *
+ * \warning
+ * It is the responsibility of the caller to ensure that the component counts,
+ * write masks, and base types of the sources being compared are compatible.
+ */
+bool
+nir_alu_srcs_negative_equal(const nir_alu_instr *alu1,
+                            const nir_alu_instr *alu2,
+                            unsigned src1, unsigned src2)
+{
+
+#ifndef NDEBUG
+   if (nir_alu_type_get_base_type(nir_op_infos[alu1->op].input_types[src1]) == nir_type_float) {
+      assert(nir_op_infos[alu1->op].input_types[src1] ==
+             nir_op_infos[alu2->op].input_types[src2]);
+   } else {
+      assert(nir_op_infos[alu1->op].input_types[src1] == nir_type_int);
+      assert(nir_op_infos[alu2->op].input_types[src2] == nir_type_int);
+   }
+#endif
+
+   nir_alu_type type = nir_op_infos[alu1->op].input_types[src1];
+   return nir_alu_srcs_negative_equal_typed(alu1, alu2, src1, src2, type);
 }
 
 bool
@@ -726,16 +730,6 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       }
 
       return true;
-   }
-   case nir_instr_type_debug_info: {
-      nir_debug_info_instr *di1 = nir_instr_as_debug_info(instr1);
-      nir_debug_info_instr *di2 = nir_instr_as_debug_info(instr2);
-
-      assert(di1->type == nir_debug_info_string);
-      assert(di2->type == nir_debug_info_string);
-
-      return di1->string_length == di2->string_length &&
-             !memcmp(di1->string, di2->string, di1->string_length);
    }
    case nir_instr_type_call:
    case nir_instr_type_jump:

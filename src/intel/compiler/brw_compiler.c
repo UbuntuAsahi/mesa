@@ -75,10 +75,13 @@ const struct nir_shader_compiler_options brw_scalar_nir_options = {
    .lower_usub_borrow = true,
    .max_unroll_iterations = 32,
    .support_16bit_alu = true,
-   .vectorize_io = true,
    .vectorize_tess_levels = true,
    .vertex_id_zero_based = true,
    .scalarize_ddx = true,
+   .support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
+   .support_indirect_outputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
+   .per_view_unique_driver_locations = true,
+   .compact_view_index = true,
 };
 
 struct brw_compiler *
@@ -91,7 +94,7 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    brw_init_isa_info(&compiler->isa, devinfo);
 
-   brw_fs_alloc_reg_sets(compiler);
+   brw_alloc_reg_sets(compiler);
 
    compiler->precise_trig = debug_get_bool_option("INTEL_PRECISE_TRIG", false);
 

@@ -269,8 +269,8 @@
    DRI_CONF_OPT_I(override_vram_size, -1, -1, 2147483647, \
                   "Override the VRAM size advertised to the application in MiB (-1 = default)")
 
-#define DRI_CONF_FORCE_GL_NAMES_REUSE(def) \
-   DRI_CONF_OPT_B(force_gl_names_reuse, def, "Force GL names reuse")
+#define DRI_CONF_FORCE_GL_NAMES_REUSE() \
+   DRI_CONF_OPT_I(reuse_gl_names, -1, -1, 1, "GL names reuse: 1=enable, 0=disable, -1=default")
 
 #define DRI_CONF_FORCE_GL_MAP_BUFFER_SYNCHRONIZED(def) \
    DRI_CONF_OPT_B(force_gl_map_buffer_synchronized, def, "Override GL_MAP_UNSYNCHRONIZED_BIT.")
@@ -492,6 +492,10 @@
    DRI_CONF_OPT_B(allow_multisampled_copyteximage, def, \
                   "Allow CopyTexSubImage and other to copy sampled framebuffer")
 
+#define DRI_CONF_CUSTOM_BORDER_COLORS_WITHOUT_FORMAT(def) \
+   DRI_CONF_OPT_B(custom_border_colors_without_format, def, \
+                  "Enable custom border colors without format")
+
 #define DRI_CONF_NO_FP16(def) \
    DRI_CONF_OPT_B(no_fp16, def, \
                   "Disable 16-bit float support")
@@ -637,6 +641,10 @@
    DRI_CONF_OPT_B(hk_disable_rgba4_border_color_workaround, def, \
                   "Use hardware opaque_black, breaking certain RGBA4 formats")
 
+#define DRI_CONF_HK_FAKE_MINMAX(def) \
+   DRI_CONF_OPT_B(hk_fake_minmax, def, \
+                  "Fake support for min/max filtering")
+
 /**
  * \brief venus specific configuration options
  */
@@ -696,6 +704,14 @@
    DRI_CONF_OPT_B(radv_disable_dcc_mips, def, \
                   "Disable DCC for color images with mips")
 
+#define DRI_CONF_RADV_DISABLE_DCC_STORES(def) \
+   DRI_CONF_OPT_B(radv_disable_dcc_stores, def, \
+                  "Disable DCC for color storage images")
+
+#define DRI_CONF_RADV_LOWER_TERMINATE_TO_DISCARD(def) \
+   DRI_CONF_OPT_B(radv_lower_terminate_to_discard, def, \
+                  "Lower terminate to discard (which is implicitly demote)")
+
 #define DRI_CONF_RADV_DISABLE_ANISO_SINGLE_LEVEL(def) \
   DRI_CONF_OPT_B(radv_disable_aniso_single_level, def, \
                  "Disable anisotropic filtering for single level images")
@@ -737,9 +753,9 @@
    DRI_CONF_OPT_B(radv_rt_wave64, def, \
                   "Force wave64 in RT shaders")
 
-#define DRI_CONF_RADV_LEGACY_SPARSE_BINDING(def) \
-   DRI_CONF_OPT_B(radv_legacy_sparse_binding, def, \
-                  "Enable legacy sparse binding (with implicit synchronization) on the graphics and compute queue")
+#define DRI_CONF_RADV_DISABLE_DEDICATED_SPARSE_QUEUE(def) \
+   DRI_CONF_OPT_B(radv_disable_dedicated_sparse_queue, def, \
+                  "Disables the dedicated sparse queue. This replaces radv_legacy_sparse_binding as a compatible drirc workaround for games that might not expect a separate SPARSE queue")
 
 #define DRI_CONF_RADV_FORCE_PSTATE_PEAK_GFX11_DGPU(def) \
    DRI_CONF_OPT_B(radv_force_pstate_peak_gfx11_dgpu, def, \
@@ -827,9 +843,9 @@
    DRI_CONF_OPT_B(anv_disable_fcv, def, \
                   "Disable FCV optimization")
 
-#define DRI_CONF_ANV_DISABLE_XE2_CCS(def) \
-   DRI_CONF_OPT_B(anv_disable_xe2_ccs, def, \
-                  "Disable CCS optimization on Xe2")
+#define DRI_CONF_ANV_ENABLE_BUFFER_COMP(def) \
+   DRI_CONF_OPT_B(anv_enable_buffer_comp, def, \
+                  "Enable CCS on buffers where possible")
 
 #define DRI_CONF_ANV_EXTERNAL_MEMORY_IMPLICIT_SYNC(def) \
    DRI_CONF_OPT_B(anv_external_memory_implicit_sync, def, "Implicit sync on external BOs")
@@ -844,6 +860,10 @@
 #define DRI_CONF_ANV_UPPER_BOUND_DESCRIPTOR_POOL_SAMPLER(def) \
    DRI_CONF_OPT_B(anv_upper_bound_descriptor_pool_sampler, def, \
                   "Overallocate samplers in descriptor pools to workaround app bug")
+
+#define DRI_CONF_ANV_VF_COMPONENT_PACKING(def) \
+   DRI_CONF_OPT_B(anv_vf_component_packing, def, \
+                  "Vertex fetching component packing")
 
 /**
  * \brief HASVK specific configuration options

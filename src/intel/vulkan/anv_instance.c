@@ -17,7 +17,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(0)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_BARRIER(false)
       DRI_CONF_ANV_DISABLE_FCV(false)
-      DRI_CONF_ANV_DISABLE_XE2_CCS(false)
+      DRI_CONF_ANV_ENABLE_BUFFER_COMP(false)
       DRI_CONF_ANV_EXTERNAL_MEMORY_IMPLICIT_SYNC(true)
       DRI_CONF_ANV_FORCE_GUC_LOW_LATENCY(false)
       DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(false)
@@ -53,11 +53,13 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_ANV_MESH_CONV_PRIM_ATTRS_TO_VERT_ATTRS(-2)
       DRI_CONF_FORCE_VK_VENDOR()
       DRI_CONF_FAKE_SPARSE(false)
+      DRI_CONF_CUSTOM_BORDER_COLORS_WITHOUT_FORMAT(!DETECT_OS_ANDROID)
 #if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 34
       DRI_CONF_VK_REQUIRE_ASTC(true)
 #else
       DRI_CONF_VK_REQUIRE_ASTC(false)
 #endif
+      DRI_CONF_ANV_VF_COMPONENT_PACKING(true)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_QUALITY
@@ -171,8 +173,8 @@ anv_init_dri_options(struct anv_instance *instance)
     instance->enable_tbimr = driQueryOptionb(&instance->dri_options, "intel_tbimr");
     instance->disable_fcv =
        driQueryOptionb(&instance->dri_options, "anv_disable_fcv");
-    instance->disable_xe2_ccs =
-       driQueryOptionb(&instance->dri_options, "anv_disable_xe2_ccs");
+    instance->enable_buffer_comp =
+       driQueryOptionb(&instance->dri_options, "anv_enable_buffer_comp");
     instance->external_memory_implicit_sync =
        driQueryOptionb(&instance->dri_options, "anv_external_memory_implicit_sync");
     instance->compression_control_enabled =
@@ -182,6 +184,11 @@ anv_init_dri_options(struct anv_instance *instance)
     instance->anv_upper_bound_descriptor_pool_sampler =
        driQueryOptionb(&instance->dri_options,
                        "anv_upper_bound_descriptor_pool_sampler");
+    instance->custom_border_colors_without_format =
+       driQueryOptionb(&instance->dri_options,
+                       "custom_border_colors_without_format");
+    instance->vf_component_packing =
+       driQueryOptionb(&instance->dri_options, "anv_vf_component_packing");
 
     instance->stack_ids = driQueryOptioni(&instance->dri_options, "intel_stack_id");
     switch (instance->stack_ids) {

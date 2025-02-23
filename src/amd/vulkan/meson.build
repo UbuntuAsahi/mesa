@@ -62,6 +62,8 @@ libradv_files = files(
   'meta/radv_meta_resolve.c',
   'meta/radv_meta_resolve_cs.c',
   'meta/radv_meta_resolve_fs.c',
+  'nir/radv_meta_nir.c',
+  'nir/radv_meta_nir.h',
   'nir/radv_nir.h',
   'nir/radv_nir_apply_pipeline_layout.c',
   'nir/radv_nir_export_multiview.c',
@@ -72,12 +74,12 @@ libradv_files = files(
   'nir/radv_nir_lower_hit_attrib_derefs.c',
   'nir/radv_nir_lower_intrinsics_early.c',
   'nir/radv_nir_lower_io.c',
-  'nir/radv_nir_lower_poly_line_smooth.c',
   'nir/radv_nir_lower_primitive_shading_rate.c',
   'nir/radv_nir_lower_ray_queries.c',
   'nir/radv_nir_lower_view_index.c',
   'nir/radv_nir_lower_viewport_to_zero.c',
   'nir/radv_nir_lower_vs_inputs.c',
+  'nir/radv_nir_opt_fs_builtins.c',
   'nir/radv_nir_opt_tid_function.c',
   'nir/radv_nir_remap_color_attachment.c',
   'nir/radv_nir_rt_common.c',
@@ -191,15 +193,16 @@ if amd_with_llvm
   )
 endif
 
-subdir('radix_sort')
-libradv_files += radix_sort_files
-
 subdir('bvh')
 
 subdir('layers')
 
 radv_deps = []
 radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
+
+if with_amdgpu_virtio
+  radv_flags += '-DHAVE_AMDGPU_VIRTIO'
+endif
 
 if with_platform_x11
   radv_deps += dep_xcb_dri3
@@ -227,13 +230,14 @@ libvulkan_radeon = shared_library(
   [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
   vs_module_defs : vulkan_api_def,
   include_directories : [
-    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm, inc_util,
+    inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
+    inc_util, inc_virtio_gpu
   ],
   link_with : [
     libamd_common, libamd_common_llvm, libamdgpu_addrlib,
   ],
   dependencies : [
-    dep_llvm, dep_libdrm_amdgpu, dep_thread, dep_elf, dep_dl, dep_m,
+    dep_llvm, dep_thread, dep_elf, dep_dl, dep_m,
     dep_valgrind, radv_deps, idep_aco,
     idep_mesautil, idep_nir, idep_vulkan_util, idep_vulkan_wsi,
     idep_vulkan_runtime, idep_amdgfxregs_h, idep_xmlconfig,
@@ -272,7 +276,7 @@ endif
 
 icd_command = [
   prog_python, '@INPUT0@',
-  '--api-version', '1.3', '--xml', '@INPUT1@',
+  '--api-version', '1.4', '--xml', '@INPUT1@',
   '--lib-path', join_paths(icd_lib_path, icd_file_name),
   '--out', '@OUTPUT@',
 ]
@@ -298,7 +302,7 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
     '--lib-path', meson.current_build_dir() / icd_file_name,
     '--out', '@OUTPUT@',
   ],

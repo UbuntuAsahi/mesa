@@ -551,6 +551,7 @@ anv_cmd_buffer_flush_pipeline_state(struct anv_cmd_buffer *cmd_buffer,
    diff_fix_state(VF_SGVS,                  final.vf_sgvs);
    if (cmd_buffer->device->info->ver >= 11)
       diff_fix_state(VF_SGVS_2,             final.vf_sgvs_2);
+   diff_fix_state(VF_COMPONENT_PACKING,     final.vf_component_packing);
    if (cmd_buffer->device->info->ver >= 12)
       diff_fix_state(PRIMITIVE_REPLICATION, final.primitive_replication);
    diff_fix_state(SBE,                      final.sbe);
@@ -742,12 +743,7 @@ anv_cmd_buffer_get_pipeline_layout_state(struct anv_cmd_buffer *cmd_buffer,
       return &cmd_buffer->state.compute.base;
 
    case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
-      *out_stages &= VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-         VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-         VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-         VK_SHADER_STAGE_MISS_BIT_KHR |
-         VK_SHADER_STAGE_INTERSECTION_BIT_KHR |
-         VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+      *out_stages &= ANV_RT_STAGE_BITS;
       return &cmd_buffer->state.rt.base;
 
    default:
@@ -837,12 +833,7 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
             !cmd_buffer->device->physical->indirect_descriptors ||
             (stages & (VK_SHADER_STAGE_TASK_BIT_EXT |
                        VK_SHADER_STAGE_MESH_BIT_EXT |
-                       VK_SHADER_STAGE_RAYGEN_BIT_KHR |
-                       VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-                       VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                       VK_SHADER_STAGE_MISS_BIT_KHR |
-                       VK_SHADER_STAGE_INTERSECTION_BIT_KHR |
-                       VK_SHADER_STAGE_CALLABLE_BIT_KHR));
+                       ANV_RT_STAGE_BITS));
 
          if (update_desc_sets) {
             struct anv_push_constants *push = &pipe_state->push_constants;
@@ -914,14 +905,6 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
    (VK_SHADER_STAGE_ALL_GRAPHICS | \
     VK_SHADER_STAGE_MESH_BIT_EXT | \
     VK_SHADER_STAGE_TASK_BIT_EXT)
-
-#define ANV_RT_STAGE_BITS \
-   (VK_SHADER_STAGE_RAYGEN_BIT_KHR | \
-    VK_SHADER_STAGE_ANY_HIT_BIT_KHR | \
-    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | \
-    VK_SHADER_STAGE_MISS_BIT_KHR | \
-    VK_SHADER_STAGE_INTERSECTION_BIT_KHR | \
-    VK_SHADER_STAGE_CALLABLE_BIT_KHR)
 
 void anv_CmdBindDescriptorSets2KHR(
     VkCommandBuffer                             commandBuffer,
@@ -1208,9 +1191,18 @@ anv_cmd_buffer_merge_dynamic(struct anv_cmd_buffer *cmd_buffer,
 struct anv_state
 anv_cmd_buffer_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer)
 {
-   struct anv_push_constants *data =
+   const struct anv_push_constants *data =
       &cmd_buffer->state.gfx.base.push_constants;
 
+   /* For Mesh/Task shaders the 3DSTATE_(MESH|TASK)_SHADER_DATA require a 64B
+    * alignment.
+    *
+    * ATMS PRMs Volume 2d: Command Reference: Structures,
+    * 3DSTATE_MESH_SHADER_DATA_BODY::Indirect Data Start Address:
+    *
+    *    "This pointer is relative to the General State Base Address. It is
+    *     the 64-byte aligned address of the indirect data."
+    */
    struct anv_state state =
       anv_cmd_buffer_alloc_temporary_state(cmd_buffer,
                                            sizeof(struct anv_push_constants),
@@ -1218,7 +1210,11 @@ anv_cmd_buffer_gfx_push_constants(struct anv_cmd_buffer *cmd_buffer)
    if (state.alloc_size == 0)
       return state;
 
-   memcpy(state.map, data, sizeof(struct anv_push_constants));
+   memcpy(state.map, data->client_data,
+          cmd_buffer->state.gfx.base.push_constants_client_size);
+   memcpy(state.map + sizeof(data->client_data),
+          &data->desc_surface_offsets,
+          sizeof(struct anv_push_constants) - sizeof(data->client_data));
 
    return state;
 }
@@ -1246,9 +1242,9 @@ anv_cmd_buffer_cs_push_constants(struct anv_cmd_buffer *cmd_buffer)
       ALIGN(total_push_constants_size, push_constant_alignment);
    struct anv_state state;
    if (devinfo->verx10 >= 125) {
-      state = anv_state_stream_alloc(&cmd_buffer->general_state_stream,
-                                     aligned_total_push_constants_size,
-                                     push_constant_alignment);
+      state = anv_cmd_buffer_alloc_general_state(cmd_buffer,
+                                                 aligned_total_push_constants_size,
+                                                 push_constant_alignment);
    } else {
       state = anv_cmd_buffer_alloc_dynamic_state(cmd_buffer,
                                                  aligned_total_push_constants_size,
@@ -1295,6 +1291,8 @@ void anv_CmdPushConstants2KHR(
       memcpy(pipe_state->push_constants.client_data + pInfo->offset,
              pInfo->pValues, pInfo->size);
       pipe_state->push_constants_data_dirty = true;
+      pipe_state->push_constants_client_size = MAX2(
+         pipe_state->push_constants_client_size, pInfo->offset + pInfo->size);
    }
    if (pInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
       struct anv_cmd_pipeline_state *pipe_state =
@@ -1303,6 +1301,8 @@ void anv_CmdPushConstants2KHR(
       memcpy(pipe_state->push_constants.client_data + pInfo->offset,
              pInfo->pValues, pInfo->size);
       pipe_state->push_constants_data_dirty = true;
+      pipe_state->push_constants_client_size = MAX2(
+         pipe_state->push_constants_client_size, pInfo->offset + pInfo->size);
    }
    if (pInfo->stageFlags & ANV_RT_STAGE_BITS) {
       struct anv_cmd_pipeline_state *pipe_state =
@@ -1311,6 +1311,8 @@ void anv_CmdPushConstants2KHR(
       memcpy(pipe_state->push_constants.client_data + pInfo->offset,
              pInfo->pValues, pInfo->size);
       pipe_state->push_constants_data_dirty = true;
+      pipe_state->push_constants_client_size = MAX2(
+         pipe_state->push_constants_client_size, pInfo->offset + pInfo->size);
    }
 
    cmd_buffer->state.push_constants_dirty |= pInfo->stageFlags;
@@ -1543,4 +1545,41 @@ anv_cmd_buffer_restore_state(struct anv_cmd_buffer *cmd_buffer,
       };
       anv_CmdPushConstants2KHR(cmd_buffer_, &push_info);
    }
+}
+
+void
+anv_cmd_write_buffer_cp(VkCommandBuffer commandBuffer,
+                        VkDeviceAddress dstAddr,
+                        void *data,
+                        uint32_t size)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   anv_genX(cmd_buffer->device->info, cmd_write_buffer_cp)(cmd_buffer, dstAddr,
+                                                           data, size);
+}
+
+void
+anv_cmd_flush_buffer_write_cp(VkCommandBuffer commandBuffer)
+{
+   /* TODO: cmd_write_buffer_cp is implemented with MI store +
+    * ForceWriteCompletionCheck so that should make the content globally
+    * observable.
+    *
+    * If we encounter any functional or perf bottleneck issues, let's revisit
+    * this helper and add ANV_PIPE_HDC_PIPELINE_FLUSH_BIT +
+    * ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT +
+    * ANV_PIPE_DATA_CACHE_FLUSH_BIT.
+    */
+}
+
+void
+anv_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer,
+                           uint32_t invocations_x,
+                           uint32_t invocations_y,
+                           uint32_t invocations_z)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   anv_genX(cmd_buffer->device->info, cmd_dispatch_unaligned)
+      (commandBuffer, invocations_x, invocations_y, invocations_z);
 }

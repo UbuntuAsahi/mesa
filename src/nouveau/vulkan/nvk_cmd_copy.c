@@ -24,7 +24,7 @@ static inline uint16_t
 nvk_cmd_buffer_copy_cls(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    return pdev->info.cls_copy;
 }
 
@@ -197,7 +197,7 @@ nouveau_copy_rect(struct nvk_cmd_buffer *cmd, struct nouveau_copy *copy)
       });
    } else {
       /* When component remapping is disabled, dimensions are in units of
-       * bytes (an implicit block widht of 1B).
+       * bytes (an implicit block width of 1B).
        */
       assert(copy->src.bpp == copy->dst.bpp);
       src_bw = copy->src.bpp;

@@ -73,7 +73,6 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
          case nir_instr_type_phi:
          case nir_instr_type_undef:
          case nir_instr_type_tex:
-         case nir_instr_type_debug_info:
             break;
 
          case nir_instr_type_intrinsic: {
@@ -152,6 +151,8 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
             FALLTHROUGH;
          case nir_intrinsic_load_uniform:
          case nir_intrinsic_load_preamble:
+         case nir_intrinsic_load_scalar_arg_amd:
+         case nir_intrinsic_load_vector_arg_amd:
          case nir_intrinsic_load_helper_invocation:
          case nir_intrinsic_is_helper_invocation:
          case nir_intrinsic_load_front_face:
@@ -270,9 +271,6 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
          }
          break;
       }
-
-      case nir_instr_type_debug_info:
-         break;
 
       default:
          return false;

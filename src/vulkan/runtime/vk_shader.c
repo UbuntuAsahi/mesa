@@ -34,6 +34,8 @@
 
 #include "util/mesa-sha1.h"
 
+#include "nir.h"
+
 void *
 vk_shader_zalloc(struct vk_device *device,
                  const struct vk_shader_ops *ops,
@@ -165,6 +167,36 @@ vk_shader_compile_info_init(struct vk_shader_compile_info *info,
       .push_constant_range_count = vk_info->pushConstantRangeCount,
       .push_constant_ranges = vk_info->pPushConstantRanges,
    };
+
+   /* When next stage is 0, gather all valid next stages. */
+   if (!info->next_stage_mask) {
+      switch (info->stage) {
+      case MESA_SHADER_VERTEX:
+         info->next_stage_mask |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                                  VK_SHADER_STAGE_GEOMETRY_BIT |
+                                  VK_SHADER_STAGE_FRAGMENT_BIT;
+         break;
+      case MESA_SHADER_TESS_CTRL:
+         info->next_stage_mask |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+         break;
+      case MESA_SHADER_TESS_EVAL:
+         info->next_stage_mask |= VK_SHADER_STAGE_GEOMETRY_BIT |
+                                  VK_SHADER_STAGE_FRAGMENT_BIT;
+         break;
+      case MESA_SHADER_GEOMETRY:
+      case MESA_SHADER_MESH:
+         info->next_stage_mask |= VK_SHADER_STAGE_FRAGMENT_BIT;
+         break;
+      case MESA_SHADER_TASK:
+         info->next_stage_mask |= VK_SHADER_STAGE_MESH_BIT_EXT;
+         break;
+      case MESA_SHADER_FRAGMENT:
+      case MESA_SHADER_COMPUTE:
+         break;
+      default:
+         unreachable("Invalid shader stage");
+      }
+   }
 }
 
 PRAGMA_DIAGNOSTIC_PUSH

@@ -33,12 +33,7 @@ impl ShaderModel for ShaderModel70 {
 
     fn num_regs(&self, file: RegFile) -> u32 {
         match file {
-            RegFile::GPR => {
-                // Volta+ has a maximum of 253 registers.  Presumably
-                // because two registers get burned for UGPRs? Unclear
-                // on why we need it on Volta though.
-                253
-            }
+            RegFile::GPR => 255 - self.hw_reserved_gprs(),
             RegFile::UGPR => {
                 if self.has_uniform_alu() {
                     63
@@ -58,6 +53,13 @@ impl ShaderModel for ShaderModel70 {
             RegFile::Bar => 16,
             RegFile::Mem => RegRef::MAX_IDX + 1,
         }
+    }
+
+    fn hw_reserved_gprs(&self) -> u32 {
+        // On Volta+, 2 GPRs get burned for the program counter - see the
+        // footnote on table 2 of the volta whitepaper
+        // https://images.nvidia.com/content/volta-architecture/pdf/volta-architecture-whitepaper.pdf
+        2
     }
 
     fn crs_size(&self, max_crs_depth: u32) -> u32 {
@@ -81,6 +83,8 @@ impl ShaderModel for ShaderModel70 {
             | Op::IMad(_)
             | Op::IMad64(_)
             | Op::ISetP(_)
+            | Op::Lea(_)
+            | Op::LeaX(_)
             | Op::Lop3(_)
             | Op::Mov(_)
             | Op::PLop3(_)
@@ -1745,6 +1749,114 @@ impl SM70Op for OpISetP {
     }
 }
 
+impl SM70Op for OpLea {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        let gpr = op_gpr(self);
+        b.copy_alu_src_if_not_reg(&mut self.a, gpr, SrcType::ALU);
+        if self.dst_high {
+            b.copy_alu_src_if_both_not_reg(
+                &self.b,
+                &mut self.a_high,
+                gpr,
+                SrcType::ALU,
+            );
+        }
+    }
+
+    fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(self.a.src_mod == SrcMod::None);
+        assert!(
+            self.intermediate_mod == SrcMod::None
+                || self.b.src_mod == SrcMod::None
+        );
+
+        let c = if self.dst_high {
+            Some(&self.a_high)
+        } else {
+            None
+        };
+
+        if self.is_uniform() {
+            e.encode_ualu(
+                0x091,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+        } else {
+            e.encode_alu(
+                0x011,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+        }
+
+        e.set_bit(72, self.intermediate_mod.is_ineg());
+        e.set_field(75..80, self.shift);
+        e.set_bit(80, self.dst_high);
+        e.set_pred_dst(81..84, self.overflow);
+        e.set_bit(74, false); // .X
+    }
+}
+
+impl SM70Op for OpLeaX {
+    fn legalize(&mut self, b: &mut LegalizeBuilder) {
+        let gpr = op_gpr(self);
+        b.copy_alu_src_if_not_reg(&mut self.a, gpr, SrcType::ALU);
+        if self.dst_high {
+            b.copy_alu_src_if_both_not_reg(
+                &self.b,
+                &mut self.a_high,
+                gpr,
+                SrcType::ALU,
+            );
+        }
+    }
+
+    fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(self.a.src_mod == SrcMod::None);
+        assert!(
+            self.intermediate_mod == SrcMod::None
+                || self.b.src_mod == SrcMod::None
+        );
+
+        let c = if self.dst_high {
+            Some(&self.a_high)
+        } else {
+            None
+        };
+
+        if self.is_uniform() {
+            e.encode_ualu(
+                0x091,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+            e.set_upred_src(87..90, 90, self.carry);
+        } else {
+            e.encode_alu(
+                0x011,
+                Some(&self.dst),
+                Some(&self.a),
+                Some(&self.b),
+                c,
+            );
+            e.set_pred_src(87..90, 90, self.carry);
+        }
+
+        e.set_bit(72, self.intermediate_mod.is_bnot());
+        e.set_field(75..80, self.shift);
+        e.set_bit(80, self.dst_high);
+        e.set_pred_dst(81..84, self.overflow);
+        e.set_bit(74, true); // .X
+    }
+}
+
 fn src_as_lop_imm(src: &Src) -> Option<bool> {
     let x = match src.src_ref {
         SrcRef::Zero => false,
@@ -2263,6 +2375,14 @@ impl SM70Op for OpR2UR {
 }
 
 impl SM70Encoder<'_> {
+    fn set_tex_cb_ref(&mut self, range: Range<usize>, cb: TexCBufRef) {
+        assert!(range.len() == 19);
+        let mut v = BitMutView::new_subset(self, range);
+        assert!(cb.offset % 4 == 0);
+        v.set_field(0..14, cb.offset / 4);
+        v.set_field(14..19, cb.idx);
+    }
+
     fn set_tex_dim(&mut self, range: Range<usize>, dim: TexDim) {
         assert!(range.len() == 3);
         self.set_field(
@@ -2316,8 +2436,19 @@ impl SM70Op for OpTex {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x361);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb60);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x361);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2335,7 +2466,7 @@ impl SM70Op for OpTex {
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
         e.set_bit(78, self.z_cmpr);
-        e.set_field(84..87, 1);
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2347,8 +2478,19 @@ impl SM70Op for OpTld {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x367);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb66);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x367);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2371,6 +2513,7 @@ impl SM70Op for OpTld {
             self.lod_mode == TexLodMode::Zero
                 || self.lod_mode == TexLodMode::Lod
         );
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_tex_lod_mode(87..90, self.lod_mode);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2382,8 +2525,19 @@ impl SM70Op for OpTld4 {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x364);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb63);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x364);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2408,7 +2562,7 @@ impl SM70Op for OpTld4 {
         );
         // bit 77: .CL
         e.set_bit(78, self.z_cmpr);
-        e.set_bit(84, true); // !.EF
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_field(87..89, self.comp);
         e.set_bit(90, false); // TODO: .NODEP
     }
@@ -2420,8 +2574,19 @@ impl SM70Op for OpTmml {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x36a);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb69);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x36a);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2446,8 +2611,19 @@ impl SM70Op for OpTxd {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x36d);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb6c);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x36d);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2464,6 +2640,7 @@ impl SM70Op for OpTxd {
         e.set_field(72..76, self.mask);
         e.set_bit(76, self.offset);
         e.set_bit(77, false); // ToDo: NDV
+        e.set_eviction_priority(&self.mem_eviction_priority);
         e.set_bit(90, false); // TODO: .NODEP
     }
 }
@@ -2474,8 +2651,19 @@ impl SM70Op for OpTxq {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
-        e.set_opcode(0x370);
-        e.set_bit(59, true); // .B
+        match self.tex {
+            TexRef::Bound(_) => {
+                panic!("SM70+ doesn't have legacy bound textures");
+            }
+            TexRef::CBuf(cb) => {
+                e.set_opcode(0xb6f);
+                e.set_tex_cb_ref(40..59, cb);
+            }
+            TexRef::Bindless => {
+                e.set_opcode(0x370);
+                e.set_bit(59, true); // .B
+            }
+        }
 
         e.set_dst(self.dsts[0]);
         if let Dst::Reg(reg) = self.dsts[1] {
@@ -2539,12 +2727,14 @@ impl SM70Encoder<'_> {
 
     fn set_eviction_priority(&mut self, pri: &MemEvictionPriority) {
         self.set_field(
-            84..86,
+            84..87,
             match pri {
                 MemEvictionPriority::First => 0_u8,
                 MemEvictionPriority::Normal => 1_u8,
                 MemEvictionPriority::Last => 2_u8,
-                MemEvictionPriority::Unchanged => 3_u8,
+                MemEvictionPriority::LastUse => 3_u8,
+                MemEvictionPriority::Unchanged => 4_u8,
+                MemEvictionPriority::NoAllocate => 5_u8,
             },
         );
     }
@@ -3421,6 +3611,8 @@ macro_rules! as_sm70_op_match {
             Op::IMad64(op) => op,
             Op::IMnMx(op) => op,
             Op::ISetP(op) => op,
+            Op::Lea(op) => op,
+            Op::LeaX(op) => op,
             Op::Lop3(op) => op,
             Op::PopC(op) => op,
             Op::Shf(op) => op,

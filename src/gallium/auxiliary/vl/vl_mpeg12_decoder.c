@@ -966,15 +966,9 @@ init_idct(struct vl_mpeg12_decoder *dec, const struct format_config* format_conf
 
    struct pipe_sampler_view *matrix = NULL;
 
-   nr_of_idct_render_targets = dec->context->screen->get_param
-   (
-      dec->context->screen, PIPE_CAP_MAX_RENDER_TARGETS
-   );
-   
-   max_inst = dec->context->screen->get_shader_param
-   (
-      dec->context->screen, PIPE_SHADER_FRAGMENT, PIPE_SHADER_CAP_MAX_INSTRUCTIONS
-   );
+   nr_of_idct_render_targets = dec->context->screen->caps.max_render_targets;
+
+   max_inst = dec->context->screen->shader_caps[PIPE_SHADER_FRAGMENT].max_instructions;
 
    // Just assume we need 32 inst per render target, not 100% true, but should work in most cases
    if (nr_of_idct_render_targets >= 4 && max_inst >= 32*4)
@@ -1123,7 +1117,7 @@ vl_create_mpeg12_decoder(struct pipe_context *context,
 
    dec->base = *templat;
    dec->base.context = context;
-   dec->context = pipe_create_multimedia_context(context->screen);
+   dec->context = pipe_create_multimedia_context(context->screen, false);
 
    dec->base.destroy = vl_mpeg12_destroy;
    dec->base.begin_frame = vl_mpeg12_begin_frame;

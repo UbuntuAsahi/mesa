@@ -29,8 +29,7 @@
   *   Keith Whitwell <keithw@vmware.com>
   */
 
-#ifndef BRW_EU_DEFINES_H
-#define BRW_EU_DEFINES_H
+#pragma once
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -81,13 +80,6 @@ enum brw_compression {
    BRW_COMPRESSION_2NDHALF    = 1,
    BRW_COMPRESSION_COMPRESSED = 2,
 };
-
-#define GFX6_COMPRESSION_1Q		0
-#define GFX6_COMPRESSION_2Q		1
-#define GFX6_COMPRESSION_3Q		2
-#define GFX6_COMPRESSION_4Q		3
-#define GFX6_COMPRESSION_1H		0
-#define GFX6_COMPRESSION_2H		2
 
 enum ENUM_PACKED brw_conditional_mod {
    BRW_CONDITIONAL_NONE = 0,
@@ -266,6 +258,19 @@ enum opcode {
    SHADER_OPCODE_SEND,
 
    /**
+    * A variant of SEND that collects its sources to form an input.
+    *
+    * Source 0:    Message descriptor ("desc").
+    * Source 1:    Message extended descriptor ("ex_desc").
+    * Source 2:    Before register allocation must be BAD_FILE,
+    *              after that, the ARF scalar register containing
+    *              the (physical) numbers of the payload sources.
+    * Source 3..n: Payload sources.  For this opcode, they must each
+    *              have the size of a physical GRF.
+    */
+   SHADER_OPCODE_SEND_GATHER,
+
+   /**
     * An "undefined" write which does nothing but indicates to liveness that
     * we don't care about any values in the register which predate this
     * instruction.  Used to prevent partial writes from causing issues with
@@ -332,10 +337,6 @@ enum opcode {
     * Source 0: Must be register g0, used as header.
     * Source 1: Immediate bool to indicate whether control is returned to the
     *           thread only after the fence has been honored.
-    * Source 2: Immediate byte indicating which memory to fence.  Zero means
-    *           global memory; GFX7_BTI_SLM means SLM (for Gfx11+ only).
-    *
-    * Vec4 backend only uses Source 0.
     */
    SHADER_OPCODE_MEMORY_FENCE,
 
@@ -458,6 +459,21 @@ enum opcode {
     */
    SHADER_OPCODE_QUAD_SWAP,
 
+   /* Read value from the first live channel and broadcast the result
+    * to all channels.
+    *
+    * Source 0: Value.
+    */
+   SHADER_OPCODE_READ_FROM_LIVE_CHANNEL,
+
+   /* Read value from a specified channel and broadcast the result
+    * to all channels.
+    *
+    * Source 0: Value.
+    * Source 1: Index of the channel to pick value from.
+    */
+   SHADER_OPCODE_READ_FROM_CHANNEL,
+
    /* This turns into an align16 mov from src0 to dst with a swizzle
     * provided as an immediate in src1.
     */
@@ -544,11 +560,12 @@ enum fb_write_logical_srcs {
    FB_WRITE_LOGICAL_SRC_COLOR1,      /* for dual source blend messages */
    FB_WRITE_LOGICAL_SRC_SRC0_ALPHA,
    FB_WRITE_LOGICAL_SRC_SRC_DEPTH,   /* gl_FragDepth */
-   FB_WRITE_LOGICAL_SRC_DST_DEPTH,   /* GFX4-5: passthrough from thread */
    FB_WRITE_LOGICAL_SRC_SRC_STENCIL, /* gl_FragStencilRefARB */
    FB_WRITE_LOGICAL_SRC_OMASK,       /* Sample Mask (gl_SampleMask) */
+   FB_WRITE_LOGICAL_SRC_TARGET,      /* REQUIRED */
    FB_WRITE_LOGICAL_SRC_COMPONENTS,  /* REQUIRED */
    FB_WRITE_LOGICAL_SRC_NULL_RT,     /* Null RT write */
+   FB_WRITE_LOGICAL_SRC_LAST_RT,     /* Last RT? (bool as UD immediate) */
    FB_WRITE_LOGICAL_NUM_SRCS
 };
 
@@ -629,6 +646,7 @@ enum memory_logical_mode {
    MEMORY_MODE_UNTYPED,
    MEMORY_MODE_SHARED_LOCAL,
    MEMORY_MODE_SCRATCH,
+   MEMORY_MODE_CONSTANT,
 };
 
 enum memory_logical_srcs {
@@ -716,6 +734,8 @@ enum interpolator_logical_srcs {
    INTERP_SRC_MSG_DESC,
    /** Flag register for dynamic mode */
    INTERP_SRC_DYNAMIC_MODE,
+   /** Whether this should use noperspective (0/1 as UD immediate) */
+   INTERP_SRC_NOPERSPECTIVE,
 
    INTERP_NUM_SRCS
 };
@@ -768,6 +788,7 @@ enum ENUM_PACKED brw_reg_file {
    FIXED_GRF,
    IMM,
 
+   ADDRESS,
    VGRF,
    ATTR,
    UNIFORM, /* prog_data->params[reg] */
@@ -788,6 +809,7 @@ enum ENUM_PACKED gfx10_align1_3src_exec_type {
 #define BRW_ARF_ACCUMULATOR           0x20
 #define BRW_ARF_FLAG                  0x30
 #define BRW_ARF_MASK                  0x40
+#define BRW_ARF_SCALAR                0x60
 #define BRW_ARF_STATE                 0x70
 #define BRW_ARF_CONTROL               0x80
 #define BRW_ARF_NOTIFICATION_COUNT    0x90
@@ -798,6 +820,13 @@ enum ENUM_PACKED gfx10_align1_3src_exec_type {
 #define BRW_THREAD_NORMAL     0
 #define BRW_THREAD_ATOMIC     1
 #define BRW_THREAD_SWITCH     2
+
+/* Subregister of the address register used for particular purposes */
+enum brw_address_subreg {
+   BRW_ADDRESS_SUBREG_INDIRECT_DESC = 0,
+   BRW_ADDRESS_SUBREG_INDIRECT_EX_DESC = 2,
+   BRW_ADDRESS_SUBREG_INDIRECT_SPILL_DESC = 4,
+};
 
 enum ENUM_PACKED brw_vertical_stride {
    BRW_VERTICAL_STRIDE_0               = 0,
@@ -896,6 +925,9 @@ operator|=(tgl_sbid_mode &x, tgl_sbid_mode y)
  * the hardware to infer the pipeline based on the source types of the
  * instruction.  TGL_PIPE_ALL can be used when synchronization with all ALU
  * pipelines is intended.
+ *
+ * Xe3 adds TGL_PIPE_SCALAR for a very specific use case (writing immediates
+ * to scalar register).
  */
 enum tgl_pipe {
    TGL_PIPE_NONE = 0,
@@ -903,6 +935,7 @@ enum tgl_pipe {
    TGL_PIPE_INT,
    TGL_PIPE_LONG,
    TGL_PIPE_MATH,
+   TGL_PIPE_SCALAR,
    TGL_PIPE_ALL
 };
 
@@ -990,6 +1023,7 @@ tgl_swsb_encode(const struct intel_device_info *devinfo,
          swsb.pipe == TGL_PIPE_INT ? 0x18 :
          swsb.pipe == TGL_PIPE_LONG ? 0x20 :
          swsb.pipe == TGL_PIPE_MATH ? 0x28 :
+         swsb.pipe == TGL_PIPE_SCALAR ? 0x30 :
          swsb.pipe == TGL_PIPE_ALL ? 0x8 : 0;
       return pipe | swsb.regdist;
 
@@ -1852,5 +1886,3 @@ enum ENUM_PACKED lsc_vect_size {
 };
 
 #define LSC_ONE_ADDR_REG   1
-
-#endif /* BRW_EU_DEFINES_H */

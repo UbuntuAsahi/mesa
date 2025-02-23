@@ -25,8 +25,11 @@
 #include "util/simple_mtx.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
+#include "layout.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
+#include "vk_debug_utils.h"
+#include "vk_device.h"
 #include "vk_pipeline_cache.h"
 
 #include <fcntl.h>
@@ -55,7 +58,10 @@ hk_upload_rodata(struct hk_device *dev)
    dev->rodata.bo =
       agx_bo_create(&dev->dev, AGX_SAMPLER_LENGTH, 0, 0, "Read only data");
 
-   if (!dev->rodata.bo)
+   dev->sparse.write =
+      agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "Sparse write page");
+
+   if (!dev->rodata.bo || !dev->sparse.write)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    uint8_t *map = agx_bo_map(dev->rodata.bo);
@@ -100,14 +106,6 @@ hk_upload_rodata(struct hk_device *dev)
    offs = align(offs, sizeof(uint64_t));
    dev->rodata.geometry_state = dev->rodata.bo->va->addr + offs;
    offs += sizeof(struct agx_geometry_state);
-
-   /* For null readonly buffers, we need to allocate 16 bytes of zeroes for
-    * robustness2 semantics on read.
-    */
-   offs = align(offs, 16);
-   dev->rodata.zero_sink = dev->rodata.bo->va->addr + offs;
-   memset(map + offs, 0, 16);
-   offs += 16;
 
    /* For null storage descriptors, we need to reserve 16 bytes to catch writes.
     * No particular content is required; we cannot get robustness2 semantics
@@ -276,6 +274,21 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
+static VkResult
+hk_check_status(struct vk_device *device)
+{
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   return vk_check_printf_status(&dev->vk, &dev->dev.printf);
+}
+
+static VkResult
+hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
+{
+   struct hk_device *dev = container_of(device, struct hk_device, vk);
+   *timestamp = agx_gpu_time_to_ns(&dev->dev, agx_get_gpu_timestamp(&dev->dev));
+   return VK_SUCCESS;
+}
+
 /*
  * To implement nullDescriptor, the descriptor set code will reference
  * preuploaded null descriptors at fixed offsets in the image heap. Here we
@@ -387,6 +400,16 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    vk_device_set_drm_fd(&dev->vk, dev->dev.fd);
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
+   dev->vk.check_status = hk_check_status;
+   dev->vk.get_timestamp = hk_get_timestamp;
+
+   /* This holds for current platforms. We do not currently implement
+    * timestamp scaling, this would require changes in the query copy kernel
+    * as well. Calibrated timestamps depends on this.
+    */
+   assert(dev->dev.user_timestamp_to_ns.num ==
+             dev->dev.user_timestamp_to_ns.den &&
+          "user timestamps are in ns");
 
    result = hk_descriptor_table_init(dev, &dev->images, AGX_TEXTURE_LENGTH,
                                      1024, 1024 * 1024);
@@ -462,6 +485,7 @@ fail_queue:
    hk_queue_finish(dev, &dev->queue);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   agx_bo_unreference(&dev->dev, dev->sparse.write);
 fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_internal_shaders_2:
@@ -514,61 +538,9 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    hk_descriptor_table_finish(dev, &dev->images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
+   agx_bo_unreference(&dev->dev, dev->sparse.write);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-hk_GetCalibratedTimestampsKHR(
-   VkDevice _device, uint32_t timestampCount,
-   const VkCalibratedTimestampInfoKHR *pTimestampInfos, uint64_t *pTimestamps,
-   uint64_t *pMaxDeviation)
-{
-   // VK_FROM_HANDLE(hk_device, dev, _device);
-   // struct hk_physical_device *pdev = hk_device_physical(dev);
-   uint64_t max_clock_period = 0;
-   uint64_t begin, end;
-   int d;
-
-#ifdef CLOCK_MONOTONIC_RAW
-   begin = vk_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   begin = vk_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-   for (d = 0; d < timestampCount; d++) {
-      switch (pTimestampInfos[d].timeDomain) {
-      case VK_TIME_DOMAIN_DEVICE_KHR:
-         unreachable("todo");
-         // pTimestamps[d] = agx_get_gpu_timestamp(&pdev->dev);
-         max_clock_period = MAX2(
-            max_clock_period, 1); /* FIXME: Is timestamp period actually 1? */
-         break;
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR:
-         pTimestamps[d] = vk_clock_gettime(CLOCK_MONOTONIC);
-         max_clock_period = MAX2(max_clock_period, 1);
-         break;
-
-#ifdef CLOCK_MONOTONIC_RAW
-      case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
-         pTimestamps[d] = begin;
-         break;
-#endif
-      default:
-         pTimestamps[d] = 0;
-         break;
-      }
-   }
-
-#ifdef CLOCK_MONOTONIC_RAW
-   end = vk_clock_gettime(CLOCK_MONOTONIC_RAW);
-#else
-   end = vk_clock_gettime(CLOCK_MONOTONIC);
-#endif
-
-   *pMaxDeviation = vk_time_max_deviation(begin, end, max_clock_period);
-
-   return VK_SUCCESS;
 }

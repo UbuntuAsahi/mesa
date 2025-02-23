@@ -1583,7 +1583,7 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
       }
    }
 
-   const struct anv_format *anv_format = anv_get_format(vk_format);
+   const struct anv_format *anv_format = anv_get_format(pdevice, vk_format);
    if (!anv_format)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
@@ -1611,7 +1611,7 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
       /* ISL_TILING_64_XE2_BIT's block shapes are not always Vulkan's standard
        * block shapes, so exclude what's non-standard.
        */
-      if (pdevice->info.ver == 20) {
+      if (pdevice->info.ver >= 20) {
          switch (samples) {
          case VK_SAMPLE_COUNT_2_BIT:
             if (isl_layout->bpb == 128)

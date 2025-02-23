@@ -728,7 +728,7 @@ libagx_tess_isoline(constant struct libagx_tess_args *p,
                     enum libagx_tess_mode mode__2)
 {
    enum libagx_tess_mode mode = mode__2;
-   uint patch = get_global_id(0);
+   uint patch = cl_global_id.x;
    enum libagx_tess_partitioning partitioning = p->partitioning;
 
    bool lineDensityOdd;
@@ -797,9 +797,10 @@ libagx_tess_isoline(constant struct libagx_tess_args *p,
       }
    }
 
-   struct CHWTessellator ctx;
-   ctx.mode = mode;
-   ctx.index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE;
+   struct CHWTessellator ctx = {
+      .mode = mode,
+      .index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE,
+   };
 
    /* Connectivity */
    if (!p->points_mode) {
@@ -829,7 +830,7 @@ libagx_tess_tri(constant struct libagx_tess_args *p,
                 enum libagx_tess_mode mode__2)
 {
    enum libagx_tess_mode mode = mode__2;
-   uint patch = get_global_id(0);
+   uint patch = cl_global_id.x;
    enum libagx_tess_partitioning partitioning = p->partitioning;
 
    global float *factors = tess_factors(p, patch);
@@ -838,13 +839,10 @@ libagx_tess_tri(constant struct libagx_tess_args *p,
    float tessFactor_Weq0 = factors[2];
    float insideTessFactor_f = factors[4];
 
-   struct CHWTessellator ctx;
-   ctx.Point = NULL;
-   ctx.Index = NULL;
-   ctx.mode = mode;
-   ctx.index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE;
-   ctx.bUsingPatchedIndices = false;
-   ctx.bUsingPatchedIndices2 = false;
+   struct CHWTessellator ctx = {
+      .mode = mode,
+      .index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE,
+   };
 
    // Is the patch culled? NaN will pass.
    if (!(tessFactor_Ueq0 > 0) || !(tessFactor_Veq0 > 0) ||
@@ -1160,7 +1158,7 @@ libagx_tess_quad(constant struct libagx_tess_args *p,
                  enum libagx_tess_mode mode__2)
 {
    enum libagx_tess_mode mode = mode__2;
-   uint patch = get_global_id(0);
+   uint patch = cl_global_id.x;
    enum libagx_tess_partitioning partitioning = p->partitioning;
    global float *factors = tess_factors(p, patch);
 
@@ -1172,14 +1170,10 @@ libagx_tess_quad(constant struct libagx_tess_args *p,
    float insideTessFactor_U = factors[4];
    float insideTessFactor_V = factors[5];
 
-   // TODO: fix designated initializer optimization in NIR
-   struct CHWTessellator ctx;
-   ctx.Point = NULL;
-   ctx.Index = NULL;
-   ctx.mode = mode;
-   ctx.index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE;
-   ctx.bUsingPatchedIndices = false;
-   ctx.bUsingPatchedIndices2 = false;
+   struct CHWTessellator ctx = {
+      .mode = mode,
+      .index_bias = patch * LIBAGX_TES_PATCH_ID_STRIDE,
+   };
 
    // Is the patch culled?
    if (!(tessFactor_Ueq0 > 0) || // NaN will pass

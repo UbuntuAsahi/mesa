@@ -16,8 +16,6 @@ enum panvk_meta_object_key_type {
    PANVK_META_OBJECT_KEY_BLEND_SHADER = VK_META_OBJECT_KEY_DRIVER_OFFSET,
    PANVK_META_OBJECT_KEY_COPY_DESC_SHADER,
    PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
-   PANVK_META_OBJECT_KEY_CLEAR_QUERY_POOL_PIPELINE,
-   PANVK_META_OBJECT_KEY_COPY_QUERY_POOL_RESULTS_OQ_PIPELINE,
 };
 
 static inline VkFormat
@@ -50,11 +48,16 @@ panvk_meta_copy_get_image_properties(struct panvk_image *img)
 {
    uint64_t mod = img->vk.drm_format_mod;
    enum pipe_format pfmt = vk_format_to_pipe_format(img->vk.format);
-   unsigned blk_sz = util_format_get_blocksize(pfmt);
-   struct vk_meta_copy_image_properties props = {0};
+   struct vk_meta_copy_image_properties props;
+   memset(&props, 0, sizeof(props));
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(img->vk.format);
 
    if (drm_is_afbc(mod)) {
-      if (!vk_format_is_depth_or_stencil(img->vk.format)) {
+      if (ycbcr_info) {
+         for (uint32_t p = 0; p < ycbcr_info->n_planes; p++)
+            props.plane[p].view_format = ycbcr_info->planes[p].format;
+      } else if (!vk_format_is_depth_or_stencil(img->vk.format)) {
          props.color.view_format = img->vk.format;
       } else {
          switch (img->vk.format) {
@@ -94,10 +97,10 @@ panvk_meta_copy_get_image_properties(struct panvk_image *img)
          props.depth.component_mask = BITFIELD_MASK(3);
          break;
       case VK_FORMAT_D32_SFLOAT_S8_UINT:
-         props.depth.view_format = VK_FORMAT_R32G32_UINT;
+         props.depth.view_format = VK_FORMAT_R32_UINT;
          props.depth.component_mask = BITFIELD_BIT(0);
-         props.stencil.view_format = VK_FORMAT_R32G32_UINT;
-         props.stencil.component_mask = BITFIELD_BIT(1);
+         props.stencil.view_format = VK_FORMAT_R8_UINT;
+         props.stencil.component_mask = BITFIELD_BIT(0);
          break;
       case VK_FORMAT_D16_UNORM:
          props.depth.view_format = VK_FORMAT_R16_UINT;
@@ -111,7 +114,17 @@ panvk_meta_copy_get_image_properties(struct panvk_image *img)
          assert(!"Invalid ZS format");
          break;
       }
+   } else if (ycbcr_info) {
+      for (uint32_t p = 0; p < ycbcr_info->n_planes; p++) {
+         unsigned blk_sz =
+            vk_format_get_blocksize(ycbcr_info->planes[p].format);
+
+         props.plane[p].view_format =
+            panvk_meta_get_uint_format_for_blk_size(blk_sz);
+      }
    } else {
+      unsigned blk_sz = util_format_get_blocksize(pfmt);
+
       props.color.view_format = panvk_meta_get_uint_format_for_blk_size(blk_sz);
    }
 

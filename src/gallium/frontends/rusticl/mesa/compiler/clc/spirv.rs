@@ -45,7 +45,7 @@ pub struct CLCHeader<'a> {
     pub source: &'a CString,
 }
 
-impl<'a> Debug for CLCHeader<'a> {
+impl Debug for CLCHeader<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = self.name.to_string_lossy();
         let source = self.source.to_string_lossy();
@@ -157,7 +157,7 @@ impl SPIRVBin {
         let logger = create_clc_logger(&mut msgs);
         let mut out = clc_binary::default();
 
-        let res = unsafe { clc_compile_c_to_spirv(&args, &logger, &mut out) };
+        let res = unsafe { clc_compile_c_to_spirv(&args, &logger, &mut out, ptr::null_mut()) };
 
         let res = if res {
             let spirv = SPIRVBin {
@@ -375,7 +375,7 @@ impl SPIRVBin {
 
     pub fn get_lib_clc(screen: &PipeScreen) -> Option<NirShader> {
         let nir_options = screen.nir_shader_compiler_options(pipe_shader_type::PIPE_SHADER_COMPUTE);
-        let address_bits = screen.compute_param(pipe_compute_cap::PIPE_COMPUTE_CAP_ADDRESS_BITS);
+        let address_bits = screen.compute_caps().address_bits;
         let spirv_caps = Self::get_spirv_capabilities();
         let spirv_options =
             Self::get_spirv_options(false, ptr::null(), address_bits, &spirv_caps, None);

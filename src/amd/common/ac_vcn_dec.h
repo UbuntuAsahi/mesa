@@ -73,6 +73,7 @@
 #define RDECODE_CMD_BITSTREAM_BUFFER                        0x00000100
 #define RDECODE_CMD_IT_SCALING_TABLE_BUFFER                 0x00000204
 #define RDECODE_CMD_CONTEXT_BUFFER                          0x00000206
+#define RDECODE_CMD_WRITE_MEMORY                            0x00000800
 
 #define RDECODE_MSG_CREATE                                  0x00000000
 #define RDECODE_MSG_DECODE                                  0x00000001
@@ -432,6 +433,7 @@
 
 #define RDECODE_AV1_VER_0  0
 #define RDECODE_AV1_VER_1  1
+#define RDECODE_AV1_VER_2  2
 
 typedef struct rvcn_decode_buffer_s {
    unsigned int valid_buf_flag;
@@ -1199,20 +1201,22 @@ struct jpeg_params {
 #define RDECODE_VCN1_GPCOM_VCPU_DATA1 0x20714
 #define RDECODE_VCN1_ENGINE_CNTL      0x20718
 
-#define RDECODE_VCN2_GPCOM_VCPU_CMD   (0x503 << 2)
-#define RDECODE_VCN2_GPCOM_VCPU_DATA0 (0x504 << 2)
-#define RDECODE_VCN2_GPCOM_VCPU_DATA1 (0x505 << 2)
-#define RDECODE_VCN2_ENGINE_CNTL      (0x506 << 2)
+#define RDECODE_VCN2_GPCOM_VCPU_CMD       (0x503 << 2)
+#define RDECODE_VCN2_GPCOM_VCPU_DATA0     (0x504 << 2)
+#define RDECODE_VCN2_GPCOM_VCPU_DATA1     (0x505 << 2)
+#define RDECODE_VCN2_GPCOM_VCPU_DATA2     (0x54C << 2)
+#define RDECODE_VCN2_ENGINE_CNTL          (0x506 << 2)
 
-#define RDECODE_VCN2_5_GPCOM_VCPU_CMD   0x3c
-#define RDECODE_VCN2_5_GPCOM_VCPU_DATA0 0x40
-#define RDECODE_VCN2_5_GPCOM_VCPU_DATA1 0x44
-#define RDECODE_VCN2_5_ENGINE_CNTL      0x9b4
+#define RDECODE_VCN2_5_GPCOM_VCPU_CMD       0x3c
+#define RDECODE_VCN2_5_GPCOM_VCPU_DATA0     0x40
+#define RDECODE_VCN2_5_GPCOM_VCPU_DATA1     0x44
+#define RDECODE_VCN2_5_GPCOM_VCPU_DATA2     0x1A0
+#define RDECODE_VCN2_5_ENGINE_CNTL          0x9b4
 
 #define RDECODE_SESSION_CONTEXT_SIZE (128 * 1024)
 
 unsigned ac_vcn_dec_calc_ctx_size_av1(unsigned av1_version);
 void ac_vcn_av1_init_probs(unsigned av1_version, uint8_t *prob);
-void ac_vcn_av1_init_film_grain_buffer(rvcn_dec_film_grain_params_t *fg_params, rvcn_dec_av1_fg_init_buf_t *fg_buf);
+void ac_vcn_av1_init_film_grain_buffer(unsigned av1_version, rvcn_dec_film_grain_params_t *fg_params, rvcn_dec_av1_fg_init_buf_t *fg_buf);
 
 #endif

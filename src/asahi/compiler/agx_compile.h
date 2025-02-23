@@ -258,9 +258,6 @@ struct agx_shader_key {
    /* Number of reserved preamble slots at the start */
    unsigned reserved_preamble;
 
-   /* Library routines to link against */
-   const nir_shader *libagx;
-
    /* Whether scratch memory is available in the given shader stage */
    bool has_scratch;
 
@@ -294,8 +291,7 @@ struct agx_shader_key {
 struct agx_interp_info agx_gather_interp_info(nir_shader *nir);
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
-void agx_link_libagx(nir_shader *nir, const nir_shader *libagx);
-void agx_preprocess_nir(nir_shader *nir, const nir_shader *libagx);
+void agx_preprocess_nir(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s);
@@ -305,7 +301,7 @@ bool agx_nir_lower_cull_distance_fs(struct nir_shader *s,
                                     unsigned nr_distances);
 bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
                           unsigned bit_size, unsigned num_components,
-                          unsigned hole_size, nir_intrinsic_instr *low,
+                          int64_t hole_size, nir_intrinsic_instr *low,
                           nir_intrinsic_instr *high, void *data);
 
 void agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
@@ -369,7 +365,6 @@ static const nir_shader_compiler_options agx_nir_options = {
    .has_cs_global_id = true,
    .lower_device_index_to_zero = true,
    .lower_hadd = true,
-   .vectorize_io = true,
    .has_amul = true,
    .has_isub = true,
    .support_16bit_alu = true,
@@ -379,6 +374,8 @@ static const nir_shader_compiler_options agx_nir_options = {
    .lower_int64_options =
       (nir_lower_int64_options) ~(nir_lower_iadd64 | nir_lower_imul_2x32_64),
    .lower_doubles_options = (nir_lower_doubles_options)(~0),
+   .support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
+   .support_indirect_outputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
    .lower_fquantize2f16 = true,
    .compact_arrays = true,
    .discard_is_demote = true,

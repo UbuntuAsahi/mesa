@@ -543,24 +543,41 @@ impl<'a> ShaderFromNir<'a> {
                     }
                     8 => {
                         for dc in 0..bits.div_ceil(32) {
-                            let mut psrc = [Src::new_zero(); 4];
+                            let mut psrc = [None; 4];
                             let mut psel = [0_u8; 4];
 
                             for b in 0..4 {
                                 let sc = dc * 4 + b;
                                 if sc < srcs.len() {
                                     let (ssa, byte) = srcs[sc];
+                                    // Deduplicate psrc entries
                                     for i in 0..4_u8 {
                                         let psrc_i = &mut psrc[usize::from(i)];
-                                        if *psrc_i == Src::new_zero() {
-                                            *psrc_i = ssa.into();
-                                        } else if *psrc_i != Src::from(ssa) {
+                                        if psrc_i.is_none() {
+                                            *psrc_i = Some(ssa.into());
+                                        } else if *psrc_i
+                                            != Some(Src::from(ssa))
+                                        {
                                             continue;
                                         }
                                         psel[b] = i * 4 + byte;
+                                        break;
                                     }
                                 }
                             }
+
+                            let psrc = {
+                                let mut res = [Src::new_zero(); 4];
+
+                                for (idx, src) in psrc.iter().enumerate() {
+                                    if let Some(src) = src {
+                                        res[idx] = *src;
+                                    }
+                                }
+
+                                res
+                            };
+
                             comps.push(b.prmt4(psrc, psel)[0]);
                         }
                     }
@@ -573,10 +590,9 @@ impl<'a> ShaderFromNir<'a> {
                                 let sc = dc * 2 + w;
                                 if sc < srcs.len() {
                                     let (ssa, byte) = srcs[sc];
-                                    let w_u8 = u8::try_from(w).unwrap();
                                     psrc[w] = ssa.into();
-                                    psel[w * 2 + 0] = (w_u8 * 4) + byte;
-                                    psel[w * 2 + 1] = (w_u8 * 4) + byte + 1;
+                                    psel[w * 2 + 0] = (w as u8 * 4) + byte;
+                                    psel[w * 2 + 1] = (w as u8 * 4) + byte + 1;
                                 }
                             }
                             comps.push(b.prmt(psrc[0], psrc[1], psel)[0]);
@@ -1462,6 +1478,16 @@ impl<'a> ShaderFromNir<'a> {
                     b.shr(srcs[0], srcs[1], true)
                 }
             }
+            nir_op_lea_nv => {
+                let src_a = srcs[1];
+                let src_b = srcs[0];
+                let shift = nir_srcs[2].comp_as_uint(0).unwrap() as u8;
+                match alu.def.bit_size {
+                    32 => b.lea(src_a, src_b, shift),
+                    64 => b.lea64(src_a, src_b, shift),
+                    x => panic!("unsupported bit size for nir_op_lea_nv: {x}"),
+                }
+            }
             nir_op_isub => match alu.def.bit_size {
                 32 => b.iadd(srcs[0], srcs[1].ineg(), 0.into()),
                 64 => b.iadd64(srcs[0], srcs[1].ineg(), 0.into()),
@@ -1729,10 +1755,29 @@ impl<'a> ShaderFromNir<'a> {
         let flags: nak_nir_tex_flags =
             unsafe { std::mem::transmute_copy(&tex.backend_flags) };
 
+        let tex_ref = match flags.ref_type() {
+            NAK_NIR_TEX_REF_TYPE_BOUND => {
+                TexRef::Bound(tex.texture_index.try_into().unwrap())
+            }
+            NAK_NIR_TEX_REF_TYPE_CBUF => TexRef::CBuf(TexCBufRef {
+                idx: (tex.texture_index >> 16).try_into().unwrap(),
+                offset: tex.texture_index as u16,
+            }),
+            NAK_NIR_TEX_REF_TYPE_BINDLESS => TexRef::Bindless,
+            _ => panic!("Invalid tex ref type"),
+        };
+
         let mask = tex.def.components_read();
         let mut mask = u8::try_from(mask).unwrap();
         if flags.is_sparse() {
             mask &= !(1 << (tex.def.num_components - 1));
+            if mask == 0 {
+                // This can happen if only the sparse predicate is used.  In
+                // that case, we need at least one result register.
+                mask = 1;
+            }
+        } else {
+            debug_assert!(mask != 0);
         }
 
         let dst_comps = u8::try_from(mask.count_ones()).unwrap();
@@ -1758,6 +1803,7 @@ impl<'a> ShaderFromNir<'a> {
             assert!(fault.is_none());
             b.push_op(OpTxq {
                 dsts: dsts,
+                tex: tex_ref,
                 src: src,
                 query: TexQuery::Dimension,
                 mask: mask,
@@ -1767,6 +1813,7 @@ impl<'a> ShaderFromNir<'a> {
             assert!(fault.is_none());
             b.push_op(OpTxq {
                 dsts: dsts,
+                tex: tex_ref,
                 src: src,
                 query: TexQuery::TextureType,
                 mask: mask,
@@ -1798,15 +1845,18 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTxd {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
+                    mem_eviction_priority: MemEvictionPriority::Normal,
                     mask: mask,
                 });
             } else if tex.op == nir_texop_lod {
                 assert!(offset_mode == Tld4OffsetMode::None);
                 b.push_op(OpTmml {
                     dsts: dsts,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     mask: mask,
@@ -1816,22 +1866,26 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTld {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     lod_mode: lod_mode,
                     is_ms: tex.op == nir_texop_txf_ms,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
+                    mem_eviction_priority: MemEvictionPriority::Normal,
                     mask: mask,
                 });
             } else if tex.op == nir_texop_tg4 {
                 b.push_op(OpTld4 {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     comp: tex.component().try_into().unwrap(),
                     offset_mode: offset_mode,
                     z_cmpr: flags.has_z_cmpr(),
+                    mem_eviction_priority: MemEvictionPriority::Normal,
                     mask: mask,
                 });
             } else {
@@ -1839,11 +1893,13 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpTex {
                     dsts: dsts,
                     fault,
+                    tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
                     lod_mode: lod_mode,
                     z_cmpr: flags.has_z_cmpr(),
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
+                    mem_eviction_priority: MemEvictionPriority::Normal,
                     mask: mask,
                 });
             }
@@ -2282,6 +2338,15 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
+                let mem_order = if intrin.intrinsic
+                    == nir_intrinsic_load_global_constant
+                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
+                {
+                    MemOrder::Constant
+                } else {
+                    MemOrder::Strong(MemScope::System)
+                };
+
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
                 assert!(comps == 1 || comps == 2 || comps == 4);
@@ -2292,7 +2357,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     fault: Dst::None,
                     image_dim: dim,
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                     mask: (1 << comps) - 1,
@@ -2307,6 +2372,15 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
+                let mem_order = if intrin.intrinsic
+                    == nir_intrinsic_load_global_constant
+                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
+                {
+                    MemOrder::Constant
+                } else {
+                    MemOrder::Strong(MemScope::System)
+                };
+
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
                 assert!(comps == 5);
@@ -2318,7 +2392,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     fault: fault.into(),
                     image_dim: dim,
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                     mask: (1 << (comps - 1)) - 1,
@@ -2546,12 +2620,14 @@ impl<'a> ShaderFromNir<'a> {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
-                let order =
-                    if intrin.intrinsic == nir_intrinsic_load_global_constant {
-                        MemOrder::Constant
-                    } else {
-                        MemOrder::Strong(MemScope::System)
-                    };
+                let order = if intrin.intrinsic
+                    == nir_intrinsic_load_global_constant
+                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
+                {
+                    MemOrder::Constant
+                } else {
+                    MemOrder::Strong(MemScope::System)
+                };
                 let access = MemAccess {
                     mem_type: MemType::from_size(size_B, false),
                     space: MemSpace::Global(MemAddrType::A64),

@@ -1078,10 +1078,16 @@ gbm_dri_surface_create(struct gbm_device *gbm,
 		       uint32_t format, uint32_t flags,
                        const uint64_t *modifiers, const unsigned count)
 {
+   struct gbm_dri_device *dri = gbm_dri_device(gbm);
    struct gbm_dri_surface *surf;
 
    if (count)
       assert(modifiers);
+
+   if (count > 0 && !dri->screen->base.screen->resource_create_with_modifiers) {
+      errno = ENOSYS;
+      return NULL;
+   }
 
    /* It's acceptable to create an image with INVALID modifier in the list,
     * but it cannot be on the only modifier (since it will certainly fail
@@ -1209,9 +1215,9 @@ dri_device_create(int fd, uint32_t gbm_backend_version)
    struct dri_screen *screen = dri->screen;
    struct pipe_screen *pscreen = screen->base.screen;
 #ifdef HAVE_LIBDRM
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_IMPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_IMPORT)
       dri->has_dmabuf_import = true;
-   if (pscreen->get_param(pscreen, PIPE_CAP_DMABUF) & DRM_PRIME_CAP_EXPORT)
+   if (pscreen->caps.dmabuf & DRM_PRIME_CAP_EXPORT)
       dri->has_dmabuf_export = true;
 #endif
    dri->has_compression_modifiers = pscreen->query_compression_rates &&

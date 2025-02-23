@@ -221,11 +221,6 @@ mark_whole_variable(nir_shader *shader, nir_variable *var,
       type = glsl_get_array_element(type);
    }
 
-   if (var->data.per_view) {
-      assert(glsl_type_is_array(type));
-      type = glsl_get_array_element(type);
-   }
-
    const unsigned slots = nir_variable_count_slots(var, type);
    set_io_mask(shader, var, 0, slots, deref, is_output_read);
 }
@@ -548,6 +543,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_input_vertex:
    case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_per_primitive_input:
+   case nir_intrinsic_load_attribute_pan:
       if (shader->info.stage == MESA_SHADER_TESS_EVAL &&
           instr->intrinsic == nir_intrinsic_load_input &&
           !is_patch_special) {
@@ -578,6 +574,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
    case nir_intrinsic_load_output:
    case nir_intrinsic_load_per_vertex_output:
+   case nir_intrinsic_load_per_view_output:
    case nir_intrinsic_load_per_primitive_output:
       if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
           instr->intrinsic == nir_intrinsic_load_output &&
@@ -613,6 +610,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
 
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_per_vertex_output:
+   case nir_intrinsic_store_per_view_output:
    case nir_intrinsic_store_per_primitive_output:
       if (shader->info.stage == MESA_SHADER_TESS_CTRL &&
           instr->intrinsic == nir_intrinsic_store_output &&
@@ -672,6 +670,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
    case nir_intrinsic_load_point_coord:
    case nir_intrinsic_load_line_coord:
    case nir_intrinsic_load_front_face:
+   case nir_intrinsic_load_front_face_fsign:
    case nir_intrinsic_load_sample_id:
    case nir_intrinsic_load_sample_pos:
    case nir_intrinsic_load_sample_pos_or_center:
@@ -771,53 +770,6 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       }
       break;
 
-   case nir_intrinsic_ddx:
-   case nir_intrinsic_ddx_fine:
-   case nir_intrinsic_ddx_coarse:
-   case nir_intrinsic_ddy:
-   case nir_intrinsic_ddy_fine:
-   case nir_intrinsic_ddy_coarse:
-      if (shader->info.stage == MESA_SHADER_FRAGMENT)
-         shader->info.fs.needs_quad_helper_invocations = true;
-      break;
-
-   case nir_intrinsic_quad_vote_any:
-   case nir_intrinsic_quad_vote_all:
-   case nir_intrinsic_quad_broadcast:
-   case nir_intrinsic_quad_swap_horizontal:
-   case nir_intrinsic_quad_swap_vertical:
-   case nir_intrinsic_quad_swap_diagonal:
-   case nir_intrinsic_quad_swizzle_amd:
-      if (shader->info.stage == MESA_SHADER_FRAGMENT)
-         shader->info.fs.needs_quad_helper_invocations = true;
-      break;
-
-   case nir_intrinsic_vote_any:
-   case nir_intrinsic_vote_all:
-   case nir_intrinsic_vote_feq:
-   case nir_intrinsic_vote_ieq:
-   case nir_intrinsic_ballot:
-   case nir_intrinsic_first_invocation:
-   case nir_intrinsic_last_invocation:
-   case nir_intrinsic_read_invocation:
-   case nir_intrinsic_read_first_invocation:
-   case nir_intrinsic_elect:
-   case nir_intrinsic_reduce:
-   case nir_intrinsic_inclusive_scan:
-   case nir_intrinsic_exclusive_scan:
-   case nir_intrinsic_shuffle:
-   case nir_intrinsic_shuffle_xor:
-   case nir_intrinsic_shuffle_up:
-   case nir_intrinsic_shuffle_down:
-   case nir_intrinsic_rotate:
-   case nir_intrinsic_masked_swizzle_amd:
-      shader->info.uses_wide_subgroup_intrinsics = true;
-
-      if (shader->info.stage == MESA_SHADER_FRAGMENT &&
-          shader->info.fs.require_full_quads)
-         shader->info.fs.needs_quad_helper_invocations = true;
-      break;
-
    case nir_intrinsic_end_primitive:
    case nir_intrinsic_end_primitive_with_counter:
    case nir_intrinsic_end_primitive_nv:
@@ -868,6 +820,17 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader,
       shader->info.uses_bindless |= intrinsic_is_bindless(instr);
       if (nir_intrinsic_writes_external_memory(instr))
          shader->info.writes_memory = true;
+
+      if (nir_intrinsic_has_semantic(instr, NIR_INTRINSIC_QUADGROUP)) {
+         if (shader->info.stage == MESA_SHADER_FRAGMENT)
+            shader->info.fs.needs_quad_helper_invocations = true;
+      } else if (nir_intrinsic_has_semantic(instr, NIR_INTRINSIC_SUBGROUP)) {
+         shader->info.uses_wide_subgroup_intrinsics = true;
+
+         if (shader->info.stage == MESA_SHADER_FRAGMENT &&
+             shader->info.fs.require_full_quads)
+            shader->info.fs.needs_quad_helper_invocations = true;
+      }
 
       if (instr->intrinsic == nir_intrinsic_image_levels ||
           instr->intrinsic == nir_intrinsic_image_size ||
@@ -955,8 +918,10 @@ gather_func_info(nir_function_impl *func, nir_shader *shader,
             nir_call_instr *call = nir_instr_as_call(instr);
             nir_function_impl *impl = call->callee->impl;
 
-            assert(impl || !"nir_shader_gather_info only works with linked shaders");
-            gather_func_info(impl, shader, visited_funcs, dead_ctx);
+            if (!call->indirect_callee.ssa)
+               assert(impl || !"nir_shader_gather_info only works with linked shaders");
+            if (impl)
+               gather_func_info(impl, shader, visited_funcs, dead_ctx);
             break;
          }
          default:

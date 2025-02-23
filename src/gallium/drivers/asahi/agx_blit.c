@@ -145,7 +145,7 @@ asahi_blit_compute_shader(struct pipe_context *ctx, struct asahi_blit_key *key)
       colour1 = nir_image_load(
          b, 4, 32, nir_imm_int(b, 0), nir_pad_vec4(b, image_pos_nd), zero, zero,
          .image_array = key->array, .image_dim = GLSL_SAMPLER_DIM_2D,
-         .access = ACCESS_IN_BOUNDS_AGX, .dest_type = nir_type_uint32);
+         .access = ACCESS_IN_BOUNDS, .dest_type = nir_type_uint32);
    }
    nir_pop_if(b, NULL);
    nir_def *color = nir_if_phi(b, colour0, colour1);
@@ -235,7 +235,7 @@ asahi_compute_blit_supported(const struct pipe_blit_info *info)
    return (info->src.box.depth == info->dst.box.depth) && !info->alpha_blend &&
           !info->num_window_rectangles && !info->sample0_only &&
           !info->scissor_enable && !info->window_rectangle_include &&
-          info->src.resource->nr_samples <= 1 &&
+          !info->swizzle_enable && info->src.resource->nr_samples <= 1 &&
           info->dst.resource->nr_samples <= 1 &&
           !util_format_is_depth_and_stencil(info->src.format) &&
           !util_format_is_depth_and_stencil(info->dst.format) &&
@@ -476,7 +476,7 @@ agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
    util_blitter_save_geometry_shader(blitter,
                                      ctx->stage[PIPE_SHADER_GEOMETRY].shader);
    util_blitter_save_so_targets(blitter, ctx->streamout.num_targets,
-                                ctx->streamout.targets);
+                                ctx->streamout.targets, MESA_PRIM_UNKNOWN);
    util_blitter_save_vertex_buffers(blitter, ctx->vertex_buffers,
                                     util_last_bit(ctx->vb_mask));
    util_blitter_save_vertex_elements(blitter, ctx->attributes);
@@ -597,6 +597,7 @@ try_copy_via_blit(struct pipe_context *pctx, struct pipe_resource *dst,
       .mask = util_format_get_mask(src->format),
       .filter = PIPE_TEX_FILTER_NEAREST,
       .scissor_enable = 0,
+      .swizzle_enable = 0,
    };
 
    /* snorm formats don't round trip, so don't use them for copies */

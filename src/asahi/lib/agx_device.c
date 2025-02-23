@@ -7,8 +7,11 @@
 
 #include "agx_device.h"
 #include <inttypes.h>
+#include "clc/asahi_clc.h"
+#include "util/macros.h"
 #include "util/ralloc.h"
 #include "util/timespec.h"
+#include "agx_abi.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
 #include "agx_device_virtio.h"
@@ -28,6 +31,7 @@
 #include "util/os_mman.h"
 #include "util/os_time.h"
 #include "util/simple_mtx.h"
+#include "util/u_printf.h"
 #include "git_sha1.h"
 #include "nir_serialize.h"
 #include "unstable_asahi_drm.h"
@@ -81,10 +85,10 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    if (bo->_map)
       munmap(bo->_map, bo->size);
 
-   /* Free the VA. No need to unmap the BO, as the kernel will take care of that
-    * when we close it.
+   /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
+    * take care of that when we close it.
     */
-   agx_va_free(dev, bo->va);
+   agx_va_free(dev, bo->va, false);
 
    if (bo->prime_fd != -1)
       close(bo->prime_fd);
@@ -102,20 +106,28 @@ static int
 agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
             size_t size_B, uint64_t offset_B, uint32_t flags, bool unbind)
 {
+   assert((size_B % 16384) == 0 && "alignment required");
+   assert((offset_B % 16384) == 0 && "alignment required");
+   assert((addr % 16384) == 0 && "alignment required");
+
    struct drm_asahi_gem_bind gem_bind = {
       .op = unbind ? ASAHI_BIND_OP_UNBIND : ASAHI_BIND_OP_BIND,
       .flags = flags,
-      .handle = bo->handle,
+      .handle = bo ? bo->handle : 0,
       .vm_id = dev->vm_id,
       .offset = offset_B,
       .range = size_B,
       .addr = addr,
    };
 
+   assert((size_B % 16384) == 0 && "page alignment required");
+   assert((offset_B % 16384) == 0 && "page alignment required");
+   assert((addr % 16384) == 0 && "page alignment required");
+
    int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_GEM_BIND, &gem_bind);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_GEM_BIND failed: %m (handle=%d)\n",
-              bo->handle);
+              bo ? bo->handle : 0);
    }
 
    return ret;
@@ -566,6 +578,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
     */
    uint64_t reservation = (1ull << 36);
 
+   /* Also reserve VA space for the printf buffer at a stable address, avoiding
+    * the need for relocs in precompiled shaders.
+    */
+   assert(reservation == LIBAGX_PRINTF_BUFFER_ADDRESS);
+   reservation += LIBAGX_PRINTF_BUFFER_SIZE;
+
    dev->guard_size = dev->params.vm_page_size;
    if (dev->params.vm_usc_start) {
       dev->shader_base = dev->params.vm_usc_start;
@@ -629,9 +647,6 @@ agx_open_device(void *memctx, struct agx_device *dev)
    agx_get_global_ids(dev);
 
    glsl_type_singleton_init_or_ref();
-   struct blob_reader blob;
-   blob_reader_init(&blob, (void *)libagx_0_nir, sizeof(libagx_0_nir));
-   dev->libagx = nir_deserialize(memctx, &agx_nir_options, &blob);
 
    if (agx_gather_device_key(dev).needs_g13x_coherency == U_TRISTATE_YES) {
       dev->libagx_programs = libagx_g13x;
@@ -650,13 +665,40 @@ agx_open_device(void *memctx, struct agx_device *dev)
       dev->chip = AGX_CHIP_G13G;
    }
 
+   /* Bind read-only zero page at 2^32. This is in our reservation, and can be
+    * addressed with only small integers in the low/high. That lets us do some
+    * robustness optimization even without soft fault.
+    */
+   {
+      void *bo = agx_bo_create(dev, 16384, 0, 0, "Zero page");
+      int ret = dev->ops.bo_bind(dev, bo, AGX_ZERO_PAGE_ADDRESS, 16384, 0,
+                                 ASAHI_BIND_READ, false);
+      if (ret) {
+         fprintf(stderr, "Failed to bind zero page");
+         return false;
+      }
+   }
+
+   void *bo = agx_bo_create(dev, LIBAGX_PRINTF_BUFFER_SIZE, 0, AGX_BO_WRITEBACK,
+                            "Printf/abort");
+
+   ret = dev->ops.bo_bind(dev, bo, LIBAGX_PRINTF_BUFFER_ADDRESS,
+                          LIBAGX_PRINTF_BUFFER_SIZE, 0,
+                          ASAHI_BIND_READ | ASAHI_BIND_WRITE, false);
+   if (ret) {
+      fprintf(stderr, "Failed to bind printf buffer");
+      return false;
+   }
+
+   u_printf_init(&dev->printf, bo, agx_bo_map(bo));
    return true;
 }
 
 void
 agx_close_device(struct agx_device *dev)
 {
-   ralloc_free((void *)dev->libagx);
+   agx_bo_unreference(dev, dev->printf.bo);
+   u_printf_destroy(&dev->printf);
    agx_bo_cache_evict_all(dev);
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);

@@ -792,14 +792,14 @@ nak_nir_remove_barriers(nir_shader *nir)
    nir->info.uses_control_barrier = false;
 
    return nir_shader_intrinsics_pass(nir, nak_nir_remove_barrier_intrin,
-                                     nir_metadata_control_flow,
+                                     nir_metadata_control_flow | nir_metadata_divergence,
                                      NULL);
 }
 
 static bool
 nak_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
                      unsigned bit_size, unsigned num_components,
-                     unsigned hole_size, nir_intrinsic_instr *low,
+                     int64_t hole_size, nir_intrinsic_instr *low,
                      nir_intrinsic_instr *high, void *cb_data)
 {
    /*
@@ -808,7 +808,7 @@ nak_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
     */
    assert(util_is_power_of_two_nonzero(align_mul));
 
-   if (hole_size)
+   if (hole_size > 0)
       return false;
 
    unsigned max_bytes = 128u / 8u;
@@ -1045,18 +1045,22 @@ nak_postprocess_nir(nir_shader *nir,
    if (nak->sm < 70)
       OPT(nir, nak_nir_split_64bit_conversions);
 
-   nir_convert_to_lcssa(nir, true, true);
-   nir_divergence_analysis(nir);
+   bool lcssa_progress = nir_convert_to_lcssa(nir, false, false);
 
    if (nak->sm >= 75) {
+      if (lcssa_progress) {
+         OPT(nir, nak_nir_mark_lcssa_invariants);
+      }
       if (OPT(nir, nak_nir_lower_non_uniform_ldcx)) {
          OPT(nir, nir_copy_prop);
          OPT(nir, nir_opt_dce);
-         nir_divergence_analysis(nir);
       }
    }
 
    OPT(nir, nak_nir_remove_barriers);
+
+   /* Call divergence analysis regardless of sm version. */
+   nir_divergence_analysis(nir);
 
    if (nak->sm >= 70) {
       if (nak_should_print_nir()) {
@@ -1074,6 +1078,9 @@ nak_postprocess_nir(nir_shader *nir,
       if (func->impl) {
          nir_index_blocks(func->impl);
          nir_index_ssa_defs(func->impl);
+
+         /* Ensure that divergence information is correct. */
+         assert(func->impl->valid_metadata & nir_metadata_divergence);
       }
    }
 

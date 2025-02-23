@@ -14,11 +14,14 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
+#include "nir_tcs_info.h"
 #include "radv_constants.h"
 #include "radv_shader_args.h"
+#include "util/set.h"
 
 struct radv_device;
 struct nir_shader;
+typedef struct nir_shader nir_shader;
 struct radv_shader_layout;
 struct radv_shader_stage_key;
 enum radv_pipeline_type;
@@ -118,7 +121,8 @@ struct radv_shader_info {
       bool as_es;
       bool as_ls;
       bool tcs_in_out_eq;
-      uint64_t tcs_temp_only_input_mask;
+      uint64_t tcs_inputs_via_temp;
+      uint64_t tcs_inputs_via_lds;
       uint8_t num_linked_outputs;
       bool needs_base_instance;
       bool use_per_attribute_vb_descs;
@@ -128,7 +132,6 @@ struct radv_shader_info {
       bool dynamic_inputs;
       bool dynamic_num_verts_per_prim;
       uint32_t num_outputs; /* For NGG streamout only */
-      uint64_t hs_inputs_read; /* Mask of HS inputs read (only used by linked LS) */
    } vs;
    struct {
       uint8_t output_usage_mask[VARYING_SLOT_VAR31 + 1];
@@ -172,7 +175,6 @@ struct radv_shader_info {
       bool exports_mrtz_via_epilog;
       bool has_pcoord;
       bool prim_id_input;
-      bool layer_input;
       bool viewport_index_input;
       uint8_t input_clips_culls_mask;
       uint32_t input_mask;
@@ -199,6 +201,7 @@ struct radv_shader_info {
       bool reads_linear_centroid;
       bool reads_fully_covered;
       bool reads_pixel_coord;
+      bool reads_layer;
       uint8_t reads_frag_coord_mask;
       uint8_t reads_sample_pos_mask;
       uint8_t depth_layout;
@@ -231,18 +234,23 @@ struct radv_shader_info {
       bool has_query; /* Task shader only */
 
       bool regalloc_hang_bug;
+
+      unsigned derivative_group : 2;
    } cs;
    struct {
       uint64_t tes_inputs_read;
       uint64_t tes_patch_inputs_read;
+      uint64_t tcs_outputs_read;
+      uint64_t tcs_outputs_written;
+      uint32_t tcs_patch_outputs_read;
+      uint32_t tcs_patch_outputs_written;
       unsigned tcs_vertices_out;
       uint32_t num_lds_blocks;
       uint8_t num_linked_inputs;          /* Number of reserved per-vertex input slots in LDS. */
       uint8_t num_linked_outputs;         /* Number of reserved per-vertex output slots in VRAM. */
       uint8_t num_linked_patch_outputs;   /* Number of reserved per-patch output slots in VRAM. */
-      uint8_t num_lds_per_vertex_outputs; /* Number of reserved per-vertex output slots in LDS. */
-      uint8_t num_lds_per_patch_outputs;  /* Number of reserved per-patch output slots in LDS. */
       bool tes_reads_tess_factors : 1;
+      nir_tcs_info info;
    } tcs;
    struct {
       enum mesa_prim output_prim;
@@ -289,6 +297,7 @@ struct radv_shader_info {
       struct {
          uint32_t spi_shader_gs_meshlet_dim;
          uint32_t spi_shader_gs_meshlet_exp_alloc;
+         uint32_t spi_shader_gs_meshlet_ctrl; /* GFX12+ */
       } ms;
 
       struct {

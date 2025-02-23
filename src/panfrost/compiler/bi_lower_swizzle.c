@@ -23,6 +23,7 @@
 
 #include "bi_builder.h"
 #include "compiler.h"
+#include "valhall.h"
 
 /* Not all 8-bit and 16-bit instructions support all swizzles on all sources.
  * These passes, intended to run after NIR->BIR but before scheduling/RA, lower
@@ -54,12 +55,17 @@ lower_swizzle(bi_context *ctx, bi_instr *ins, unsigned src)
    case BI_OPCODE_CSEL_V2I16:
    case BI_OPCODE_CSEL_V2S16:
    case BI_OPCODE_CSEL_V2U16:
+      break;
 
    /* Despite ostensibly being 32-bit instructions, CLPER does not
     * inherently interpret the data, so it can be used for v2f16
     * derivatives, which might require swizzle lowering */
    case BI_OPCODE_CLPER_I32:
    case BI_OPCODE_CLPER_OLD_I32:
+      if (src == 0)
+         break;
+      else
+         return;
 
    /* Similarly, CSEL.i32 consumes a boolean as a 32-bit argument. If the
     * boolean is implemented as a 16-bit integer, the swizzle is needed
@@ -293,6 +299,11 @@ bi_lower_swizzle(bi_context *ctx)
          ins->op = BI_OPCODE_MOV_I32;
          ins->src[0].swizzle = BI_SWIZZLE_H01;
       }
+
+      /* On Valhall, if the instruction does some conversion depending on
+       * swizzle, we should not touch it. */
+      if (ctx->arch >= 9 && va_op_dest_modifier_does_convert(ins->op))
+         continue;
 
       /* The above passes rely on replicating destinations.  For
        * Valhall, we will want to optimize this. For now, default

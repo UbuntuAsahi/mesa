@@ -145,7 +145,7 @@ struct pipe_rasterizer_state
    unsigned rasterizer_discard:1;
 
    /**
-    * Exposed by PIPE_CAP_TILE_RASTER_ORDER.  When true,
+    * Exposed by pipe_caps.tile_raster_order.  When true,
     * tile_raster_order_increasing_* indicate the order that the rasterizer
     * should render tiles, to meet the requirements of
     * GL_MESA_tile_raster_order.
@@ -157,9 +157,9 @@ struct pipe_rasterizer_state
    /**
     * When false, depth clipping is disabled and the depth value will be
     * clamped later at the per-pixel level before depth testing.
-    * This depends on PIPE_CAP_DEPTH_CLIP_DISABLE.
+    * This depends on pipe_caps.depth_clip_disable.
     *
-    * If PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE is unsupported, depth_clip_near
+    * If pipe_caps.depth_clip_disable_separate is unsupported, depth_clip_near
     * is equal to depth_clip_far.
     */
    unsigned depth_clip_near:1;
@@ -167,7 +167,7 @@ struct pipe_rasterizer_state
 
    /**
     * When true, depth clamp is enabled.
-    * If PIPE_CAP_DEPTH_CLAMP_ENABLE is unsupported, this is always the inverse
+    * If pipe_caps.depth_clamp_enable is unsupported, this is always the inverse
     * of depth_clip_far.
     */
    unsigned depth_clamp:1;
@@ -183,7 +183,7 @@ struct pipe_rasterizer_state
    /**
     * When true do not scale offset_units and use same rules for unorm and
     * float depth buffers (D3D9). When false use GL/D3D1X behaviour.
-    * This depends on PIPE_CAP_POLYGON_OFFSET_UNITS_UNSCALED.
+    * This depends on pipe_caps.polygon_offset_units_unscaled.
     */
    unsigned offset_units_unscaled:1;
 
@@ -306,6 +306,14 @@ struct pipe_shader_state
       struct nir_shader *nir;
    } ir;
    struct pipe_stream_output_info stream_output;
+
+   /* If the caller sets report_compile_error=true, the driver can fail
+    * compilation and should allocate a string with the error message and
+    * store it in the pointer below. The caller is responsible for reading
+    * and freeing the error message.
+    */
+   bool report_compile_error;
+   char *error_message;
 };
 
 static inline void
@@ -478,6 +486,12 @@ struct pipe_surface
    union pipe_surface_desc u;
 };
 
+struct pipe_tex2d_from_buf {
+   unsigned offset;  /**< offset in pixels */
+   uint16_t row_stride; /**< size of the image row_stride in pixels */
+   uint16_t width;      /**< width of image provided by application */
+   uint16_t height;     /**< height of image provided by application */
+};
 
 /**
  * A view into a texture that can be bound to a shader stage.
@@ -508,12 +522,7 @@ struct pipe_sampler_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the readable sub-range in bytes */
       } buf;
-      struct {
-         unsigned offset;  /**< offset in pixels */
-         uint16_t row_stride; /**< size of the image row_stride in pixels */
-         uint16_t width;      /**< width of image provided by application */
-         uint16_t height;     /**< height of image provided by application */
-      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
+      struct pipe_tex2d_from_buf tex2d_from_buf; /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -544,12 +553,7 @@ struct pipe_image_view
          unsigned offset;   /**< offset in bytes */
          unsigned size;     /**< size of the accessible sub-range in bytes */
       } buf;
-      struct {
-         unsigned offset;   /**< offset in pixels */
-         uint16_t row_stride;     /**< size of the image row_stride in pixels */
-         uint16_t width;     /**< width of image provided by application */
-         uint16_t height;     /**< height of image provided by application */
-      } tex2d_from_buf;      /**< used in cl extension cl_khr_image2d_from_buffer */
+      struct pipe_tex2d_from_buf tex2d_from_buf; /**< used in cl extension cl_khr_image2d_from_buffer */
    } u;
 };
 
@@ -918,6 +922,14 @@ struct pipe_blit_info
    bool scissor_enable;
    struct pipe_scissor_state scissor;
 
+   /* Swizzling during a blit typically forces a slower
+      path, so it should be used only when necessary. It's
+      there mainly to support blitting between different formats
+      when one of them has been emulated (e.g. GL_ALPHA emulated
+      by GL_RGBA) */
+   bool swizzle_enable; /**< swizzle is only applied if this is set */
+   uint8_t swizzle[4];  /**< map to be applied while blitting */
+
    /* Window rectangles can either be inclusive or exclusive. */
    bool window_rectangle_include;
    unsigned num_window_rectangles;
@@ -934,7 +946,7 @@ struct pipe_blit_info
 struct pipe_grid_info
 {
    /**
-    * For drivers that use PIPE_SHADER_IR_NATIVE as their prefered IR, this
+    * For drivers that use PIPE_SHADER_IR_NATIVE as their preferred IR, this
     * value will be the index of the kernel in the opencl.kernels metadata
     * list.
     */
@@ -1051,6 +1063,10 @@ enum pipe_ml_operation_type {
    PIPE_ML_OPERATION_TYPE_ADD,
    PIPE_ML_OPERATION_TYPE_CONVOLUTION,
    PIPE_ML_OPERATION_TYPE_POOLING,
+   PIPE_ML_OPERATION_TYPE_CONCATENATION,
+   PIPE_ML_OPERATION_TYPE_SPLIT,
+   PIPE_ML_OPERATION_TYPE_PAD,
+   PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED,
 };
 
 /**
@@ -1081,6 +1097,7 @@ struct pipe_ml_operation
           * For convolutions, tensor containing the weights.
           */
          struct pipe_tensor *weight_tensor;
+
          /**
           * For convolutions, tensor containing the biases.
           */
@@ -1142,6 +1159,42 @@ struct pipe_ml_operation
           */
          bool padding_same;
       } pooling;
+      struct {
+         /**
+          * Left padding.
+          */
+         unsigned before_x;
+
+         /**
+          * Right padding.
+          */
+         unsigned after_x;
+
+         /**
+          * Top padding.
+          */
+         unsigned before_y;
+         /**
+          * Bottom padding.
+          */
+         unsigned after_y;
+      } pad;
+
+      struct {
+         /**
+          * Tensor containing the weights.
+          */
+         struct pipe_tensor *weight_tensor;
+         /**
+          * Tensor containing the biases.
+          */
+         struct pipe_tensor *bias_tensor;
+
+         /**
+          * Whether a ReLU activation should be applied to the output.
+          */
+         bool relu;
+      } fcon;
    };
 };
 

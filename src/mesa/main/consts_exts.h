@@ -178,6 +178,7 @@ struct gl_extensions
    GLboolean EXT_memory_object_win32;
    GLboolean EXT_multisampled_render_to_texture;
    GLboolean EXT_packed_float;
+   GLboolean EXT_protected_textures;
    GLboolean EXT_provoking_vertex;
    GLboolean EXT_render_snorm;
    GLboolean EXT_semaphore;
@@ -344,8 +345,6 @@ struct gl_shader_compiler_options
     * \name Forms of indirect addressing the driver cannot do.
     */
    /*@{*/
-   GLboolean EmitNoIndirectInput;   /**< No indirect addressing of inputs */
-   GLboolean EmitNoIndirectOutput;  /**< No indirect addressing of outputs */
    GLboolean EmitNoIndirectTemp;    /**< No indirect addressing of temps */
    GLboolean EmitNoIndirectUniform; /**< No indirect addressing of constants */
    /*@}*/
@@ -667,11 +666,6 @@ struct gl_constants
     *        function out variables are now initialized.
     */
    GLchar GLSLZeroInit;
-
-   /**
-    * Force GL names reuse. Needed by SPECviewperf13.
-    */
-   GLboolean ForceGLNamesReuse;
 
    /**
     * Treat integer textures using GL_LINEAR filters as GL_NEAREST.

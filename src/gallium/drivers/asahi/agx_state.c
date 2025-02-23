@@ -48,6 +48,7 @@
 #include "util/u_inlines.h"
 #include "util/u_math.h"
 #include "util/u_memory.h"
+#include "util/u_prim.h"
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
 #include "agx_bg_eot.h"
@@ -1529,7 +1530,6 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
    struct agx_shader_key key = {
       .dev = agx_gather_device_key(dev),
-      .libagx = dev->libagx,
       .has_scratch = !secondary,
       .promote_constants = true,
       .no_stop = !terminal,
@@ -1609,7 +1609,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       struct asahi_vs_shader_key *key = &key_->vs;
 
       if (nir->info.vs.tes_agx) {
-         NIR_PASS(_, nir, agx_nir_lower_tes, dev->libagx, key->hw);
+         NIR_PASS(_, nir, agx_nir_lower_tes, key->hw);
       } else {
          NIR_PASS(_, nir, agx_nir_lower_vs_input_to_prolog,
                   attrib_components_read);
@@ -1625,7 +1625,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
          NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
       } else {
-         NIR_PASS(_, nir, agx_nir_lower_vs_before_gs, dev->libagx);
+         NIR_PASS(_, nir, agx_nir_lower_vs_before_gs);
 
          /* Turn into a compute shader now that we're free of vertexisms */
          nir->info.stage = MESA_SHADER_COMPUTE;
@@ -1634,12 +1634,12 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          outputs = nir->info.outputs_written;
       }
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
-      NIR_PASS_V(nir, agx_nir_lower_tcs, dev->libagx);
+      NIR_PASS_V(nir, agx_nir_lower_tcs);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       struct asahi_gs_shader_key *key = &key_->gs;
 
-      NIR_PASS(_, nir, agx_nir_lower_gs, dev->libagx, key->rasterizer_discard,
-               &gs_count, &gs_copy, &pre_gs, &gs_out_prim, &gs_out_count_words);
+      NIR_PASS(_, nir, agx_nir_lower_gs, key->rasterizer_discard, &gs_count,
+               &gs_copy, &pre_gs, &gs_out_prim, &gs_out_count_words);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       struct asahi_fs_shader_key *key = &key_->fs;
 
@@ -1787,6 +1787,37 @@ glsl_type_size(const struct glsl_type *type, bool bindless)
    return glsl_count_attribute_slots(type, false);
 }
 
+static bool
+should_lower_robustness(const nir_intrinsic_instr *intr, const void *data)
+{
+   const bool *gl_robust = data;
+
+   switch (intr->intrinsic) {
+   /* The texture/PBE hardware is robust, but our buffer image implementation
+    * is not. Lower robustness only for buffer images.
+    */
+   case nir_intrinsic_image_load:
+   case nir_intrinsic_image_store:
+      return nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_BUF;
+
+   /* Image atomics are lowered to raw memory access */
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
+      return true;
+
+   /* UBOs/SSBOs are lowered to raw pointers */
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+      return *gl_robust;
+
+   default:
+      return false;
+   }
+}
+
 static void
 agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
                       nir_shader *nir, bool support_lod_bias, bool robust)
@@ -1797,24 +1828,10 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    blob_init(&so->early_serialized_nir);
    nir_serialize(&so->early_serialized_nir, nir, true);
 
-   nir_lower_robust_access_options robustness = {
-      /* Images accessed through the texture or PBE hardware are robust, so we
-       * don't set lower_image. However, buffer images and image atomics are
-       * lowered so require robustness lowering.
-       */
-      .lower_buffer_image = true,
-      .lower_image_atomic = true,
-
-      /* Buffer access is based on raw pointers and hence needs lowering to be
-         robust */
-      .lower_ubo = robust,
-      .lower_ssbo = robust,
-   };
-
    /* We need to lower robustness before bindings, since robustness lowering
     * affects the bindings used.
     */
-   NIR_PASS(_, nir, nir_lower_robust_access, &robustness);
+   NIR_PASS(_, nir, nir_lower_robust_access, should_lower_robustness, &robust);
 
    /* Similarly, we need to do early texture lowering before bindings */
    NIR_PASS(_, nir, agx_nir_lower_texture_early, support_lod_bias);
@@ -1856,6 +1873,8 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
               nir->info.stage == MESA_SHADER_TESS_EVAL) {
       so->info.has_edgeflags = nir->info.outputs_written & VARYING_BIT_EDGE;
       so->info.cull_distance_size = nir->info.cull_distance_array_size;
+   } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
+      so->info.cull_distance_size = nir->info.cull_distance_array_size;
    }
 
    /* Shrink and vectorize SSBOs before lowering them, since it is harder to
@@ -1881,7 +1900,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    NIR_PASS(_, nir, agx_nir_lower_texture);
    NIR_PASS(_, nir, nir_lower_ssbo, NULL);
 
-   agx_preprocess_nir(nir, dev->libagx);
+   agx_preprocess_nir(nir);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        (nir->info.inputs_read & VARYING_BITS_TEX_ANY)) {
@@ -2304,6 +2323,16 @@ optimize_blend_factor_w_1(enum pipe_blendfactor f)
       return f;
 }
 
+/* Tessellation ignored here due to the hard rebinding we do atm */
+static struct agx_uncompiled_shader *
+agx_last_uncompiled_vgt(struct agx_context *ctx)
+{
+   if (ctx->stage[MESA_SHADER_GEOMETRY].shader)
+      return ctx->stage[MESA_SHADER_GEOMETRY].shader;
+   else
+      return ctx->stage[MESA_SHADER_VERTEX].shader;
+}
+
 static bool
 agx_update_fs(struct agx_batch *batch)
 {
@@ -2319,7 +2348,8 @@ agx_update_fs(struct agx_batch *batch)
     */
    if (!(ctx->dirty & (AGX_DIRTY_VS_PROG | AGX_DIRTY_FS_PROG | AGX_DIRTY_RS |
                        AGX_DIRTY_BLEND | AGX_DIRTY_SAMPLE_MASK |
-                       AGX_DIRTY_PRIM | AGX_DIRTY_QUERY)))
+                       AGX_DIRTY_PRIM | AGX_DIRTY_QUERY)) &&
+       !ctx->stage[MESA_SHADER_GEOMETRY].dirty)
       return false;
 
    struct agx_device *dev = agx_device(ctx->base.screen);
@@ -2350,7 +2380,7 @@ agx_update_fs(struct agx_batch *batch)
          ctx->pipeline_statistics[PIPE_STAT_QUERY_PS_INVOCATIONS],
 
       .prolog.fs.cull_distance_size =
-         ctx->stage[MESA_SHADER_VERTEX].shader->info.cull_distance_size,
+         agx_last_uncompiled_vgt(ctx)->info.cull_distance_size,
 
       .prolog.fs.polygon_stipple =
          ctx->rast->base.poly_stipple_enable &&
@@ -2635,18 +2665,7 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
 
    struct agx_device *dev = agx_device(ctx->base.screen);
    if (!prolog) {
-      /* We need to link libagx and assign shared before preprocessing, matching
-       * what the driver would otherwise produce.
-       */
-      agx_link_libagx(b.shader, dev->libagx);
-
-      NIR_PASS(_, b.shader, nir_lower_vars_to_explicit_types,
-               nir_var_mem_shared, glsl_get_cl_type_size_align);
-
-      NIR_PASS(_, b.shader, nir_lower_explicit_io, nir_var_mem_shared,
-               nir_address_format_62bit_generic);
-
-      agx_preprocess_nir(b.shader, NULL);
+      agx_preprocess_nir(b.shader);
       NIR_PASS(_, b.shader, agx_nir_lower_texture);
       NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    }
@@ -3085,7 +3104,8 @@ agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
 
 void
 agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
-                   enum libagx_program program, void *args, size_t arg_size)
+                   enum agx_barrier barrier, enum libagx_program program,
+                   void *args, size_t arg_size)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
    struct agx_precompiled_shader *cs =
@@ -3890,19 +3910,43 @@ agx_ia_update(struct agx_batch *batch, const struct pipe_draw_info *info,
    uint64_t ia_vertices = agx_get_query_address(
       batch, ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_VERTICES]);
 
+   uint64_t ia_primitives = agx_get_query_address(
+      batch, ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_PRIMITIVES]);
+
    uint64_t vs_invocations = agx_get_query_address(
       batch, ctx->pipeline_statistics[PIPE_STAT_QUERY_VS_INVOCATIONS]);
+
+   uint64_t c_prims = agx_get_query_address(
+      batch, ctx->pipeline_statistics[PIPE_STAT_QUERY_C_PRIMITIVES]);
+
+   uint64_t c_invs = agx_get_query_address(
+      batch, ctx->pipeline_statistics[PIPE_STAT_QUERY_C_INVOCATIONS]);
+
+   /* With a geometry shader, clipper counters are written by the pre-GS kernel
+    * since they depend on the output on the geometry shader. Without a geometry
+    * shader, they are written along with IA.
+    *
+    * TODO: Broken tessellation interaction, but nobody cares.
+    */
+   if (ctx->stage[PIPE_SHADER_GEOMETRY].shader) {
+      c_prims = 0;
+      c_invs = 0;
+   }
 
    if (info->primitive_restart) {
       perf_debug(dev, "Input assembly counters with primitive restart");
 
-      libagx_increment_ia_restart(batch, agx_1d(1024), ia_vertices,
-                                  vs_invocations, draw, ib, ib_range_el,
-                                  info->restart_index, info->index_size);
+      libagx_increment_ia_restart(batch, agx_1d(1024), AGX_BARRIER_ALL,
+                                  ia_vertices, ia_primitives, vs_invocations,
+                                  c_prims, c_invs, draw, ib, ib_range_el,
+                                  info->restart_index, info->index_size,
+                                  info->mode, ctx->patch_vertices);
    } else {
       perf_debug(dev, "Input assembly counters");
 
-      libagx_increment_ia(batch, agx_1d(1), ia_vertices, vs_invocations, draw);
+      libagx_increment_ia(batch, agx_1d(1), AGX_BARRIER_ALL, ia_vertices,
+                          ia_primitives, vs_invocations, c_prims, c_invs, draw,
+                          info->mode, ctx->patch_vertices);
    }
 }
 
@@ -4106,7 +4150,7 @@ agx_launch_gs_prerast(struct agx_batch *batch,
          .prim = info->mode,
       };
 
-      libagx_gs_setup_indirect_struct(batch, agx_1d(1), gsi);
+      libagx_gs_setup_indirect_struct(batch, agx_1d(1), AGX_BARRIER_ALL, gsi);
 
       wg = agx_workgroup(1, 1, 1);
       grid_vs =
@@ -4132,7 +4176,8 @@ agx_launch_gs_prerast(struct agx_batch *batch,
       agx_launch(batch, grid_gs, wg, gs->gs_count, NULL, PIPE_SHADER_GEOMETRY,
                  0);
 
-      libagx_prefix_sum_geom(batch, agx_1d(1024 * gs->gs_count_words), gp);
+      libagx_prefix_sum_geom(batch, agx_1d(1024 * gs->gs_count_words),
+                             AGX_BARRIER_ALL, gp);
    }
 
    /* Pre-GS shader */
@@ -4203,9 +4248,9 @@ agx_draw_without_restart(struct agx_batch *batch,
    };
 
    /* Unroll the index buffer for each draw */
-   libagx_unroll_restart_struct(batch, agx_1d(1024 * indirect->draw_count),
-                                unroll, util_logbase2(info->index_size),
-                                libagx_compact_prim(info->mode));
+   libagx_unroll_restart_struct(
+      batch, agx_1d(1024 * indirect->draw_count), AGX_BARRIER_ALL, unroll,
+      util_logbase2(info->index_size), libagx_compact_prim(info->mode));
 
    /* Now draw the results without restart */
    struct pipe_draw_info new_info = {
@@ -4242,10 +4287,7 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
    /* Rendering adjacency requires a GS, add a passthrough since we don't have
     * one.
     */
-   if (info->mode == MESA_PRIM_LINES_ADJACENCY ||
-       info->mode == MESA_PRIM_TRIANGLES_ADJACENCY ||
-       info->mode == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY ||
-       info->mode == MESA_PRIM_LINE_STRIP_ADJACENCY) {
+   if (mesa_prim_has_adjacency(info->mode)) {
       perf_debug_ctx(ctx, "Using passthrough GS due to adjacency primitives");
       return true;
    }
@@ -4269,14 +4311,6 @@ agx_needs_passthrough_gs(struct agx_context *ctx,
    /* Edge flags are emulated with a geometry shader */
    if (has_edgeflags(ctx, info->mode)) {
       perf_debug_ctx(ctx, "Using passthrough GS due to edge flags");
-      return true;
-   }
-
-   /* Various pipeline statistics are implemented in the pre-GS shader. */
-   if (ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_PRIMITIVES] ||
-       ctx->pipeline_statistics[PIPE_STAT_QUERY_C_PRIMITIVES] ||
-       ctx->pipeline_statistics[PIPE_STAT_QUERY_C_INVOCATIONS]) {
-      perf_debug_ctx(ctx, "Using passthrough GS due to pipeline statistics");
       return true;
    }
 
@@ -4341,7 +4375,7 @@ agx_get_passthrough_gs(struct agx_context *ctx,
 
    nir_shader *gs = nir_create_passthrough_gs(
       &agx_nir_options, prev, mode, rast_prim(mode, poly_mode), edgeflags,
-      false /* force line strip out */);
+      false /* force line strip out */, false);
 
    ralloc_free(prev);
 
@@ -4634,6 +4668,8 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
       agx_pool_upload_aligned(&batch->pool, &args, sizeof(args), 4);
 
    if (indirect) {
+      perf_debug(dev, "Indirect tessellation");
+
       uint32_t grid_stride = sizeof(uint32_t) * 6;
 
       uint64_t vertex_out_ptr = agx_pool_alloc_aligned(&batch->pool, 8, 8).gpu;
@@ -4646,10 +4682,10 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
       uint64_t grids =
          agx_pool_alloc_aligned(&batch->pool, grid_stride * 3, 4).gpu;
 
-      libagx_tess_setup_indirect(batch, agx_1d(1), state, grids,
-                                 0 /* XXX: IA */, indirect_ptr, vertex_out_ptr,
-                                 0, 0, 0 /* XXX: Index buffer */,
-                                 ctx->vs->b.info.outputs, tcs_statistic);
+      libagx_tess_setup_indirect(
+         batch, agx_1d(1), AGX_BARRIER_ALL, state, grids, 0 /* XXX: IA */,
+         indirect_ptr, vertex_out_ptr, 0, 0, 0 /* XXX: Index buffer */,
+         ctx->vs->b.info.outputs, tcs_statistic);
 
       batch->uniforms.vertex_output_buffer_ptr = vertex_out_ptr;
 
@@ -4669,10 +4705,11 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    batch->uniforms.vertex_output_buffer_ptr = 0;
 
    /* Generate counts, then prefix sum them, then finally tessellate. */
-   libagx_tessellate(batch, tess_grid, mode, LIBAGX_TESS_MODE_COUNT, state);
-   libagx_prefix_sum_tess(batch, agx_1d(1024), state);
-   libagx_tessellate(batch, tess_grid, mode, LIBAGX_TESS_MODE_WITH_COUNTS,
-                     state);
+   libagx_tessellate(batch, tess_grid, AGX_BARRIER_ALL, mode,
+                     LIBAGX_TESS_MODE_COUNT, state);
+   libagx_prefix_sum_tess(batch, agx_1d(1024), AGX_BARRIER_ALL, state);
+   libagx_tessellate(batch, tess_grid, AGX_BARRIER_ALL, mode,
+                     LIBAGX_TESS_MODE_WITH_COUNTS, state);
 
    /* Face culling state needs to be specialized for tess */
    ctx->dirty |= AGX_DIRTY_RS;
@@ -4873,7 +4910,11 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
    if (ctx->active_queries && !ctx->active_draw_without_restart &&
        (ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_VERTICES] ||
-        ctx->pipeline_statistics[PIPE_STAT_QUERY_VS_INVOCATIONS])) {
+        ctx->pipeline_statistics[PIPE_STAT_QUERY_IA_PRIMITIVES] ||
+        ctx->pipeline_statistics[PIPE_STAT_QUERY_VS_INVOCATIONS] ||
+        ((ctx->pipeline_statistics[PIPE_STAT_QUERY_C_PRIMITIVES] ||
+          ctx->pipeline_statistics[PIPE_STAT_QUERY_C_INVOCATIONS]) &&
+         !ctx->stage[PIPE_SHADER_GEOMETRY].shader))) {
 
       uint64_t ptr;
       if (indirect) {
@@ -5114,56 +5155,27 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          cfg.value = info->restart_index;
    }
 
-   agx_push(out, INDEX_LIST, cfg) {
-      cfg.primitive = agx_primitive_for_pipe(info->mode);
-
-      if (indirect != NULL) {
-         cfg.indirect_buffer_present = true;
-      } else {
-         cfg.instance_count_present = true;
-         cfg.index_count_present = true;
-         cfg.start_present = true;
-      }
-
-      if (info->index_size) {
-         cfg.restart_enable = info->primitive_restart;
-         cfg.index_buffer_hi = (ib >> 32);
-         cfg.index_size = agx_translate_index_size(info->index_size);
-         cfg.index_buffer_present = true;
-         cfg.index_buffer_size_present = true;
-      }
-   }
-
+   struct agx_draw draw = {0};
    if (info->index_size) {
-      agx_push(out, INDEX_LIST_BUFFER_LO, cfg) {
-         cfg.buffer_lo = ib & BITFIELD_MASK(32);
-      }
+      draw.index_size = agx_translate_index_size(info->index_size);
+      draw.index_buffer = ib;
+      draw.index_buffer_range_B = ib_extent;
+      draw.restart = info->primitive_restart;
+      draw.indexed = true;
+   } else {
+      draw.start = draws->start;
    }
 
    if (indirect) {
-      uint64_t address = agx_indirect_buffer_ptr(batch, indirect);
-
-      agx_push(out, INDEX_LIST_INDIRECT_BUFFER, cfg) {
-         cfg.address_hi = address >> 32;
-         cfg.address_lo = address & BITFIELD_MASK(32);
-      }
+      draw.b = agx_grid_indirect(agx_indirect_buffer_ptr(batch, indirect));
    } else {
-      agx_push(out, INDEX_LIST_COUNT, cfg)
-         cfg.count = draws->count;
-
-      agx_push(out, INDEX_LIST_INSTANCES, cfg)
-         cfg.count = info->instance_count;
-
-      agx_push(out, INDEX_LIST_START, cfg) {
-         cfg.start = info->index_size ? draws->index_bias : draws->start;
-      }
+      draw.b = agx_3d(draws->count, info->instance_count, 1);
+      if (info->index_size)
+         draw.index_bias = draws->index_bias;
    }
 
-   if (info->index_size) {
-      agx_push(out, INDEX_LIST_BUFFER_SIZE, cfg) {
-         cfg.size = ib_extent;
-      }
-   }
+   out = (void *)agx_vdm_draw((uint32_t *)out, 0 /* ignored for now */, draw,
+                              agx_primitive_for_pipe(info->mode));
 
    batch->vdm.current = out;
    assert((batch->vdm.current + AGX_VDM_STREAM_LINK_LENGTH) <= batch->vdm.end &&
@@ -5303,13 +5315,13 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       if (indirect) {
          uint64_t addr = agx_get_query_address(batch, statistic);
 
-         libagx_increment_cs_invocations(batch, agx_1d(1), indirect, addr,
+         libagx_increment_cs_invocations(batch, agx_1d(1), AGX_BARRIER_ALL,
+                                         indirect, addr,
                                          agx_workgroup_threads(wg));
       } else {
-         agx_query_increment_cpu(
-            ctx, statistic,
-            libagx_cs_invocations(agx_workgroup_threads(wg), info->grid[0],
-                                  info->grid[1], info->grid[2]));
+         agx_query_increment_cpu(ctx, statistic,
+                                 agx_workgroup_threads(wg) * info->grid[0] *
+                                    info->grid[1] * info->grid[2]);
       }
    }
 
@@ -5432,7 +5444,8 @@ agx_decompress_inplace(struct agx_batch *batch, struct pipe_surface *surf,
              ail_metadata_height_tl(layout, level),
              surf->u.tex.last_layer - surf->u.tex.first_layer + 1);
 
-   libagx_decompress(batch, grid, layout, surf->u.tex.first_layer, level,
+   libagx_decompress(batch, grid, AGX_BARRIER_ALL, layout,
+                     surf->u.tex.first_layer, level,
                      agx_map_texture_gpu(rsrc, 0), images.gpu);
 }
 

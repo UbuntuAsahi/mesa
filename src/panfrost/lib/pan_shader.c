@@ -34,7 +34,9 @@
 const nir_shader_compiler_options *
 GENX(pan_shader_get_compiler_options)(void)
 {
-#if PAN_ARCH >= 9
+#if PAN_ARCH >= 11
+   return &bifrost_nir_options_v11;
+#elif PAN_ARCH >= 9
    return &bifrost_nir_options_v9;
 #elif PAN_ARCH >= 6
    return &bifrost_nir_options_v6;
@@ -128,9 +130,7 @@ GENX(pan_shader_compile)(nir_shader *s, struct panfrost_compile_inputs *inputs,
       info->attribute_count = info->attributes_read_count;
 
 #if PAN_ARCH <= 5
-      bool vertex_id = BITSET_TEST(s->info.system_values_read,
-                                   SYSTEM_VALUE_VERTEX_ID_ZERO_BASE);
-      if (vertex_id)
+      if (info->midgard.vs.reads_raw_vertex_id)
          info->attribute_count = MAX2(info->attribute_count, PAN_VERTEX_ID + 1);
 
       bool instance_id =

@@ -723,9 +723,6 @@ generate_fs_loop(struct gallivm_state *gallivm,
    system_values.front_facing =
       LLVMBuildTrunc(gallivm->builder, facing,
                      LLVMInt1TypeInContext(gallivm->context), "");
-   system_values.front_facing =
-      LLVMBuildSExt(gallivm->builder, system_values.front_facing,
-                    LLVMInt32TypeInContext(gallivm->context), "");
    system_values.view_index =
       lp_jit_thread_data_raster_state_view_index(gallivm,
                                                  thread_data_type,
@@ -1101,7 +1098,6 @@ generate_fs_loop(struct gallivm_state *gallivm,
    params.info = &shader->info.base;
    params.ssbo_ptr = ssbo_ptr;
    params.image = image;
-   params.aniso_filter_table = lp_jit_resources_aniso_filter_table(gallivm, resources_type, resources_ptr);
 
    /* Build the actual shader */
    lp_build_nir_soa(gallivm, nir, &params, outputs);

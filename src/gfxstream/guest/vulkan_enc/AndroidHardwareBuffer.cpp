@@ -67,7 +67,7 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
     gfxstream::Gralloc* grallocHelper, const AHardwareBuffer* buffer,
     VkAndroidHardwareBufferPropertiesANDROID* pProperties) {
     VkAndroidHardwareBufferFormatPropertiesANDROID* ahbFormatProps =
-        vk_find_struct<VkAndroidHardwareBufferFormatPropertiesANDROID>(pProperties);
+        vk_find_struct(pProperties, ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID);
 
     const auto format = grallocHelper->getFormat(buffer);
     if (ahbFormatProps) {
@@ -183,7 +183,7 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
                 //  * V (CR) comes from the R-channel (after swizzle)
                 //
                 // See
-                // https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#textures-sampler-YCbCr-conversion
+                // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#textures-sampler-YCbCr-conversion
                 //
                 // To match the above, the guest needs to swizzle such that:
                 //

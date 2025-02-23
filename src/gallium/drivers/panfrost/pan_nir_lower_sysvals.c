@@ -86,7 +86,7 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
    case nir_intrinsic_load_num_vertices:
       return PAN_SYSVAL_NUM_VERTICES;
 
-   case nir_intrinsic_load_first_vertex:
+   case nir_intrinsic_load_raw_vertex_offset_pan:
       return PAN_SYSVAL_VERTEX_INSTANCE_OFFSETS;
    case nir_intrinsic_load_base_vertex:
       *offset = 4;
@@ -115,6 +115,9 @@ sysval_for_intrinsic(unsigned arch, nir_intrinsic_instr *intr, unsigned *offset)
 
    case nir_intrinsic_load_workgroup_size:
       return PAN_SYSVAL_LOCAL_GROUP_SIZE;
+
+   case nir_intrinsic_load_printf_buffer_address:
+      return PAN_SYSVAL_PRINTF_BUFFER;
 
    case nir_intrinsic_load_rt_conversion_pan: {
       unsigned size = nir_alu_type_get_type_size(nir_intrinsic_src_type(intr));

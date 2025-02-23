@@ -167,6 +167,10 @@ kopperQueryBufferAge(struct dri_drawable *drawable);
 PUBLIC void
 driswCopySubBuffer(struct dri_drawable *drawable, int x, int y, int w, int h);
 
+PUBLIC int
+kopperGetSyncValues(struct dri_drawable *drawable, int64_t target_msc, int64_t divisor,
+                    int64_t remainder, int64_t *ust, int64_t *msc, int64_t *sbc);
+
 PUBLIC void
 dri_set_tex_buffer2(struct dri_context *ctx, GLint target,
                     GLint format, struct dri_drawable *drawable);
@@ -337,6 +341,4 @@ dri_set_blob_cache_funcs(struct dri_screen *screen, __DRIblobCacheSet set,
 
 PUBLIC struct pipe_screen *
 dri_get_pipe_screen(struct dri_screen *driScreen);
-PUBLIC int
-dri_get_screen_param(struct dri_screen *driScreen, enum pipe_cap param);
 #endif /* _DRI_UTIL_H_ */

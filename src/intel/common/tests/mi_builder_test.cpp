@@ -337,8 +337,8 @@ mi_builder_test::SetUp()
             break;
          }
       }
-      ASSERT_TRUE(found_engine);
       free(engines_info);
+      ASSERT_TRUE(found_engine);
 
       struct drm_xe_exec_queue_create queue_create = {
          .width          = 1,
@@ -437,7 +437,7 @@ mi_builder_test::TearDown()
 
    if (batch_bo_handle) {
       struct drm_gem_close gem_close = { .handle = batch_bo_handle };
-      intel_ioctl(fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
+      err = intel_ioctl(fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
       EXPECT_EQ(err, 0) << "close batch bo failed";
    }
 
@@ -573,9 +573,10 @@ mi_builder_test::submit_batch()
          {
             .type   = DRM_XE_SYNC_TYPE_SYNCOBJ,
             .flags  = DRM_XE_SYNC_FLAG_SIGNAL,
-            .handle = sync_handles[0],
+            .addr   = 0,
          },
       };
+      bind_syncs[0].handle = sync_handles[0];
 
       struct drm_xe_vm_bind bind = {
          .vm_id           = xe.vm_id,
@@ -591,14 +592,16 @@ mi_builder_test::submit_batch()
       struct drm_xe_sync exec_syncs[] = {
          {
             .type   = DRM_XE_SYNC_TYPE_SYNCOBJ,
-            .handle = sync_handles[0],
+            .addr   = 0,
          },
          {
             .type   = DRM_XE_SYNC_TYPE_SYNCOBJ,
             .flags  = DRM_XE_SYNC_FLAG_SIGNAL,
-            .handle = sync_handles[1],
+            .addr   = 0,
          }
       };
+      exec_syncs[0].handle = sync_handles[0];
+      exec_syncs[1].handle = sync_handles[1];
 
       struct drm_xe_exec exec = {
          .exec_queue_id    = xe.queue_id,

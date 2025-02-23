@@ -46,7 +46,7 @@ nvk_queue_state_update(struct nvk_queue *queue,
                        struct nvk_queue_state *qs)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    struct nvkmd_mem *mem;
    uint32_t alloc_count, bytes_per_warp, bytes_per_tpc;
    bool dirty = false;
@@ -271,7 +271,7 @@ nvk_queue_submit_exec(struct nvk_queue *queue,
                       struct vk_queue_submit *submit)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    const bool sync = pdev->debug_flags & NVK_DEBUG_PUSH_SYNC;
@@ -388,7 +388,7 @@ nvk_queue_submit_simple(struct nvk_queue *queue,
                         uint32_t dw_count, const uint32_t *dw)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    if (vk_queue_is_lost(&queue->vk))
@@ -434,7 +434,7 @@ static VkResult
 nvk_queue_init_context_state(struct nvk_queue *queue)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    uint32_t push_data[4096];
@@ -469,17 +469,47 @@ nvk_queue_init_context_state(struct nvk_queue *queue)
    return nvk_queue_submit_simple(queue, nv_push_dw_count(&push), push_data);
 }
 
+static VkQueueGlobalPriority
+get_queue_global_priority(const VkDeviceQueueCreateInfo *pCreateInfo)
+{
+   const VkDeviceQueueGlobalPriorityCreateInfo *priority_info =
+      vk_find_struct_const(pCreateInfo->pNext,
+                           DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO);
+   if (priority_info == NULL)
+      return VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+
+   return priority_info->globalPriority;
+}
+
 VkResult
 nvk_queue_init(struct nvk_device *dev, struct nvk_queue *queue,
                const VkDeviceQueueCreateInfo *pCreateInfo,
                uint32_t index_in_family)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    assert(pCreateInfo->queueFamilyIndex < pdev->queue_family_count);
    const struct nvk_queue_family *queue_family =
       &pdev->queue_families[pCreateInfo->queueFamilyIndex];
+
+   const VkQueueGlobalPriority global_priority =
+      get_queue_global_priority(pCreateInfo);
+
+   /* From the Vulkan 1.3.295 spec:
+    *
+    *    "If the globalPriorityQuery feature is enabled and the requested
+    *    global priority is not reported via
+    *    VkQueueFamilyGlobalPriorityPropertiesKHR, the driver implementation
+    *    must fail the queue creation. In this scenario,
+    *    VK_ERROR_INITIALIZATION_FAILED is returned."
+    */
+   if (dev->vk.enabled_features.globalPriorityQuery &&
+       global_priority != VK_QUEUE_GLOBAL_PRIORITY_MEDIUM)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   if (global_priority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM)
+      return VK_ERROR_NOT_PERMITTED;
 
    result = vk_queue_init(&queue->vk, &dev->vk, pCreateInfo, index_in_family);
    if (result != VK_SUCCESS)

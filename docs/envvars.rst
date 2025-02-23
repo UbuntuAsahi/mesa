@@ -200,10 +200,11 @@ Core Mesa environment variables
 .. envvar:: MESA_SHADER_CACHE_DIR
 
    if set, determines the directory to be used for the on-disk cache of
-   compiled shader programs. If this variable is not set, then the cache
-   will be stored in ``$XDG_CACHE_HOME/mesa_shader_cache_db`` (if that
-   variable is set), or else within ``.cache/mesa_shader_cache_db`` within
-   the user's home directory.
+   compiled shader programs. If set then the cache will be stored in
+   ``$MESA_SHADER_CACHE_DIR/mesa_shader_cache_db``. If this variable is not
+   set, then the cache will be stored in
+   ``$XDG_CACHE_HOME/mesa_shader_cache_db`` (if that variable is set), or else
+   within ``.cache/mesa_shader_cache_db`` within the user's home directory.
 
 .. envvar:: MESA_SHADER_CACHE_SHOW_STATS
 
@@ -218,9 +219,10 @@ Core Mesa environment variables
    cache DBs via :envvar:`MESA_DISK_CACHE_READ_ONLY_FOZ_DBS` or
    :envvar:`MESA_DISK_CACHE_READ_ONLY_FOZ_DBS_DYNAMIC_LIST`. This
    implementation does not support cache size limits via
-   :envvar:`MESA_SHADER_CACHE_MAX_SIZE`. If
-   :envvar:`MESA_SHADER_CACHE_DIR` is not set, the cache will be stored
-   in ``$XDG_CACHE_HOME/mesa_shader_cache_sf`` (if that variable is set)
+   :envvar:`MESA_SHADER_CACHE_MAX_SIZE`. If :envvar:`MESA_SHADER_CACHE_DIR`
+   is set, the cache will be stored in
+   ``$MESA_SHADER_CACHE_DIR/mesa_shader_cache_sf``, or else within
+   ``$XDG_CACHE_HOME/mesa_shader_cache_sf`` (if that variable is set)
    or else within ``.cache/mesa_shader_cache_sf`` within the user's home
    directory.
 
@@ -229,8 +231,9 @@ Core Mesa environment variables
    if set to 1, enables the multi file on-disk shader cache implementation
    instead of the default Mesa-DB cache implementation.
    This implementation increases the overall disk usage.
-   If :envvar:`MESA_SHADER_CACHE_DIR` is not set, the cache will be stored
-   in ``$XDG_CACHE_HOME/mesa_shader_cache`` (if that variable is set)
+   If :envvar:`MESA_SHADER_CACHE_DIR` is set, the cache will be stored in
+   ``$MESA_SHADER_CACHE_DIR/mesa_shader_cache``, or else within
+   ``$XDG_CACHE_HOME/mesa_shader_cache`` (if that variable is set)
    or else within ``.cache/mesa_shader_cache`` within the user's home
    directory.
 
@@ -475,6 +478,13 @@ on Windows.
 
    if set to 1, true or yes, disables Win32 error dialogs. Useful for
    automated test-runs.
+
+.. envvar:: WGL_SWAP_INTERVAL
+
+   to set a swap interval, equivalent to calling
+   ``wglSwapIntervalEXT()`` in an application. If this environment
+   variable is set, application calls to ``wglSwapIntervalEXT()`` will
+   have no effect.
 
 Intel driver environment variables
 ----------------------------------------------------
@@ -1109,11 +1119,6 @@ Clover environment variables
 
 .. _rusticl-env-var:
 
-.. envvar:: IRIS_ENABLE_CLOVER
-
-   allows to enable experimental Clover NIR support with the iris driver if
-   set to 1 or true.
-
 Rusticl environment variables
 -----------------------------
 
@@ -1286,16 +1291,6 @@ VMware SVGA driver environment variables
    the host log feature.
 
 See the driver code for other, lesser-used variables.
-
-WGL environment variables
--------------------------
-
-.. envvar:: WGL_SWAP_INTERVAL
-
-   to set a swap interval, equivalent to calling
-   ``wglSwapIntervalEXT()`` in an application. If this environment
-   variable is set, application calls to ``wglSwapIntervalEXT()`` will
-   have no effect.
 
 VA-API environment variables
 ----------------------------
@@ -1987,6 +1982,53 @@ PowerVR driver environment variables
 .. envvar:: ROGUE_COLOR
 
    if set to ``auto`` Rogue IR will be colorized if stdout is not a pipe.
+   Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
+   Defaults to ``auto``.
+
+.. envvar:: PCO_DEBUG
+
+   A comma-separated list of named flags for the PCO compiler,
+   which control various compilation options:
+
+   ``val_skip``
+      Skip IR validation.
+
+   ``reindex``
+      Reindex IR at the end of each pass.
+
+.. envvar:: PCO_SKIP_PASSES
+
+   A comma-separated list of passes to skip.
+
+.. envvar:: PCO_PRINT
+
+   A comma-separated list of named flags for the PCO compiler,
+   which control debug printing options:
+
+   ``vs``
+      Print the IR for vertex shaders.
+   ``fs``
+      Print the IR for fragment shaders.
+   ``cs``
+      Print the IR for compute shaders.
+   ``all``
+      Print the IR for all shaders.
+   ``internal``
+      Print the IR for internal shader types.
+   ``passes``
+      Print the IR after each pass.
+   ``nir``
+      Print the resulting NIR.
+   ``binary``
+      Print the resulting binary.
+   ``verbose``
+      Print verbose IR.
+   ``ra``
+      Print register alloc info.
+
+.. envvar:: PCO_COLOR
+
+   if set to ``auto`` PCO IR will be colorized if stdout is not a pipe.
    Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
    Defaults to ``auto``.
 

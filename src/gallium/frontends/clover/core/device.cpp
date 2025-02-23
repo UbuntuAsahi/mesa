@@ -34,17 +34,6 @@
 using namespace clover;
 
 namespace {
-   template<typename T>
-   std::vector<T>
-   get_compute_param(pipe_screen *pipe, pipe_shader_ir ir_format,
-                     pipe_compute_cap cap) {
-      int sz = pipe->get_compute_param(pipe, ir_format, cap, NULL);
-      std::vector<T> v(sz / sizeof(T));
-
-      pipe->get_compute_param(pipe, ir_format, cap, &v.front());
-      return v;
-   }
-
    cl_version
    get_highest_supported_version(const device &dev) {
       // All the checks below assume that the device supports FULL_PROFILE
@@ -159,7 +148,7 @@ namespace {
 device::device(clover::platform &platform, pipe_loader_device *ldev) :
    platform(platform), clc_cache(NULL), ldev(ldev) {
    pipe = pipe_loader_create_screen(ldev, false);
-   if (pipe && pipe->get_param(pipe, PIPE_CAP_COMPUTE)) {
+   if (pipe && pipe->caps.compute) {
       const bool has_supported_ir = supports_ir(PIPE_SHADER_IR_NATIVE);
       if (has_supported_ir) {
          unsigned major = 1, minor = 1;
@@ -231,94 +220,82 @@ device::vendor_id() const {
 
 size_t
 device::max_images_read() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].max_sampler_views;
 }
 
 size_t
 device::max_images_write() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_SHADER_IMAGES);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].max_shader_images;
 }
 
 size_t
 device::max_image_buffer_size() const {
-   return pipe->get_param(pipe, PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT);
+   return pipe->caps.max_texel_buffer_elements;
 }
 
 cl_uint
 device::max_image_size() const {
-   return pipe->get_param(pipe, PIPE_CAP_MAX_TEXTURE_2D_SIZE);
+   return pipe->caps.max_texture_2d_size;
 }
 
 cl_uint
 device::max_image_size_3d() const {
-   return 1 << (pipe->get_param(pipe, PIPE_CAP_MAX_TEXTURE_3D_LEVELS) - 1);
+   return 1 << (pipe->caps.max_texture_3d_levels - 1);
 }
 
 size_t
 device::max_image_array_number() const {
-   return pipe->get_param(pipe, PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS);
+   return pipe->caps.max_texture_array_layers;
 }
 
 cl_uint
 device::max_samplers() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].max_texture_samplers;
 }
 
 cl_ulong
 device::max_mem_global() const {
-   return get_compute_param<uint64_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE)[0];
+   return pipe->compute_caps.max_global_size;
 }
 
 cl_ulong
 device::max_mem_local() const {
-   return get_compute_param<uint64_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_LOCAL_SIZE)[0];
+   return pipe->compute_caps.max_local_size;
 }
 
 cl_ulong
 device::max_mem_input() const {
-   return get_compute_param<uint64_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_INPUT_SIZE)[0];
+   return pipe->compute_caps.max_input_size;
 }
 
 cl_ulong
 device::max_const_buffer_size() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].max_const_buffer0_size;
 }
 
 cl_uint
 device::max_const_buffers() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_MAX_CONST_BUFFERS);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].max_const_buffers;
 }
 
 size_t
 device::max_threads_per_block() const {
-   return get_compute_param<uint64_t>(
-      pipe, ir_format(), PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK)[0];
+   return pipe->compute_caps.max_threads_per_block_clover;
 }
 
 cl_ulong
 device::max_mem_alloc_size() const {
-   return get_compute_param<uint64_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE)[0];
+   return pipe->compute_caps.max_mem_alloc_size;
 }
 
 cl_uint
 device::max_clock_frequency() const {
-   return get_compute_param<uint32_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY)[0];
+   return pipe->compute_caps.max_clock_frequency;
 }
 
 cl_uint
 device::max_compute_units() const {
-   return get_compute_param<uint32_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS)[0];
+   return pipe->compute_caps.max_compute_units;
 }
 
 cl_uint
@@ -328,8 +305,7 @@ device::max_printf_buffer_size() const {
 
 bool
 device::image_support() const {
-   bool supports_images = get_compute_param<uint32_t>(pipe, ir_format(),
-                                                      PIPE_COMPUTE_CAP_IMAGES_SUPPORTED)[0];
+   bool supports_images = pipe->compute_caps.images_supported;
    if (!supports_images)
       return false;
 
@@ -353,25 +329,23 @@ device::has_doubles() const {
          (nir_shader_compiler_options *)pipe->get_compiler_options(pipe,
                                                                    PIPE_SHADER_IR_NIR,
                                                                    PIPE_SHADER_COMPUTE);
-   return pipe->get_param(pipe, PIPE_CAP_DOUBLES) &&
+   return pipe->caps.doubles &&
          !(options->lower_doubles_options & nir_lower_fp64_full_software);
 }
 
 bool
 device::has_halves() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_FP16);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].fp16;
 }
 
 bool
 device::has_int64_atomics() const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_INT64_ATOMICS);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].int64_atomics;
 }
 
 bool
 device::has_unified_memory() const {
-   return pipe->get_param(pipe, PIPE_CAP_UMA);
+   return pipe->caps.uma;
 }
 
 size_t
@@ -398,7 +372,7 @@ device::svm_support() const {
    //
    // Another unsolvable scenario is a cl_mem object passed by cl_mem reference
    // and SVM pointer into the same kernel at the same time.
-   if (allows_user_pointers() && pipe->get_param(pipe, PIPE_CAP_SYSTEM_SVM))
+   if (allows_user_pointers() && pipe->caps.system_svm)
       // we can emulate all lower levels if we support fine grain system
       return CL_DEVICE_SVM_FINE_GRAIN_SYSTEM |
              CL_DEVICE_SVM_COARSE_GRAIN_BUFFER |
@@ -408,21 +382,19 @@ device::svm_support() const {
 
 bool
 device::allows_user_pointers() const {
-   return pipe->get_param(pipe, PIPE_CAP_RESOURCE_FROM_USER_MEMORY) ||
-          pipe->get_param(pipe, PIPE_CAP_RESOURCE_FROM_USER_MEMORY_COMPUTE_ONLY);
+   return pipe->caps.resource_from_user_memory ||
+          pipe->caps.resource_from_user_memory_compute_only;
 }
 
 std::vector<size_t>
 device::max_block_size() const {
-   auto v = get_compute_param<uint64_t>(pipe, ir_format(),
-                                        PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE);
-   return { v.begin(), v.end() };
+   auto v = pipe->compute_caps.max_block_size_clover;
+   return {v[0], v[1], v[2]};
 }
 
 cl_uint
 device::subgroup_size() const {
-   cl_uint subgroup_sizes =
-      get_compute_param<uint32_t>(pipe, ir_format(), PIPE_COMPUTE_CAP_SUBGROUP_SIZES)[0];
+   cl_uint subgroup_sizes = pipe->compute_caps.subgroup_sizes;
    if (!subgroup_sizes)
       return 0;
    return 1 << (util_last_bit(subgroup_sizes) - 1);
@@ -430,8 +402,7 @@ device::subgroup_size() const {
 
 cl_uint
 device::address_bits() const {
-   return get_compute_param<uint32_t>(pipe, ir_format(),
-                                      PIPE_COMPUTE_CAP_ADDRESS_BITS)[0];
+   return pipe->compute_caps.address_bits;
 }
 
 std::string
@@ -452,14 +423,12 @@ device::ir_format() const {
 
 std::string
 device::ir_target() const {
-   std::vector<char> target = get_compute_param<char>(
-      pipe, ir_format(), PIPE_COMPUTE_CAP_IR_TARGET);
-   return { target.data() };
+   return pipe->compute_caps.ir_target;
 }
 
 enum pipe_endian
 device::endianness() const {
-   return (enum pipe_endian)pipe->get_param(pipe, PIPE_CAP_ENDIANNESS);
+   return pipe->caps.endianness;
 }
 
 std::string
@@ -488,8 +457,7 @@ device::device_clc_version_as_string() const {
 
 bool
 device::supports_ir(enum pipe_shader_ir ir) const {
-   return pipe->get_shader_param(pipe, PIPE_SHADER_COMPUTE,
-                                 PIPE_SHADER_CAP_SUPPORTED_IRS) & (1 << ir);
+   return pipe->shader_caps[PIPE_SHADER_COMPUTE].supported_irs & (1 << ir);
 }
 
 std::vector<cl_name_version>

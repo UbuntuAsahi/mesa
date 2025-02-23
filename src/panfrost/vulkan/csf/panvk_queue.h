@@ -30,18 +30,28 @@ struct panvk_tiler_heap {
    struct panvk_priv_mem desc;
    struct {
       uint32_t handle;
-      mali_ptr dev_addr;
+      uint64_t dev_addr;
    } context;
 };
 
 struct panvk_subqueue {
    struct panvk_priv_mem context;
    uint32_t *reg_file;
+
+   struct {
+      struct pan_kmod_bo *bo;
+      size_t size;
+      struct {
+         uint64_t dev;
+         void *host;
+      } addr;
+   } tracebuf;
 };
 
 struct panvk_desc_ringbuf {
    struct panvk_priv_mem syncobj;
    struct pan_kmod_bo *bo;
+   size_t size;
    struct {
       uint64_t dev;
       void *host;
@@ -59,6 +69,11 @@ struct panvk_queue {
    struct panvk_priv_mem syncobjs;
    struct panvk_priv_mem debug_syncobjs;
    struct panvk_priv_mem tiler_oom_regs_save;
+
+   struct {
+      struct vk_sync *sync;
+      uint64_t next_value;
+   } utrace;
 
    struct panvk_subqueue subqueues[PANVK_SUBQUEUE_COUNT];
 };

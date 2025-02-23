@@ -11,6 +11,7 @@
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/timespec.h"
+#include "util/u_printf.h"
 #include "util/vma.h"
 #include "agx_bo.h"
 #include "agx_pack.h"
@@ -95,9 +96,6 @@ typedef struct {
 struct agx_device {
    uint32_t debug;
 
-   /* NIR library of AGX helpers/shaders. Immutable once created. */
-   const struct nir_shader *libagx;
-
    /* Precompiled libagx binary table */
    const uint32_t **libagx_programs;
 
@@ -172,6 +170,8 @@ struct agx_device {
       uint64_t num;
       uint64_t den;
    } user_timestamp_to_ns;
+
+   struct u_printf_ctx printf;
 };
 
 static inline void *
@@ -244,7 +244,7 @@ struct agx_device_key agx_gather_device_key(struct agx_device *dev);
 struct agx_va *agx_va_alloc(struct agx_device *dev, uint64_t size_B,
                             uint64_t align_B, enum agx_va_flags flags,
                             uint64_t fixed_va);
-void agx_va_free(struct agx_device *dev, struct agx_va *va);
+void agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
 
 static inline bool
 agx_supports_timestamps(const struct agx_device *dev)

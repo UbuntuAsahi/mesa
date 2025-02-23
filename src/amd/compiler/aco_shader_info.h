@@ -65,8 +65,15 @@ struct aco_ps_epilog_info {
    uint16_t color_types;
    bool clamp_color;
    bool skip_null_export;
-   unsigned broadcast_last_cbuf;
+   bool writes_all_cbufs;
    enum compare_func alpha_func;
+   /* Depth/stencil/samplemask are always passed via VGPRs, and the epilog key can choose
+    * not to export them using these flags, which can be dynamic states.
+    */
+   bool kill_depth;
+   bool kill_stencil;
+   bool kill_samplemask;
+
    struct ac_arg alpha_reference;
    struct ac_arg depth;
    struct ac_arg stencil;
@@ -85,6 +92,9 @@ struct aco_ps_prolog_info {
    bool force_linear_center_interp;
 
    unsigned samplemask_log_ps_iter;
+   bool get_frag_coord_from_pixel_coord;
+   bool pixel_center_integer;
+   bool force_samplemask_to_helper_invocation;
    unsigned num_interp_inputs;
    unsigned colors_read;
    int color_interp_vgpr_index[2];
@@ -98,8 +108,7 @@ struct aco_ps_prolog_info {
 struct aco_shader_info {
    enum ac_hw_stage hw_stage;
    uint8_t wave_size;
-   bool has_ngg_culling;
-   bool has_ngg_early_prim_export;
+   bool schedule_ngg_pos_exports; /* Whether we should schedule position exports up or not. */
    bool image_2d_view_of_3d;
    unsigned workgroup_size;
    bool merged_shader_compiled_separately; /* GFX9+ */
@@ -107,7 +116,7 @@ struct aco_shader_info {
    struct ac_arg epilog_pc; /* Vulkan only */
    struct {
       bool tcs_in_out_eq;
-      uint64_t tcs_temp_only_input_mask;
+      bool any_tcs_inputs_via_lds;
       bool has_prolog;
    } vs;
    struct {

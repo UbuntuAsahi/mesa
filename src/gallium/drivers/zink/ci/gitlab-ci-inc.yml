@@ -40,6 +40,15 @@
     - !reference [.venus-rules, rules]
     - !reference [.zink-common-rules, rules]
 
+.zink-venus-lvp-manual-rules:
+  stage: layered-backends-postmerge
+  extends: .no-auto-retry
+  rules:
+    - !reference [.test, rules]
+    - !reference [.lavapipe-manual-rules, rules]
+    - !reference [.venus-manual-rules, rules]
+    - !reference [.zink-common-manual-rules, rules]
+
 .zink-anv-rules:
   stage: layered-backends
   rules:
@@ -100,7 +109,7 @@
   extends: .no-auto-retry
   rules:
     - !reference [.test, rules]
-    - !reference [.valve-freedreno-turnip-manual-rules, rules]
+    - !reference [.valve-turnip-manual-rules, rules]
     - !reference [.zink-common-manual-rules, rules]
 
 .zink-radv-rules:
@@ -188,9 +197,24 @@
     VK_DRIVER: intel
     GPU_VERSION: zink-anv-tgl
 
+.zink-anv-tgl-trace-test:
+  extends:
+    - .lava-piglit-traces:x86_64
+    - .lava-acer-cp514-2h-1130g7-volteer:x86_64
+    - .anv-test
+    - .zink-anv-rules
+    - .zink-trace-test
+    # Add .lava-traces-base again to override .anv-test setting the
+    # HWCI_TEST_SCRIPT, but .lava-piglit-traces having to come first to get
+    # dependencies right.
+    - .lava-traces-base
+  variables:
+    VK_DRIVER: intel
+    GPU_VERSION: zink-anv-tgl
+
 .zink-nvk-test-valve:
   extends:
-    - .b2c-x86_64-test-gl
+    - .b2c-x86_64-test-gl-manual
     - .nvk-vkcts
     - .zink-test
   variables:

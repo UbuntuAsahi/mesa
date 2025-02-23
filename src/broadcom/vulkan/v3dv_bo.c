@@ -27,6 +27,7 @@
 #include <sys/mman.h>
 
 #include "drm-uapi/v3d_drm.h"
+#include "util/perf/cpu_trace.h"
 #include "util/u_memory.h"
 
 /* Default max size of the bo cache, in MB.
@@ -157,7 +158,7 @@ bo_free(struct v3dv_device *device,
    struct drm_gem_close c;
    memset(&c, 0, sizeof(c));
    c.handle = handle;
-   int ret = v3dv_ioctl(device->pdevice->render_fd, DRM_IOCTL_GEM_CLOSE, &c);
+   int ret = v3d_ioctl(device->pdevice->render_fd, DRM_IOCTL_GEM_CLOSE, &c);
    if (ret != 0)
       mesa_loge("close object %d: %s\n", handle, strerror(errno));
 
@@ -238,20 +239,16 @@ v3dv_bo_alloc(struct v3dv_device *device,
       }
    }
 
- retry:
-   ;
-
-   bool cleared_and_retried = false;
    struct drm_v3d_create_bo create = {
       .size = size
    };
 
-   int ret = v3dv_ioctl(device->pdevice->render_fd,
-                        DRM_IOCTL_V3D_CREATE_BO, &create);
+   int ret;
+retry:
+   ret = v3d_ioctl(device->pdevice->render_fd,
+                   DRM_IOCTL_V3D_CREATE_BO, &create);
    if (ret != 0) {
-      if (!list_is_empty(&device->bo_cache.time_list) &&
-          !cleared_and_retried) {
-         cleared_and_retried = true;
+      if (!list_is_empty(&device->bo_cache.time_list)) {
          bo_cache_free_all(device, true);
          goto retry;
       }
@@ -291,8 +288,8 @@ v3dv_bo_map_unsynchronized(struct v3dv_device *device,
    struct drm_v3d_mmap_bo map;
    memset(&map, 0, sizeof(map));
    map.handle = bo->handle;
-   int ret = v3dv_ioctl(device->pdevice->render_fd,
-                        DRM_IOCTL_V3D_MMAP_BO, &map);
+   int ret = v3d_ioctl(device->pdevice->render_fd,
+                       DRM_IOCTL_V3D_MMAP_BO, &map);
    if (ret != 0) {
       mesa_loge("map ioctl failure\n");
       return false;
@@ -317,12 +314,13 @@ v3dv_bo_wait(struct v3dv_device *device,
              struct v3dv_bo *bo,
              uint64_t timeout_ns)
 {
+   MESA_TRACE_FUNC();
    struct drm_v3d_wait_bo wait = {
       .handle = bo->handle,
       .timeout_ns = timeout_ns,
    };
-   return v3dv_ioctl(device->pdevice->render_fd,
-                     DRM_IOCTL_V3D_WAIT_BO, &wait) == 0;
+   return v3d_ioctl(device->pdevice->render_fd,
+                    DRM_IOCTL_V3D_WAIT_BO, &wait) == 0;
 }
 
 bool

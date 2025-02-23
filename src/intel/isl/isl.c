@@ -1744,7 +1744,9 @@ isl_choose_miptail_start_level(const struct isl_device *dev,
       return 15;
    }
 
-   if (info->dim == ISL_SURF_DIM_3D &&
+   if ((ISL_GFX_VER(dev) == 9 ||
+        intel_needs_workaround(dev->info, 1207137018)) &&
+       info->dim == ISL_SURF_DIM_3D &&
        isl_tiling_is_std_y(tile_info->tiling) &&
        _isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
       /* From the workarounds section in the SKL PRM:
@@ -3946,6 +3948,17 @@ isl_surf_get_uncompressed_surf(const struct isl_device *dev,
          .d = view_depth_el  > 1 ? view_depth_el  << ucompr_level : 1,
       };
 
+      isl_surf_usage_flags_t usage = surf->usage;
+      /* CCS-enabled surfaces can have different layout requirements than
+       * surfaces without CCS support. So, for accuracy, disable CCS
+       * support if the original surface lacked it.
+       */
+      if (_isl_surf_info_supports_ccs(dev, surf->format, surf->usage) !=
+          _isl_surf_info_supports_ccs(dev, view_format, usage)) {
+         assert(_isl_surf_info_supports_ccs(dev, view_format, usage));
+         usage |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
+      }
+
       bool ok UNUSED;
       ok = isl_surf_init(dev, ucompr_surf,
                          .dim = surf->dim,
@@ -3959,7 +3972,7 @@ isl_surf_get_uncompressed_surf(const struct isl_device *dev,
                          .min_miptail_start_level =
                             (int) (view->base_level < surf->miptail_start_level),
                          .row_pitch_B = surf->row_pitch_B,
-                         .usage = surf->usage,
+                         .usage = usage,
                          .tiling_flags = (1u << surf->tiling));
       assert(ok);
 

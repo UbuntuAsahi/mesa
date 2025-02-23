@@ -19,7 +19,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- * 
+ *
  * Authors:
  *    Mike Blumenkrantz <michael.blumenkrantz@gmail.com>
  */
@@ -29,7 +29,8 @@
 
 #include <vulkan/vulkan_core.h>
 
-#include "compiler/nir/nir.h"
+#include "compiler/nir/nir_defines.h"
+#include "compiler/nir/nir_shader_compiler_options.h"
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
@@ -38,6 +39,7 @@
 #include "pipebuffer/pb_cache.h"
 #include "pipebuffer/pb_slab.h"
 
+#include "util/blob.h"
 #include "util/disk_cache.h"
 #include "util/hash_table.h"
 #include "util/list.h"
@@ -100,15 +102,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
- 
+
 extern uint32_t zink_debug;
 extern bool zink_tracing;
- 
+
 #ifdef __cplusplus
 }
 #endif
 
- 
+
 /** enums */
 
 /* features for draw/program templates */
@@ -753,6 +755,7 @@ struct zink_shader_info {
    bool have_sparse;
    bool have_vulkan_memory_model;
    bool have_workgroup_memory_explicit_layout;
+   bool broken_arbitary_type_const;
    struct {
       uint8_t flush_denorms:3; // 16, 32, 64
       uint8_t preserve_denorms:3; // 16, 32, 64
@@ -1460,7 +1463,7 @@ struct zink_screen {
    uint64_t mapped_vram;
 
    VkInstance instance;
-   struct zink_instance_info instance_info;
+   const struct zink_instance_info *instance_info;
 
    struct hash_table *debug_mem_sizes;
    simple_mtx_t debug_mem_lock;
@@ -1479,6 +1482,7 @@ struct zink_screen {
    bool have_D24_UNORM_S8_UINT;
    bool have_D32_SFLOAT_S8_UINT;
    bool have_triangle_fans;
+   bool have_dynamic_state_vertex_input_binding_stride;
    bool need_decompose_attrs;
    bool need_2D_zs;
    bool need_2D_sparse;
@@ -1534,6 +1538,7 @@ struct zink_screen {
       bool needs_zs_shader_swizzle;
       bool needs_sanitised_layer;
       bool io_opt;
+      bool broken_const;
    } driver_compiler_workarounds;
    struct {
       bool broken_l4a4;

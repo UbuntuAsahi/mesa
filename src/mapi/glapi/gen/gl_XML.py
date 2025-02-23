@@ -40,17 +40,6 @@ def parse_GL_API(file_name, factory=None, pointer_size=0):
 
     api = factory.create_api(pointer_size)
     api.parse_file(file_name)
-
-    # After the XML has been processed, we need to go back and assign
-    # dispatch offsets to the functions that request that their offsets
-    # be assigned by the scripts.  Typically this means all functions
-    # that are not part of the ABI.
-
-    for func in api.functionIterateByCategory():
-        if func.assign_offset and func.offset < 0:
-            func.offset = api.next_offset;
-            api.next_offset += 1
-
     return api
 
 
@@ -169,45 +158,6 @@ class gl_print_base(object):
 
         In the base class, this function is empty.  All derived
         classes should over-ride this function."""
-        return
-
-
-    def printPure(self):
-        """Conditionally define `PURE' function attribute.
-
-        Conditionally defines a preprocessor macro `PURE' that wraps
-        GCC's `pure' function attribute.  The conditional code can be
-        easilly adapted to other compilers that support a similar
-        feature.
-
-        The name is also added to the file's undef_list.
-        """
-        self.undef_list.append("PURE")
-        print("""#  if defined(__GNUC__) || (defined(__SUNPRO_C) && (__SUNPRO_C >= 0x590))
-#    define PURE __attribute__((pure))
-#  else
-#    define PURE
-#  endif""")
-        return
-
-
-    def printFastcall(self):
-        """Conditionally define `FASTCALL' function attribute.
-
-        Conditionally defines a preprocessor macro `FASTCALL' that
-        wraps GCC's `fastcall' function attribute.  The conditional
-        code can be easilly adapted to other compilers that support a
-        similar feature.
-
-        The name is also added to the file's undef_list.
-        """
-
-        self.undef_list.append("FASTCALL")
-        print("""#  if defined(__i386__) && defined(__GNUC__) && !defined(__CYGWIN__) && !defined(__MINGW32__)
-#    define FASTCALL __attribute__((fastcall))
-#  else
-#    define FASTCALL
-#  endif""")
         return
 
 
@@ -375,7 +325,7 @@ class gl_enum( gl_item ):
         """Calculate a 'priority' for this enum name.
 
         When an enum is looked up by number, there may be many
-        possible names, but only one is the 'prefered' name.  The
+        possible names, but only one is the 'preferred' name.  The
         priority is used to select which name is the 'best'.
 
         Highest precedence is given to core GL name.  ARB extension
@@ -638,8 +588,6 @@ class gl_function( gl_item ):
         # Decimal('1.1') }.
         self.api_map = {}
 
-        self.assign_offset = False
-
         self.static_entry_points = []
 
         # Track the parameter string (for the function prototype)
@@ -711,15 +659,11 @@ class gl_function( gl_item ):
             # Only try to set the offset when a non-alias entry-point
             # is being processed.
 
-            if name in static_data.offsets and static_data.offsets[name] <= static_data.MAX_OFFSETS:
+            if name in static_data.offsets:
                 self.offset = static_data.offsets[name]
-            elif name in static_data.offsets and static_data.offsets[name] > static_data.MAX_OFFSETS:
-                self.offset = static_data.offsets[name]
-                self.assign_offset = True
             else:
                 if self.exec_flavor != "skip":
                     raise RuntimeError("Entry-point %s is missing offset in static_data.py. Add one at the bottom of the list." % (name))
-                self.assign_offset = False
 
         if not self.name:
             self.name = true_name
@@ -828,10 +772,6 @@ class gl_function( gl_item ):
             comma = ", "
 
         return p_string
-
-
-    def is_abi(self):
-        return (self.offset >= 0 and not self.assign_offset)
 
     def is_static_entry_point(self, name):
         return name in self.static_entry_points

@@ -3,25 +3,28 @@ include:
 
 .ondracka-generic:
   extends:
-    - .b2c-x86_64-test-gl
+    - .b2c-x86_64-test-gl-manual # use debian-build-testing rather than debian-testing
     - .r300-manual-rules
   variables:
     FDO_CI_CONCURRENT: 2
     # 6.6.8 kernel with radeon driver.
     B2C_KERNEL_URL: 'https://gitlab.freedesktop.org/ondracka/boot2container/-/wikis/uploads/1733cfc7cc114d08ec785044b24314f3/linux-x86_64'
-    B2C_INITRAMFS_URL: 'https://gitlab.freedesktop.org/gfx-ci/boot2container/-/releases/v0.9.11/downloads/initramfs.linux_amd64.cpio.xz'
 
 .ondracka-rv530:
   extends:
     - .ondracka-generic
+  variables:
+    B2C_MARS_SETUP_TAGS: radeon:codename:RV530
   tags:
-    - radeon:codename:RV530
+    - $B2C_MARS_SETUP_TAGS
 
 .ondracka-rv380:
   extends:
     - .ondracka-generic
+  variables:
+    B2C_MARS_SETUP_TAGS: radeon:codename:RV380
   tags:
-    - radeon:codename:RV380
+    - $B2C_MARS_SETUP_TAGS
 
 r300-rv530-deqp-gles2:
   extends:
@@ -58,12 +61,13 @@ r300-rv410-deqp-piglit:
   extends:
     - .ondracka-generic
     - .b2c-deqp-test
-  tags:
-    - radeon:codename:RV410
   variables:
     DEQP_SUITE: r300-rv410
     GPU_VERSION: r300-rv410
     PIGLIT_PLATFORM: gbm
+    B2C_MARS_SETUP_TAGS: radeon:codename:RV410
+  tags:
+    - $B2C_MARS_SETUP_TAGS
 
 r300-rv530-piglit:
   extends:

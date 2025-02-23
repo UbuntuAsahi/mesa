@@ -11,26 +11,12 @@
 #include "radv_device_memory.h"
 #include "radv_android.h"
 #include "radv_buffer.h"
+#include "radv_debug.h"
 #include "radv_entrypoints.h"
 #include "radv_image.h"
 #include "radv_rmv.h"
 
 #include "vk_log.h"
-
-void
-radv_device_memory_init(struct radv_device_memory *mem, struct radv_device *device, struct radeon_winsys_bo *bo)
-{
-   memset(mem, 0, sizeof(*mem));
-   vk_object_base_init(&device->vk, &mem->base, VK_OBJECT_TYPE_DEVICE_MEMORY);
-
-   mem->bo = bo;
-}
-
-void
-radv_device_memory_finish(struct radv_device_memory *mem)
-{
-   vk_object_base_finish(&mem->base);
-}
 
 void
 radv_free_memory(struct radv_device *device, const VkAllocationCallbacks *pAllocator, struct radv_device_memory *mem)
@@ -57,7 +43,7 @@ radv_free_memory(struct radv_device *device, const VkAllocationCallbacks *pAlloc
    }
 
    radv_rmv_log_resource_destroy(device, (uint64_t)radv_device_memory_to_handle(mem));
-   radv_device_memory_finish(mem);
+   vk_object_base_finish(&mem->base);
    vk_free2(&device->vk.alloc, pAllocator, mem);
 }
 
@@ -95,11 +81,11 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       return VK_SUCCESS;
    }
 
-   mem = vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*mem), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   mem = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*mem), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (mem == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   radv_device_memory_init(mem, device, NULL);
+   vk_object_base_init(&device->vk, &mem->base, VK_OBJECT_TYPE_DEVICE_MEMORY);
 
    if (dedicate_info) {
       mem->image = radv_image_from_handle(dedicate_info->image);
@@ -152,7 +138,7 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    } else if (import_info) {
       assert(import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
              import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
-      result = device->ws->buffer_from_fd(device->ws, import_info->fd, priority, &mem->bo, NULL);
+      result = radv_bo_from_fd(device, import_info->fd, priority, mem, NULL);
       if (result != VK_SUCCESS) {
          goto fail;
       } else {
@@ -177,8 +163,7 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       }
    } else if (host_ptr_info) {
       assert(host_ptr_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);
-      result = device->ws->buffer_from_ptr(device->ws, host_ptr_info->pHostPointer, pAllocateInfo->allocationSize,
-                                           priority, &mem->bo);
+      result = radv_bo_from_ptr(device, host_ptr_info->pHostPointer, pAllocateInfo->allocationSize, priority, mem);
       if (result != VK_SUCCESS) {
          goto fail;
       } else {
@@ -217,6 +202,17 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       if (instance->drirc.zero_vram)
          flags |= RADEON_FLAG_ZERO_VRAM;
 
+      /* On GFX12, DCC is transparent to the userspace driver and PTE.DCC is
+       * set per buffer allocation. Only VRAM can have DCC. When the kernel
+       * moves a buffer from VRAM->GTT it decompresses. When the kernel moves
+       * it from GTT->VRAM it recompresses but only if WRITE_COMPRESS_DISABLE=0
+       * (see DCC tiling flags).
+       */
+      if (pdev->info.gfx_level >= GFX12 && pdev->info.gfx12_supports_dcc_write_compress_disable &&
+          domain == RADEON_DOMAIN_VRAM && !(instance->debug_flags & RADV_DEBUG_NO_DCC)) {
+         flags |= RADEON_FLAG_GFX12_ALLOW_DCC;
+      }
+
       if (device->overallocation_disallowed) {
          uint64_t total_size = pdev->memory_properties.memoryHeaps[heap_index].size;
 
@@ -240,6 +236,28 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
             mtx_unlock(&device->overallocation_mutex);
          }
          goto fail;
+      }
+
+      if (flags & RADEON_FLAG_GFX12_ALLOW_DCC) {
+         if (mem->image) {
+            /* Set BO metadata (including DCC tiling flags) for dedicated
+             * allocations because compressed writes are enabled and the kernel
+             * requires a DCC view for recompression.
+             */
+            radv_image_bo_set_metadata(device, mem->image, mem->bo);
+         } else {
+            /* Otherwise, disable compressed writes to prevent recompression
+             * when the BO is moved back to VRAM because it's not yet possible
+             * to set DCC tiling flags per range for suballocations. The only
+             * problem is that we will loose DCC after migration but that
+             * should happen rarely.
+             */
+            struct radeon_bo_metadata md = {0};
+
+            md.u.gfx12.dcc_write_compress_disable = true;
+
+            device->ws->buffer_set_metadata(device->ws, mem->bo, &md);
+         }
       }
 
       mem->heap_index = heap_index;
@@ -283,7 +301,7 @@ radv_FreeMemory(VkDevice _device, VkDeviceMemory _mem, const VkAllocationCallbac
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_MapMemory2KHR(VkDevice _device, const VkMemoryMapInfoKHR *pMemoryMapInfo, void **ppData)
+radv_MapMemory2(VkDevice _device, const VkMemoryMapInfo *pMemoryMapInfo, void **ppData)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_device_memory, mem, pMemoryMapInfo->memory);
@@ -314,7 +332,7 @@ radv_MapMemory2KHR(VkDevice _device, const VkMemoryMapInfoKHR *pMemoryMapInfo, v
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-radv_UnmapMemory2KHR(VkDevice _device, const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
+radv_UnmapMemory2(VkDevice _device, const VkMemoryUnmapInfo *pMemoryUnmapInfo)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    VK_FROM_HANDLE(radv_device_memory, mem, pMemoryUnmapInfo->memory);

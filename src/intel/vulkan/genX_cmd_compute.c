@@ -99,7 +99,7 @@ genX(cmd_buffer_ensure_cfe_state)(struct anv_cmd_buffer *cmd_buffer,
 }
 
 static void
-genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
    struct anv_compute_pipeline *pipeline =
@@ -189,7 +189,7 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 
       struct anv_state state =
          anv_cmd_buffer_merge_dynamic(cmd_buffer, iface_desc_data_dw,
-                                      pipeline->interface_descriptor_data,
+                                      pipeline->gfx9.interface_descriptor_data,
                                       GENX(INTERFACE_DESCRIPTOR_DATA_length),
                                       64);
 
@@ -226,6 +226,12 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
    cmd_buffer->state.compute.pipeline_dirty = false;
 
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+}
+
+void
+genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+{
+   cmd_buffer_flush_compute_state(cmd_buffer);
 }
 
 static void
@@ -292,12 +298,30 @@ anv_cmd_buffer_push_workgroups(struct anv_cmd_buffer *cmd_buffer,
 
 static void
 compute_load_indirect_params(struct anv_cmd_buffer *cmd_buffer,
-                             const struct anv_address indirect_addr)
+                             const struct anv_address indirect_addr,
+                             bool is_unaligned_size_x)
 {
    struct mi_builder b;
    mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
 
    struct mi_value size_x = mi_mem32(anv_address_add(indirect_addr, 0));
+
+   /* Convert unaligned thread invocations to aligned thread group in X
+    * dimension for unaligned shader dispatches during ray tracing phase.
+    */
+   if (is_unaligned_size_x) {
+      const uint32_t mocs = isl_mocs(&cmd_buffer->device->isl_dev, 0, false);
+      mi_builder_set_mocs(&b, mocs);
+
+      struct anv_compute_pipeline *pipeline =
+         anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
+      const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
+
+      assert(util_is_power_of_two_or_zero(prog_data->local_size[0]));
+      size_x = mi_udiv32_imm(&b, size_x, prog_data->local_size[0]);
+      size_x = mi_iadd(&b, size_x, mi_imm(1));
+   }
+
    struct mi_value size_y = mi_mem32(anv_address_add(indirect_addr, 4));
    struct mi_value size_z = mi_mem32(anv_address_add(indirect_addr, 8));
 
@@ -349,6 +373,9 @@ get_interface_descriptor_data(struct anv_cmd_buffer *cmd_buffer,
                                                       dispatch->group_size,
                                                       dispatch->simd_size),
       .NumberOfBarriers = prog_data->uses_barrier,
+#if GFX_VER >= 30
+      .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used),
+#endif
    };
 }
 
@@ -370,11 +397,24 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
 
    uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
 
+   uint64_t push_addr64 = anv_address_physical(
+      anv_state_pool_state_address(&cmd_buffer->device->general_state_pool,
+                                   comp_state->base.push_constants_state));
+
    struct GENX(COMPUTE_WALKER_BODY) body =  {
       .SIMDSize                 = dispatch_size,
+      /* HSD 14016252163: Use of Morton walk order (and batching using a batch
+       * size of 4) is expected to increase sampler cache hit rates by
+       * increasing sample address locality within a subslice.
+       */
+#if GFX_VER >= 30
+      .DispatchWalkOrder        = prog_data->uses_sampler ?
+                                  MortonWalk :
+                                  LinearWalk,
+      .ThreadGroupBatchSize     = prog_data->uses_sampler ? TG_BATCH_4 :
+                                                            TG_BATCH_1,
+#endif
       .MessageSIMD              = dispatch_size,
-      .IndirectDataStartAddress = comp_state->base.push_constants_state.offset,
-      .IndirectDataLength       = comp_state->base.push_constants_state.alloc_size,
       .GenerateLocalID          = prog_data->generate_local_id != 0,
       .EmitLocal                = prog_data->generate_local_id,
       .WalkOrder                = prog_data->walk_order,
@@ -390,6 +430,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                                        &dispatch),
       .EmitInlineParameter      = prog_data->uses_inline_data,
       .InlineData               = {
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 0]   = push_addr64 & 0xffffffff,
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 1]   = push_addr64 >> 32,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = UINT32_MAX,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = indirect_addr64 & 0xffffffff,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = indirect_addr64 >> 32,
@@ -415,15 +457,12 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                     const struct anv_compute_pipeline *pipeline,
                     struct anv_address indirect_addr,
                     const struct brw_cs_prog_data *prog_data,
+                    struct intel_cs_dispatch_info dispatch,
                     uint32_t groupCountX, uint32_t groupCountY,
                     uint32_t groupCountZ)
 {
    const struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
    const bool predicate = cmd_buffer->state.conditional_render_enabled;
-
-   const struct intel_device_info *devinfo = pipeline->base.device->info;
-   const struct intel_cs_dispatch_info dispatch =
-      brw_cs_get_dispatch_info(devinfo, prog_data, NULL);
 
    uint32_t num_workgroup_data[3];
    if (!anv_address_is_null(indirect_addr)) {
@@ -437,11 +476,13 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       num_workgroup_data[2] = groupCountZ;
    }
 
+   uint64_t push_addr64 = anv_address_physical(
+      anv_state_pool_state_address(&cmd_buffer->device->general_state_pool,
+                                   comp_state->base.push_constants_state));
+
    struct GENX(COMPUTE_WALKER_BODY) body = {
       .SIMDSize                       = dispatch.simd_size / 16,
       .MessageSIMD                    = dispatch.simd_size / 16,
-      .IndirectDataStartAddress       = comp_state->base.push_constants_state.offset,
-      .IndirectDataLength             = comp_state->base.push_constants_state.alloc_size,
       .GenerateLocalID                = prog_data->generate_local_id != 0,
       .EmitLocal                      = prog_data->generate_local_id,
       .WalkOrder                      = prog_data->walk_order,
@@ -462,6 +503,8 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
                                        prog_data, &dispatch),
       .EmitInlineParameter            = prog_data->uses_inline_data,
       .InlineData                     = {
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 0]   = push_addr64 & 0xffffffff,
+         [ANV_INLINE_PARAM_PUSH_ADDRESS_OFFSET / 4 + 1]   = push_addr64 >> 32,
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = num_workgroup_data[0],
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = num_workgroup_data[1],
          [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = num_workgroup_data[2],
@@ -520,13 +563,19 @@ static inline void
 emit_cs_walker(struct anv_cmd_buffer *cmd_buffer,
                const struct anv_compute_pipeline *pipeline,
                const struct brw_cs_prog_data *prog_data,
+               struct intel_cs_dispatch_info dispatch,
                struct anv_address indirect_addr,
-               uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+               uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ,
+               bool is_unaligned_size_x)
 {
    bool is_indirect = !anv_address_is_null(indirect_addr);
 
 #if GFX_VERx10 >= 125
-   if (is_indirect && cmd_buffer->device->info->has_indirect_unroll) {
+   /* For unaligned dispatch, we need to tweak the dispatch value with
+    * MI_MATH, so we can't use indirect HW instructions.
+    */
+   if (is_indirect && !is_unaligned_size_x &&
+       cmd_buffer->device->info->has_indirect_unroll) {
       emit_indirect_compute_walker(cmd_buffer, pipeline->cs, prog_data,
                                    indirect_addr);
       return;
@@ -534,11 +583,12 @@ emit_cs_walker(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
    if (is_indirect)
-      compute_load_indirect_params(cmd_buffer, indirect_addr);
+      compute_load_indirect_params(cmd_buffer, indirect_addr,
+            is_unaligned_size_x);
 
 #if GFX_VERx10 >= 125
    emit_compute_walker(cmd_buffer, pipeline, indirect_addr, prog_data,
-                       groupCountX, groupCountY, groupCountZ);
+                       dispatch, groupCountX, groupCountY, groupCountZ);
 #else
    emit_gpgpu_walker(cmd_buffer, pipeline, is_indirect, prog_data,
                      groupCountX, groupCountY, groupCountZ);
@@ -558,6 +608,8 @@ void genX(CmdDispatchBase)(
    struct anv_compute_pipeline *pipeline =
       anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
    const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
+   struct intel_cs_dispatch_info dispatch =
+      brw_cs_get_dispatch_info(cmd_buffer->device->info, prog_data, NULL);
 
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
@@ -574,19 +626,191 @@ void genX(CmdDispatchBase)(
                         prog_data->local_size[0] * prog_data->local_size[1] *
                         prog_data->local_size[2]);
 
-   trace_intel_begin_compute(&cmd_buffer->trace);
+   if (cmd_buffer->state.rt.debug_marker_count == 0)
+      trace_intel_begin_compute(&cmd_buffer->trace);
 
+   cmd_buffer_flush_compute_state(cmd_buffer);
+
+   if (cmd_buffer->state.conditional_render_enabled)
+      genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
+
+   emit_cs_walker(cmd_buffer, pipeline, prog_data, dispatch,
+                  ANV_NULL_ADDRESS /* no indirect data */,
+                  groupCountX, groupCountY, groupCountZ,
+                  false);
+
+   if (cmd_buffer->state.rt.debug_marker_count == 0) {
+      trace_intel_end_compute(&cmd_buffer->trace,
+                              groupCountX, groupCountY, groupCountZ,
+                              pipeline->source_hash);
+   }
+}
+
+static void
+emit_unaligned_cs_walker(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    baseGroupX,
+    uint32_t                                    baseGroupY,
+    uint32_t                                    baseGroupZ,
+    uint32_t                                    groupCountX,
+    uint32_t                                    groupCountY,
+    uint32_t                                    groupCountZ,
+    struct intel_cs_dispatch_info               dispatch)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct anv_compute_pipeline *pipeline =
+      anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
+   const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+                                  baseGroupX, baseGroupY, baseGroupZ,
+                                  groupCountX, groupCountY, groupCountZ,
+                                  ANV_NULL_ADDRESS);
+
+   /* RT shaders have Y and Z local size set to 1 always. */
+   assert(prog_data->local_size[1] == 1 && prog_data->local_size[2] == 1);
+
+   /* RT shaders dispatched with group Y and Z set to 1 always. */
+   assert(groupCountY == 1 && groupCountZ == 1);
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   anv_measure_snapshot(cmd_buffer,
+                        INTEL_SNAPSHOT_COMPUTE,
+                        "compute-unaligned-cs-walker",
+                        groupCountX * groupCountY * groupCountZ *
+                        prog_data->local_size[0] * prog_data->local_size[1] *
+                        prog_data->local_size[2]);
+
+   if (cmd_buffer->state.rt.debug_marker_count == 0)
+      trace_intel_begin_compute(&cmd_buffer->trace);
+
+   assert(!prog_data->uses_num_work_groups);
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
 
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
 
-   emit_cs_walker(cmd_buffer, pipeline, prog_data,
-                  ANV_NULL_ADDRESS /* no indirect data */,
-                  groupCountX, groupCountY, groupCountZ);
+#if GFX_VERx10 >= 125
+   emit_compute_walker(cmd_buffer, pipeline, ANV_NULL_ADDRESS, prog_data,
+                       dispatch, groupCountX, groupCountY, groupCountZ);
+#endif
 
-   trace_intel_end_compute(&cmd_buffer->trace,
-                           groupCountX, groupCountY, groupCountZ);
+   if (cmd_buffer->state.rt.debug_marker_count == 0) {
+      trace_intel_end_compute(&cmd_buffer->trace,
+                              groupCountX, groupCountY, groupCountZ,
+                              pipeline->source_hash);
+   }
+}
+
+/*
+ * Dispatch compute work item with unaligned thread invocations.
+ *
+ * This helper takes unaligned thread invocations, convert it into aligned
+ * thread group count and dispatch compute work items.
+ *
+ * We launch two CS walker, one with aligned part and another CS walker
+ * with single group for remaining thread invocations.
+ *
+ * This function is now specifically for BVH building.
+ */
+void
+genX(cmd_dispatch_unaligned)(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    invocations_x,
+    uint32_t                                    invocations_y,
+    uint32_t                                    invocations_z)
+{
+   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct anv_compute_pipeline *pipeline =
+      anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
+   const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
+
+   /* Group X can be unaligned for RT dispatches. */
+   uint32_t groupCountX = invocations_x / prog_data->local_size[0];
+   uint32_t groupCountY = invocations_y;
+   uint32_t groupCountZ = invocations_z;
+
+   struct intel_cs_dispatch_info dispatch =
+      brw_cs_get_dispatch_info(cmd_buffer->device->info, prog_data, NULL);
+
+   /* Launch first CS walker with aligned group count X. */
+   if (groupCountX) {
+      emit_unaligned_cs_walker(commandBuffer, 0, 0, 0, groupCountX,
+                               groupCountY, groupCountZ, dispatch);
+   }
+
+   uint32_t unaligned_invocations_x = invocations_x % prog_data->local_size[0];
+   if (unaligned_invocations_x) {
+      dispatch.threads = DIV_ROUND_UP(unaligned_invocations_x,
+                                      dispatch.simd_size);
+
+      /* Make sure the 2nd walker has the same amount of invocations per
+       * workgroup as the 1st walker, so that gl_GlobalInvocationsID can be
+       * calculated correctly with baseGroup.
+       */
+      assert(dispatch.threads * dispatch.simd_size == prog_data->local_size[0]);
+
+      const uint32_t remainder = unaligned_invocations_x & (dispatch.simd_size - 1);
+      if (remainder > 0) {
+         dispatch.right_mask = ~0u >> (32 - remainder);
+      } else {
+         dispatch.right_mask = ~0u >> (32 - dispatch.simd_size);
+      }
+
+      /* Launch second CS walker for unaligned part. */
+      emit_unaligned_cs_walker(commandBuffer, groupCountX, 0, 0, 1, 1, 1,
+                               dispatch);
+   }
+}
+
+/*
+ * This dispatches compute work item with indirect parameters.
+ * Helper also makes the unaligned thread invocations aligned.
+ */
+void
+genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
+                                   struct anv_address indirect_addr,
+                                   bool is_unaligned_size_x)
+{
+   struct anv_compute_pipeline *pipeline =
+      anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
+   const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
+   UNUSED struct anv_batch *batch = &cmd_buffer->batch;
+   struct intel_cs_dispatch_info dispatch =
+      brw_cs_get_dispatch_info(cmd_buffer->device->info, prog_data, NULL);
+
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+                                  0, 0, 0, 0, 0, 0, indirect_addr);
+
+   anv_measure_snapshot(cmd_buffer,
+                        INTEL_SNAPSHOT_COMPUTE,
+                        "compute indirect",
+                        0);
+
+   if (cmd_buffer->state.rt.debug_marker_count == 0)
+      trace_intel_begin_compute_indirect(&cmd_buffer->trace);
+
+   cmd_buffer_flush_compute_state(cmd_buffer);
+
+   if (cmd_buffer->state.conditional_render_enabled)
+      genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
+
+   emit_cs_walker(cmd_buffer, pipeline, prog_data, dispatch, indirect_addr, 0,
+                  0, 0, is_unaligned_size_x);
+
+   if (cmd_buffer->state.rt.debug_marker_count == 0) {
+      trace_intel_end_compute_indirect(&cmd_buffer->trace,
+                                       anv_address_utrace(indirect_addr),
+                                       pipeline->source_hash);
+   }
 }
 
 void genX(CmdDispatchIndirect)(
@@ -596,33 +820,9 @@ void genX(CmdDispatchIndirect)(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_buffer, buffer, _buffer);
-   struct anv_compute_pipeline *pipeline =
-      anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
-   const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
    struct anv_address addr = anv_address_add(buffer->address, offset);
-   UNUSED struct anv_batch *batch = &cmd_buffer->batch;
 
-   if (anv_batch_has_error(&cmd_buffer->batch))
-      return;
-
-   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
-                                  0, 0, 0, 0, 0, 0, addr);
-
-   anv_measure_snapshot(cmd_buffer,
-                        INTEL_SNAPSHOT_COMPUTE,
-                        "compute indirect",
-                        0);
-   trace_intel_begin_compute_indirect(&cmd_buffer->trace);
-
-   genX(cmd_buffer_flush_compute_state)(cmd_buffer);
-
-   if (cmd_buffer->state.conditional_render_enabled)
-      genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
-
-   emit_cs_walker(cmd_buffer, pipeline, prog_data, addr, 0, 0, 0);
-
-   trace_intel_end_compute_indirect(&cmd_buffer->trace,
-                                    anv_address_utrace(addr));
+   genX(cmd_buffer_dispatch_indirect)(cmd_buffer, addr, false);
 }
 
 struct anv_address
@@ -845,8 +1045,13 @@ cmd_buffer_emit_rt_dispatch_globals(struct anv_cmd_buffer *cmd_buffer,
          .bo = rt->scratch.bo,
          .offset = rt->scratch.layout.ray_stack_start,
       },
+#if GFX_VERx10 == 300
+      .CallStackHandler   = anv_shader_bin_get_handler(
+         cmd_buffer->device->rt_trivial_return, 0),
+#else
       .CallStackHandler   = anv_shader_bin_get_bsr(
          cmd_buffer->device->rt_trivial_return, 0),
+#endif
       .AsyncRTStackSize   = rt->scratch.layout.ray_stack_stride / 64,
       .NumDSSRTStacks     = rt->scratch.layout.stack_ids_per_dss,
       .MaxBVHLevels       = BRW_RT_MAX_BVH_LEVELS,
@@ -893,8 +1098,13 @@ cmd_buffer_emit_rt_dispatch_globals_indirect(struct anv_cmd_buffer *cmd_buffer,
          .bo = rt->scratch.bo,
          .offset = rt->scratch.layout.ray_stack_start,
       },
+#if GFX_VERx10 == 300
+      .CallStackHandler   = anv_shader_bin_get_handler(
+         cmd_buffer->device->rt_trivial_return, 0),
+#else
       .CallStackHandler   = anv_shader_bin_get_bsr(
          cmd_buffer->device->rt_trivial_return, 0),
+#endif
       .AsyncRTStackSize   = rt->scratch.layout.ray_stack_stride / 64,
       .NumDSSRTStacks     = rt->scratch.layout.stack_ids_per_dss,
       .MaxBVHLevels       = BRW_RT_MAX_BVH_LEVELS,
@@ -1186,6 +1396,9 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          .BTDMode = true,
 #if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
          .ThreadPreemption = false,
+#endif
+#if GFX_VER >= 30
+         .RegistersPerThread = ptl_register_blocks(cs_prog_data->base.grf_used),
 #endif
       },
    };

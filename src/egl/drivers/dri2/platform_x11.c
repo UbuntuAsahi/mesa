@@ -1765,7 +1765,7 @@ check_xshm(struct dri2_egl_display *dri2_dpy)
    shm_cookie = xcb_query_extension(dri2_dpy->conn, 7, "MIT-SHM");
    shm_reply = xcb_query_extension_reply(dri2_dpy->conn, shm_cookie, NULL);
 
-   has_mit_shm = shm_reply->present;
+   has_mit_shm = shm_reply && shm_reply->present;
    free(shm_reply);
    if (!has_mit_shm)
       return false;
@@ -1789,8 +1789,7 @@ dri2_x11_check_multibuffers(_EGLDisplay *disp)
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
 #ifdef HAVE_X11_DRM
-   bool err;
-   dri2_dpy->multibuffers_available = x11_dri3_check_multibuffer(dri2_dpy->conn, &err, &dri2_dpy->explicit_modifiers);
+   dri2_dpy->multibuffers_available = x11_dri3_has_multibuffer(dri2_dpy->conn);
 
    if (disp->Options.Zink && !disp->Options.ForceSoftware &&
        !dri2_dpy->multibuffers_available &&

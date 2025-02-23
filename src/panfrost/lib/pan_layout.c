@@ -32,7 +32,8 @@
  * List of supported modifiers, in descending order of preference. AFBC is
  * faster than u-interleaved tiling which is faster than linear. Within AFBC,
  * enabling the YUV-like transform is typically a win where possible.
- * AFRC is only used if explicitely asked for (only for RGB formats).
+ * AFRC is only used if explicitly asked for (only for RGB formats).
+ * Similarly MTK 16L32 is only used if explicitly asked for.
  */
 uint64_t pan_best_modifiers[PAN_MODIFIER_COUNT] = {
    DRM_FORMAT_MOD_ARM_AFBC(AFBC_FORMAT_MOD_BLOCK_SIZE_32x8 |
@@ -73,6 +74,8 @@ uint64_t pan_best_modifiers[PAN_MODIFIER_COUNT] = {
    DRM_FORMAT_MOD_ARM_AFRC(
       AFRC_FORMAT_MOD_CU_SIZE_P0(AFRC_FORMAT_MOD_CU_SIZE_32) |
       AFRC_FORMAT_MOD_LAYOUT_SCAN),
+
+   DRM_FORMAT_MOD_MTK_16L_32S_TILE,
 };
 
 /* Table of AFBC superblock sizes */
@@ -675,7 +678,17 @@ void
 pan_iview_get_surface(const struct pan_image_view *iview, unsigned level,
                       unsigned layer, unsigned sample, struct pan_surface *surf)
 {
-   const struct pan_image *image = pan_image_view_get_plane(iview, 0);
+   const struct util_format_description *fdesc =
+      util_format_description(iview->format);
+
+
+   /* In case of multiplanar depth/stencil, the stencil is always on
+    * plane 1. Combined depth/stencil only has one plane, so depth
+    * will be on plane 0 in either case.
+    */
+   const struct pan_image *image = util_format_has_stencil(fdesc)
+      ? pan_image_view_get_s_plane(iview)
+      : pan_image_view_get_plane(iview, 0);
 
    level += iview->first_level;
    assert(level < image->layout.nr_slices);
@@ -684,7 +697,7 @@ pan_iview_get_surface(const struct pan_image_view *iview, unsigned level,
 
    bool is_3d = image->layout.dim == MALI_TEXTURE_DIMENSION_3D;
    const struct pan_image_slice_layout *slice = &image->layout.slices[level];
-   mali_ptr base = image->data.base + image->data.offset;
+   uint64_t base = image->data.base + image->data.offset;
 
    if (drm_is_afbc(image->layout.modifier)) {
       assert(!sample);

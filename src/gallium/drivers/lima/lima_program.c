@@ -64,13 +64,14 @@ static const nir_shader_compiler_options vs_nir_options = {
    .force_indirect_unrolling_sampler = true,
    .max_unroll_iterations = 32,
    .no_integers = true,
+   .support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
    .max_varying_expression_cost = 2,
 };
 
 static const nir_shader_compiler_options fs_nir_options = {
-   .lower_ffma16 = true,
-   .lower_ffma32 = true,
-   .lower_ffma64 = true,
+   .fuse_ffma16 = true,
+   .fuse_ffma32 = true,
+   .fuse_ffma64 = true,
    .lower_fpow = true,
    .lower_fdiv = true,
    .lower_fmod = true,
@@ -87,6 +88,7 @@ static const nir_shader_compiler_options fs_nir_options = {
    .force_indirect_unrolling_sampler = true,
    .max_unroll_iterations = 32,
    .no_integers = true,
+   .support_indirect_inputs = (uint8_t)BITFIELD_MASK(PIPE_SHADER_TYPES),
    .max_varying_expression_cost = 2,
 };
 
@@ -152,7 +154,7 @@ lima_program_optimize_vs_nir(struct nir_shader *s)
    NIR_PASS_V(s, nir_copy_prop);
    NIR_PASS_V(s, nir_opt_dce);
    NIR_PASS_V(s, lima_nir_split_loads);
-   NIR_PASS_V(s, nir_convert_from_ssa, true);
+   NIR_PASS_V(s, nir_convert_from_ssa, true, false);
    NIR_PASS_V(s, nir_opt_dce);
    NIR_PASS_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
    nir_sweep(s);
@@ -264,12 +266,13 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
 
    /* Must be run after optimization loop */
    NIR_PASS_V(s, lima_nir_scale_trig);
+   NIR_PASS_V(s, nir_opt_algebraic_late);
    NIR_PASS_V(s, lima_nir_ppir_algebraic_late);
 
    NIR_PASS_V(s, nir_copy_prop);
    NIR_PASS_V(s, nir_opt_dce);
 
-   NIR_PASS_V(s, nir_convert_from_ssa, true);
+   NIR_PASS_V(s, nir_convert_from_ssa, true, false);
    NIR_PASS_V(s, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
    NIR_PASS_V(s, nir_move_vec_src_uses_to_dest, false);
@@ -277,6 +280,7 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
 
    NIR_PASS_V(s, nir_opt_dce); /* clean up any new dead code from vec to movs */
 
+   NIR_PASS_V(s, lima_nir_duplicate_modifiers);
    NIR_PASS_V(s, lima_nir_duplicate_load_uniforms);
    NIR_PASS_V(s, lima_nir_duplicate_load_inputs);
    NIR_PASS_V(s, lima_nir_duplicate_load_consts);

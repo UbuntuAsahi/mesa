@@ -402,7 +402,7 @@ nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
               struct vk_descriptor_set_layout * const *set_layouts,
               struct nvk_cbuf_map *cbuf_map_out)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_input_attachments,
@@ -482,6 +482,10 @@ nvk_lower_nir(struct nvk_device *dev, nir_shader *nir,
       };
    }
 
+   nir_opt_access_options opt_access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
    NIR_PASS(_, nir, nvk_nir_lower_descriptors, pdev, shader_flags, rs,
             set_layout_count, set_layouts, cbuf_map);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
@@ -540,7 +544,7 @@ nvk_shader_dump(struct nvk_shader *shader)
 #endif
 
 static VkResult
-nvk_compile_nir_with_nak(struct nvk_physical_device *pdev,
+nvk_compile_nir_with_nak(const struct nvk_physical_device *pdev,
                          nir_shader *nir,
                          VkShaderCreateFlagsEXT shader_flags,
                          const struct vk_pipeline_robustness_state *rs,
@@ -557,6 +561,10 @@ nvk_compile_nir_with_nak(struct nvk_physical_device *pdev,
       robust2_modes |= nir_var_mem_ssbo;
 
    shader->nak = nak_compile_shader(nir, dump_asm, pdev->nak, robust2_modes, fs_key);
+
+   if (!shader->nak)
+      return vk_errorf(pdev, VK_ERROR_UNKNOWN, "Internal compiler error in NAK");
+
    shader->info = shader->nak->info;
    shader->code_ptr = shader->nak->code;
    shader->code_size = shader->nak->code_size;
@@ -571,7 +579,7 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
                 const struct nak_fs_key *fs_key,
                 struct nvk_shader *shader)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    VkResult result;
 
    if (use_nak(pdev, nir->info.stage)) {
@@ -607,7 +615,7 @@ nvk_compile_nir(struct nvk_device *dev, nir_shader *nir,
 static VkResult
 nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint32_t hdr_size = 0;
    if (shader->info.stage != MESA_SHADER_COMPUTE) {
@@ -704,7 +712,7 @@ nvk_pipeline_bind_group(gl_shader_stage stage)
 }
 
 uint16_t
-nvk_max_shader_push_dw(struct nvk_physical_device *pdev,
+nvk_max_shader_push_dw(const struct nvk_physical_device *pdev,
                        gl_shader_stage stage, bool last_vtgm)
 {
    if (stage == MESA_SHADER_COMPUTE)
@@ -731,7 +739,7 @@ nvk_shader_fill_push(struct nvk_device *dev,
                      struct nvk_shader *shader,
                      const VkAllocationCallbacks* pAllocator)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    ASSERTED uint16_t max_dw_count = 0;
    uint32_t push_dw[200];
@@ -1024,7 +1032,7 @@ nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,
                        const VkAllocationCallbacks *alloc,
                        struct nvk_shader **shader_out)
 {
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const struct vk_pipeline_robustness_state rs_none = {
       .uniform_buffers = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
@@ -1034,7 +1042,8 @@ nvk_compile_nir_shader(struct nvk_device *dev, nir_shader *nir,
 
    assert(nir->info.stage == MESA_SHADER_COMPUTE);
    if (nir->options == NULL)
-      nir->options = nvk_get_nir_options(&pdev->vk, nir->info.stage, &rs_none);
+      nir->options = nvk_get_nir_options((struct vk_physical_device *)&pdev->vk,
+                                         nir->info.stage, &rs_none);
 
    struct vk_shader_compile_info info = {
       .stage = nir->info.stage,

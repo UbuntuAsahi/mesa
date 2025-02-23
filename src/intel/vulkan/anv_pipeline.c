@@ -46,87 +46,6 @@
 #include "vk_render_pass.h"
 #include "vk_util.h"
 
-struct lower_set_vtx_and_prim_count_state {
-   nir_variable *primitive_count;
-};
-
-static nir_variable *
-anv_nir_prim_count_store(nir_builder *b, nir_def *val)
-{
-   nir_variable *primitive_count =
-         nir_variable_create(b->shader,
-                             nir_var_shader_out,
-                             glsl_uint_type(),
-                             "gl_PrimitiveCountNV");
-   primitive_count->data.location = VARYING_SLOT_PRIMITIVE_COUNT;
-   primitive_count->data.interpolation = INTERP_MODE_NONE;
-
-   nir_def *local_invocation_index = nir_load_local_invocation_index(b);
-
-   nir_def *cmp = nir_ieq_imm(b, local_invocation_index, 0);
-   nir_if *if_stmt = nir_push_if(b, cmp);
-   {
-      nir_deref_instr *prim_count_deref = nir_build_deref_var(b, primitive_count);
-      nir_store_deref(b, prim_count_deref, val, 1);
-   }
-   nir_pop_if(b, if_stmt);
-
-   return primitive_count;
-}
-
-static bool
-anv_nir_lower_set_vtx_and_prim_count_instr(nir_builder *b,
-                                           nir_intrinsic_instr *intrin,
-                                           void *data)
-{
-   if (intrin->intrinsic != nir_intrinsic_set_vertex_and_primitive_count)
-      return false;
-
-   /* Detect some cases of invalid primitive count. They might lead to URB
-    * memory corruption, where workgroups overwrite each other output memory.
-    */
-   if (nir_src_is_const(intrin->src[1]) &&
-         nir_src_as_uint(intrin->src[1]) > b->shader->info.mesh.max_primitives_out) {
-      assert(!"number of primitives bigger than max specified");
-   }
-
-   struct lower_set_vtx_and_prim_count_state *state = data;
-   /* this intrinsic should show up only once */
-   assert(state->primitive_count == NULL);
-
-   b->cursor = nir_before_instr(&intrin->instr);
-
-   state->primitive_count = anv_nir_prim_count_store(b, intrin->src[1].ssa);
-
-   nir_instr_remove(&intrin->instr);
-
-   return true;
-}
-
-static bool
-anv_nir_lower_set_vtx_and_prim_count(nir_shader *nir)
-{
-   struct lower_set_vtx_and_prim_count_state state = { NULL, };
-
-   nir_shader_intrinsics_pass(nir, anv_nir_lower_set_vtx_and_prim_count_instr,
-                                nir_metadata_none,
-                                &state);
-
-   /* If we didn't find set_vertex_and_primitive_count, then we have to
-    * insert store of value 0 to primitive_count.
-    */
-   if (state.primitive_count == NULL) {
-      nir_builder b;
-      nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
-      b = nir_builder_at(nir_before_impl(entrypoint));
-      nir_def *zero = nir_imm_int(&b, 0);
-      state.primitive_count = anv_nir_prim_count_store(&b, zero);
-   }
-
-   assert(state.primitive_count != NULL);
-   return true;
-}
-
 /* Eventually, this will become part of anv_CreateShader.  Unfortunately,
  * we can't do that yet because we don't have the ability to copy nir.
  */
@@ -413,6 +332,9 @@ populate_vs_prog_key(struct anv_pipeline_stage *stage,
    memset(&stage->key, 0, sizeof(stage->key));
 
    populate_base_prog_key(stage, device);
+
+   stage->key.vs.vf_component_packing =
+      device->physical->instance->vf_component_packing;
 }
 
 static void
@@ -505,6 +427,8 @@ populate_task_prog_key(struct anv_pipeline_stage *stage,
    memset(&stage->key, 0, sizeof(stage->key));
 
    populate_base_prog_key(stage, device);
+
+   stage->key.base.uses_inline_push_addr = true;
 }
 
 static void
@@ -517,6 +441,7 @@ populate_mesh_prog_key(struct anv_pipeline_stage *stage,
    populate_base_prog_key(stage, device);
 
    stage->key.mesh.compact_mue = compact_mue;
+   stage->key.base.uses_inline_push_addr = true;
 }
 
 static uint32_t
@@ -530,6 +455,15 @@ rp_color_mask(const struct vk_render_pass_state *rp)
       if (rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
          color_mask |= BITFIELD_BIT(i);
    }
+
+   /* If there is depth/stencil attachment, even if the fragment shader
+    * doesn't write the depth/stencil output, we need a valid render target so
+    * that the compiler doesn't use the null-rt which would cull the
+    * depth/stencil output.
+    */
+   if (rp->depth_attachment_format != VK_FORMAT_UNDEFINED ||
+       rp->stencil_attachment_format != VK_FORMAT_UNDEFINED)
+      color_mask |= 1;
 
    return color_mask;
 }
@@ -633,6 +567,8 @@ populate_cs_prog_key(struct anv_pipeline_stage *stage,
    memset(&stage->key, 0, sizeof(stage->key));
 
    populate_base_prog_key(stage, device);
+
+   stage->key.base.uses_inline_push_addr = device->info->verx10 >= 125;
 }
 
 static void
@@ -960,55 +896,19 @@ print_ubo_load(nir_builder *b,
                nir_intrinsic_instr *intrin,
                UNUSED void *cb_data)
 {
-   if (intrin->intrinsic != nir_intrinsic_load_ubo)
+   if (intrin->intrinsic != nir_intrinsic_load_uniform)
       return false;
 
-   b->cursor = nir_before_instr(&intrin->instr);
-   nir_printf_fmt(b, true, 64, "ubo=> pos=%02.2fx%02.2f offset=0x%08x\n",
-                  nir_channel(b, nir_load_frag_coord(b), 0),
-                  nir_channel(b, nir_load_frag_coord(b), 1),
-                  intrin->src[1].ssa);
-
    b->cursor = nir_after_instr(&intrin->instr);
-   nir_printf_fmt(b, true, 64, "ubo<= pos=%02.2fx%02.2f offset=0x%08x val=0x%08x\n",
+   nir_printf_fmt(b, 64,
+                  "uniform<= pos=%02.2fx%02.2f offset=0x%08x val=0x%08x\n",
                   nir_channel(b, nir_load_frag_coord(b), 0),
                   nir_channel(b, nir_load_frag_coord(b), 1),
-                  intrin->src[1].ssa,
+                  intrin->src[0].ssa,
                   &intrin->def);
    return true;
 }
 #endif
-
-static bool
-print_tex_handle(nir_builder *b,
-                 nir_instr *instr,
-                 UNUSED void *cb_data)
-{
-   if (instr->type != nir_instr_type_tex)
-      return false;
-
-   nir_tex_instr *tex = nir_instr_as_tex(instr);
-
-   nir_src tex_src = {};
-   for (unsigned i = 0; i < tex->num_srcs; i++) {
-      if (tex->src[i].src_type == nir_tex_src_texture_handle)
-         tex_src = tex->src[i].src;
-   }
-
-   b->cursor = nir_before_instr(instr);
-   nir_printf_fmt(b, true, 64, "starting pos=%02.2fx%02.2f tex=0x%08x\n",
-                  nir_channel(b, nir_load_frag_coord(b), 0),
-                  nir_channel(b, nir_load_frag_coord(b), 1),
-                  tex_src.ssa);
-
-   b->cursor = nir_after_instr(instr);
-   nir_printf_fmt(b, true, 64, "done pos=%02.2fx%02.2f tex=0x%08x\n",
-                  nir_channel(b, nir_load_frag_coord(b), 0),
-                  nir_channel(b, nir_load_frag_coord(b), 1),
-                  tex_src.ssa);
-
-   return true;
-}
 
 static void
 anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
@@ -1113,9 +1013,6 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
 
-   /* Needed for anv_nir_lower_ubo_loads. */
-   nir_divergence_analysis(nir);
-
    NIR_PASS(_, nir, anv_nir_lower_ubo_loads);
 
    enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
@@ -1197,7 +1094,7 @@ anv_pipeline_lower_nir(struct anv_pipeline *pipeline,
 #if DEBUG_PRINTF_EXAMPLE
    if (stage->stage == MESA_SHADER_FRAGMENT) {
       nir_shader_intrinsics_pass(nir, print_ubo_load,
-                                 nir_metadata_control_flow,
+                                 nir_metadata_none,
                                  NULL);
    }
 #endif
@@ -2114,12 +2011,6 @@ anv_pipeline_nir_preprocess(struct anv_pipeline *pipeline,
                         stage->key.tcs.input_vertices : 0,
    };
    brw_preprocess_nir(compiler, stage->nir, &opts);
-
-   if (stage->nir->info.stage == MESA_SHADER_MESH) {
-      NIR_PASS(_, stage->nir, anv_nir_lower_set_vtx_and_prim_count);
-      NIR_PASS(_, stage->nir, nir_opt_dce);
-      NIR_PASS(_, stage->nir, nir_remove_dead_variables, nir_var_shader_out, NULL);
-   }
 
    NIR_PASS(_, stage->nir, nir_opt_barrier_modes);
 
@@ -3053,6 +2944,7 @@ anv_graphics_pipeline_import_lib(struct anv_graphics_base_pipeline *pipeline,
          continue;
 
       stages[s].stage = s;
+      stages[s].pipeline_flags = pipeline->base.flags;
       stages[s].feedback_idx = shader_count + lib->base.feedback_index[s];
       stages[s].robust_flags = lib->base.robust_flags[s];
 
@@ -3422,12 +3314,12 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
       NIR_PASS(_, nir, nir_lower_shader_calls, &opts,
                &resume_shaders, &num_resume_shaders, mem_ctx);
       NIR_PASS(_, nir, brw_nir_lower_shader_calls, &stage->key.bs);
-      NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, devinfo);
+      NIR_PASS_V(nir, brw_nir_lower_rt_intrinsics, &stage->key.base, devinfo);
    }
 
    for (unsigned i = 0; i < num_resume_shaders; i++) {
       NIR_PASS(_,resume_shaders[i], brw_nir_lower_shader_calls, &stage->key.bs);
-      NIR_PASS_V(resume_shaders[i], brw_nir_lower_rt_intrinsics, devinfo);
+      NIR_PASS_V(resume_shaders[i], brw_nir_lower_rt_intrinsics, &stage->key.base, devinfo);
    }
 
    struct brw_compile_bs_params params = {
@@ -3904,6 +3796,11 @@ anv_device_init_rt_shaders(struct anv_device *device)
       nir_shader *trampoline_nir =
          brw_nir_create_raygen_trampoline(device->physical->compiler, tmp_ctx);
 
+      if (device->info->ver >= 20)
+         trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_16;
+      else
+         trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
+
       struct brw_cs_prog_data trampoline_prog_data = {
          .uses_btd_stack_ids = true,
       };
@@ -3961,7 +3858,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
       nir_shader *trivial_return_nir =
          brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
 
-      NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics, device->info);
+      NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics,
+                 &return_key.key.base, device->info);
 
       struct brw_bs_prog_data return_prog_data = { 0, };
       struct brw_compile_bs_params params = {
@@ -4415,6 +4313,16 @@ VkResult anv_GetPipelineExecutableStatisticsKHR(
                 "pressure.");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
       stat->value.u64 = prog_data->total_scratch;
+   }
+
+   if (pipeline->device->info->ver >= 30) {
+      vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+         WRITE_STR(stat->name, "GRF registers");
+         WRITE_STR(stat->description,
+                   "Number of GRF registers required by the shader.");
+         stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+         stat->value.u64 = prog_data->grf_used;
+      }
    }
 
    vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {

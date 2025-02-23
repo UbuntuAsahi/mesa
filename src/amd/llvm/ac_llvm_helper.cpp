@@ -92,14 +92,6 @@ void ac_add_attr_alignment(LLVMValueRef val, uint64_t bytes)
    A->addAttr(Attribute::getWithAlignment(A->getContext(), Align(bytes)));
 }
 
-bool ac_is_sgpr_param(LLVMValueRef arg)
-{
-   Argument *A = unwrap<Argument>(arg);
-   AttributeList AS = A->getParent()->getAttributes();
-   unsigned ArgNo = A->getArgNo();
-   return AS.hasParamAttr(ArgNo, Attribute::InReg);
-}
-
 LLVMModuleRef ac_create_module(LLVMTargetMachineRef tm, LLVMContextRef ctx)
 {
    TargetMachine *TM = reinterpret_cast<TargetMachine *>(tm);
@@ -182,11 +174,6 @@ struct raw_memory_ostream : public raw_pwrite_stream {
    ~raw_memory_ostream()
    {
       free(buffer);
-   }
-
-   void clear()
-   {
-      written = 0;
    }
 
    void take(char *&out_buffer, size_t &out_size)
@@ -283,12 +270,7 @@ struct ac_midend_optimizer
       /* The following set of passes run on an individual function/loop first
        * before proceeding to the next.
        */
-#if LLVM_VERSION_MAJOR >= 16
       function_pm.addPass(SROAPass(SROAOptions::ModifyCFG));
-#else
-      // Old version of the code
-      function_pm.addPass(SROAPass());
-#endif
 
       loop_pm.addPass(LICMPass(LICMOptions()));
       function_pm.addPass(createFunctionToLoopPassAdaptor(std::move(loop_pm), true));
@@ -331,11 +313,7 @@ struct ac_backend_optimizer
    {
       /* add backend passes */
       if (arg_target_machine->addPassesToEmitFile(backend_pass_manager, ostream, nullptr,
-#if LLVM_VERSION_MAJOR >= 18
                                              CodeGenFileType::ObjectFile)) {
-#else
-                                             CGFT_ObjectFile)) {
-#endif
          fprintf(stderr, "amd: TargetMachine can't emit a file of this type!\n");
       }
    }

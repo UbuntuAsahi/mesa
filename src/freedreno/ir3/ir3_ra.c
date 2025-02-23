@@ -1635,9 +1635,9 @@ insert_parallel_copy_instr(struct ra_ctx *ctx, struct ir3_instruction *instr)
    if (ctx->parallel_copies_count == 0)
       return;
 
-   struct ir3_instruction *pcopy =
-      ir3_instr_create(instr->block, OPC_META_PARALLEL_COPY,
-                       ctx->parallel_copies_count, ctx->parallel_copies_count);
+   struct ir3_instruction *pcopy = ir3_instr_create_at(
+      ir3_before_instr(instr), OPC_META_PARALLEL_COPY,
+      ctx->parallel_copies_count, ctx->parallel_copies_count);
 
    for (unsigned i = 0; i < ctx->parallel_copies_count; i++) {
       struct ra_parallel_copy *entry = &ctx->parallel_copies[i];
@@ -1661,8 +1661,6 @@ insert_parallel_copy_instr(struct ra_ctx *ctx, struct ir3_instruction *instr)
       assign_reg(pcopy, reg, ra_physreg_to_num(entry->src, reg->flags));
    }
 
-   list_del(&pcopy->node);
-   list_addtail(&pcopy->node, &instr->node);
    ctx->parallel_copies_count = 0;
 }
 
@@ -2113,8 +2111,9 @@ insert_liveout_copy(struct ir3_block *block, physreg_t dst, physreg_t src,
       old_pcopy = last;
 
    unsigned old_pcopy_srcs = old_pcopy ? old_pcopy->srcs_count : 0;
-   struct ir3_instruction *pcopy = ir3_instr_create(
-      block, OPC_META_PARALLEL_COPY, old_pcopy_srcs + 1, old_pcopy_srcs + 1);
+   struct ir3_instruction *pcopy =
+      ir3_instr_create_at(ir3_before_terminator(block), OPC_META_PARALLEL_COPY,
+                          old_pcopy_srcs + 1, old_pcopy_srcs + 1);
 
    for (unsigned i = 0; i < old_pcopy_srcs; i++) {
       old_pcopy->dsts[i]->instr = pcopy;
@@ -2294,14 +2293,42 @@ handle_block(struct ra_ctx *ctx, struct ir3_block *block)
       handle_live_in(ctx, reg);
    }
 
+   /* Handle phis in two groups: first those which already have a preferred reg
+    * set and then those without. The second group should be rare but by
+    * handling them last, they don't accidentally occupy a preferred reg of
+    * another phi, preventing excessive copying in some cases.
+    */
+   bool skipped_phi = false;
+
    foreach_instr (instr, &block->instr_list) {
-      if (instr->opc == OPC_META_PHI)
-         handle_phi(ctx, instr->dsts[0]);
-      else if (instr->opc == OPC_META_INPUT ||
-               instr->opc == OPC_META_TEX_PREFETCH)
+      if (instr->opc == OPC_META_PHI) {
+         struct ir3_register *dst = instr->dsts[0];
+
+         if (dst->merge_set && dst->merge_set->preferred_reg != (physreg_t)~0) {
+            handle_phi(ctx, dst);
+         } else {
+            skipped_phi = true;
+         }
+      } else if (instr->opc == OPC_META_INPUT ||
+                 instr->opc == OPC_META_TEX_PREFETCH) {
          handle_input(ctx, instr);
-      else
+      } else {
          break;
+      }
+   }
+
+   if (skipped_phi) {
+      foreach_instr (instr, &block->instr_list) {
+         if (instr->opc == OPC_META_PHI) {
+            struct ir3_register *dst = instr->dsts[0];
+
+            if (!ctx->intervals[dst->name].interval.inserted) {
+               handle_phi(ctx, dst);
+            }
+         } else {
+            break;
+         }
+      }
    }
 
    /* After this point, every live-in/phi/input has an interval assigned to

@@ -32,7 +32,6 @@
 #include "ast.h"
 #include "glsl_parser_extras.h"
 #include "ir_optimization.h"
-#include "program.h"
 #include "standalone_scaffolding.h"
 #include "standalone.h"
 #include "util/set.h"
@@ -42,6 +41,7 @@
 #include "linker_util.h"
 #include "main/mtypes.h"
 #include "program/program.h"
+#include "nir_shader_compiler_options.h"
 
 static const struct standalone_options *options;
 

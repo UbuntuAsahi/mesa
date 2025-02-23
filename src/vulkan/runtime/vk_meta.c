@@ -30,6 +30,8 @@
 #include "vk_pipeline.h"
 #include "vk_util.h"
 
+#include "nir.h"
+
 #include "util/hash_table.h"
 
 #include <string.h>
@@ -365,9 +367,13 @@ create_rect_list_pipeline(struct vk_device *device,
 
    info_local.pDynamicState = &dyn_info;
 
-   VkResult result = disp->CreateGraphicsPipelines(_device, VK_NULL_HANDLE,
+   VkResult result = disp->CreateGraphicsPipelines(_device, meta->pipeline_cache,
                                                    1, &info_local, NULL,
                                                    pipeline_out);
+
+   ralloc_free(vs_nir_info.nir);
+   if (use_gs)
+      ralloc_free(gs_nir_info.nir);
 
    STACK_ARRAY_FINISH(dyn_state);
    STACK_ARRAY_FINISH(stages);
@@ -453,13 +459,13 @@ vk_meta_create_graphics_pipeline(struct vk_device *device,
    }
 
    VkPipeline pipeline;
-   if (info_local.pInputAssemblyState->topology ==
-       VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA) {
+   if (meta->use_rect_list_pipeline &&
+       info_local.pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_META_RECT_LIST_MESA) {
       result = create_rect_list_pipeline(device, meta,
                                          &info_local,
                                          &pipeline);
    } else {
-      result = disp->CreateGraphicsPipelines(_device, VK_NULL_HANDLE,
+      result = disp->CreateGraphicsPipelines(_device, meta->pipeline_cache,
                                              1, &info_local,
                                              NULL, &pipeline);
    }
@@ -484,7 +490,7 @@ vk_meta_create_compute_pipeline(struct vk_device *device,
    VkDevice _device = vk_device_to_handle(device);
 
    VkPipeline pipeline;
-   VkResult result = disp->CreateComputePipelines(_device, VK_NULL_HANDLE,
+   VkResult result = disp->CreateComputePipelines(_device, meta->pipeline_cache,
                                                   1, info, NULL, &pipeline);
    if (result != VK_SUCCESS)
       return result;

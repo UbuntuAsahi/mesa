@@ -6,6 +6,7 @@
  */
 
 #include "agx_compile.h"
+#include "asahi/clc/asahi_clc.h"
 #include "asahi/layout/layout.h"
 #include "compiler/nir/nir_builder.h"
 #include "util/bitset.h"
@@ -739,6 +740,8 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    enum agx_format fmt = agx_format_for_pipe(nir_intrinsic_format(instr));
    unsigned shift = nir_intrinsic_base(instr);
 
+   assert(shift <= 3);
+
    /* Zero-extend offset if we're not sign-extending */
    if (!nir_intrinsic_sign_extend(instr))
       offset = agx_abs(offset);
@@ -756,6 +759,8 @@ agx_emit_store(agx_builder *b, nir_intrinsic_instr *instr)
    agx_index offset = agx_src_index(&instr->src[2]);
    enum agx_format fmt = agx_format_for_pipe(nir_intrinsic_format(instr));
    unsigned shift = nir_intrinsic_base(instr);
+
+   assert(shift <= 3);
 
    /* Zero-extend offset if we're not sign-extending */
    if (!nir_intrinsic_sign_extend(instr))
@@ -1065,11 +1070,12 @@ agx_expand_tex_to(agx_builder *b, nir_def *def, agx_index src, bool masked)
    if (!masked)
       mask = (nir_component_mask_t)BITFIELD_MASK(nr_channels);
 
-   agx_index packed_channels[4] = {agx_null()};
-   agx_index unpacked_channels[4] = {agx_null()};
+   agx_index packed_channels[8] = {agx_null()};
+   agx_index unpacked_channels[8] = {agx_null()};
 
    /* Hardware writes the masked components contiguously, expand out for NIR */
-   agx_emit_split(b, packed_channels, src, 4 /* XXX: why not nr_channels */);
+   agx_emit_split(b, packed_channels, src,
+                  ALIGN_POT(nr_channels, 4) /* XXX: why not nr_channels */);
 
    for (unsigned i = 0; i < nr_channels; ++i) {
       unpacked_channels[i] =
@@ -1088,15 +1094,19 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
    agx_index ms_index = agx_src_index(&intr->src[2]);
    agx_index lod = agx_src_index(&intr->src[3]);
    enum agx_lod_mode lod_mode = AGX_LOD_MODE_LOD_MIN;
+   bool sparse = intr->intrinsic == nir_intrinsic_bindless_image_sparse_load;
 
    agx_index bindless = agx_immediate(0), texture;
-   if (intr->intrinsic == nir_intrinsic_bindless_image_load)
+   if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+       intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
+
       texture = agx_translate_bindless_handle(b, &intr->src[0], &bindless);
-   else if (nir_src_is_const(intr->src[0]) &&
-            nir_src_as_uint(intr->src[0]) < 0x100)
+   } else if (nir_src_is_const(intr->src[0]) &&
+              nir_src_as_uint(intr->src[0]) < 0x100) {
       texture = agx_immediate(nir_src_as_uint(intr->src[0]));
-   else
+   } else {
       texture = agx_src_index(&intr->src[0]);
+   }
 
    assert(nir_src_num_components(intr->src[1]) == 4);
    agx_index coord[4] = {
@@ -1145,12 +1155,13 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
    }
 
    agx_index coords = agx_emit_collect(b, coord_comps, coord);
-   agx_index tmp = agx_vec_temp(b->shader, dst.size, 4);
+   agx_index tmp = agx_vec_temp(b->shader, dst.size, sparse ? 8 : 4);
 
-   agx_instr *I = agx_image_load_to(
-      b, tmp, coords, lod, bindless, texture, agx_immediate(0), agx_null(),
-      agx_tex_dim(dim, is_array), lod_mode, 0, false, nir_is_coherent(intr));
-   I->mask = agx_expand_tex_to(b, &intr->def, tmp, true);
+   agx_instr *I = agx_image_load_to(b, tmp, coords, lod, bindless, texture,
+                                    agx_immediate(0), agx_null(),
+                                    agx_tex_dim(dim, is_array), lod_mode, 0,
+                                    false, sparse, nir_is_coherent(intr));
+   I->mask = agx_expand_tex_to(b, &intr->def, tmp, !sparse);
 
    b->shader->out->uses_txf = true;
    return NULL;
@@ -1431,6 +1442,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_image_load:
    case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_sparse_load:
       return agx_emit_image_load(b, dst, instr);
 
    case nir_intrinsic_image_store:
@@ -2172,8 +2184,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    agx_index coords = agx_null(), bindless = agx_immediate(0),
              texture = agx_immediate(instr->texture_index),
              sampler = agx_immediate(0), lod = agx_immediate(0),
-             compare = agx_null(), packed_offset = agx_null(),
-             min_lod = agx_null();
+             compare = agx_null(), packed_offset = agx_null();
 
    bool lod_is_zero = true;
 
@@ -2196,9 +2207,9 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
                        nir_src_as_uint(instr->src[i].src) == 0;
          break;
 
-      case nir_tex_src_min_lod:
-         assert(index.size == AGX_SIZE_16);
-         min_lod = index;
+      case nir_tex_src_lod_bias_min_agx:
+         assert(index.size == AGX_SIZE_32);
+         lod = index;
          break;
 
       case nir_tex_src_comparator:
@@ -2216,6 +2227,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       case nir_tex_src_texture_handle:
          texture =
             agx_translate_bindless_handle(b, &instr->src[i].src, &bindless);
+         break;
+
+      case nir_tex_src_min_lod:
+         assert(instr->op == nir_texop_txd && "other cases lowered");
          break;
 
       case nir_tex_src_ddx: {
@@ -2263,16 +2278,19 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       }
    }
 
-   enum agx_lod_mode lod_mode = agx_lod_mode_for_nir(
-      instr->op, nir_tex_instr_src_index(instr, nir_tex_src_bias) >= 0,
-      nir_tex_instr_src_index(instr, nir_tex_src_min_lod) >= 0, lod_is_zero);
+   bool has_min_lod =
+      nir_tex_instr_src_index(instr, nir_tex_src_lod_bias_min_agx) >= 0 ||
+      nir_tex_instr_src_index(instr, nir_tex_src_min_lod) >= 0;
+
+   bool has_bias = (has_min_lod && instr->op != nir_texop_txd) ||
+                   (nir_tex_instr_src_index(instr, nir_tex_src_bias) >= 0);
+
+   enum agx_lod_mode lod_mode =
+      agx_lod_mode_for_nir(instr->op, has_bias, has_min_lod, lod_is_zero);
 
    if (lod_mode == AGX_LOD_MODE_AUTO_LOD) {
       /* Ignored logically but asserted 0 */
       lod = agx_immediate(0);
-   } else if (lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN) {
-      /* Combine min with lod */
-      lod = agx_vec2(b, lod, min_lod);
    }
 
    agx_index dst = agx_def_index(&instr->def);
@@ -2287,12 +2305,12 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    else if (!agx_is_null(compare))
       compare_offset = compare;
 
-   agx_index tmp = agx_vec_temp(b->shader, dst.size, 4);
+   agx_index tmp = agx_vec_temp(b->shader, dst.size, instr->is_sparse ? 8 : 4);
    agx_instr *I = agx_texture_sample_to(
       b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
       agx_tex_dim(instr->sampler_dim, instr->is_array), lod_mode, 0,
       !agx_is_null(packed_offset), !agx_is_null(compare),
-      instr->op == nir_texop_lod, agx_gather_for_nir(instr));
+      instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
       I->op = AGX_OPCODE_TEXTURE_LOAD;
@@ -2302,8 +2320,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
    /* Destination masking doesn't seem to work properly for gathers (because
     * it's mostly pointless), but it does show up in the lowering of
     * textureGatherOffsets. Don't try to mask the destination for gathers.
+    *
+    * TODO: Check if it works with sparse.
     */
-   bool masked = (instr->op != nir_texop_tg4);
+   bool masked = (instr->op != nir_texop_tg4) && !instr->is_sparse;
    I->mask = agx_expand_tex_to(b, &instr->def, tmp, masked);
 }
 
@@ -2364,6 +2384,13 @@ static void
 agx_emit_jump(agx_builder *b, nir_jump_instr *instr)
 {
    agx_context *ctx = b->shader;
+
+   if (instr->type == nir_jump_halt) {
+      agx_stop(b);
+      ctx->current_block->unconditional_jumps = true;
+      return;
+   }
+
    assert(instr->type == nir_jump_break || instr->type == nir_jump_continue);
 
    /* Break out of either one or two loops */
@@ -2832,10 +2859,10 @@ agx_optimize_loop_nir(nir_shader *nir)
 bool
 agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
                      unsigned bit_size, unsigned num_components,
-                     unsigned hole_size, nir_intrinsic_instr *low,
+                     int64_t hole_size, nir_intrinsic_instr *low,
                      nir_intrinsic_instr *high, void *data)
 {
-   if (hole_size)
+   if (hole_size > 0)
       return false;
 
    /* Must be aligned to the size of the load */
@@ -3008,13 +3035,6 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size)
    NIR_PASS(_, nir, nir_lower_pack);
    NIR_PASS(_, nir, nir_opt_algebraic);
 
-   /* Lower addressing modes. The sooner we do this, the sooner we get rid of
-    * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-    * want to vectorize first since nir_opt_load_store_vectorize doesn't know
-    * how to handle our loads.
-    */
-   NIR_PASS(_, nir, agx_nir_lower_address);
-
    NIR_PASS_V(nir, nir_divergence_analysis);
    bool progress = false;
 
@@ -3026,6 +3046,14 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size)
    };
 
    NIR_PASS(progress, nir, nir_opt_uniform_atomics, true);
+
+   /* Lower addressing modes. The sooner we do this, the sooner we get rid of
+    * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
+    * want to vectorize first since nir_opt_load_store_vectorize doesn't know
+    * how to handle our loads. Likewise for uniform atomic optimization.
+    */
+   NIR_PASS(_, nir, agx_nir_lower_address);
+
    NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
    if (progress) {
       NIR_PASS(_, nir, agx_nir_lower_subgroups);
@@ -3617,22 +3645,6 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    return offset;
 }
 
-void
-agx_link_libagx(nir_shader *nir, const nir_shader *libagx)
-{
-   nir_link_shader_functions(nir, libagx);
-   NIR_PASS(_, nir, nir_inline_functions);
-   nir_remove_non_entrypoints(nir);
-   NIR_PASS(_, nir, nir_opt_deref);
-   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-   NIR_PASS(_, nir, nir_remove_dead_derefs);
-   NIR_PASS(_, nir, nir_remove_dead_variables,
-            nir_var_function_temp | nir_var_shader_temp, NULL);
-   NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
-            nir_var_shader_temp | nir_var_function_temp,
-            glsl_get_cl_type_size_align);
-}
-
 /*
  * The hardware frcp instruction is sometimes off by 1 ULP. For correctly
  * rounded frcp, a refinement step is required. This routine has been
@@ -3684,14 +3696,13 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
 
 /* Preprocess NIR independent of shader state */
 void
-agx_preprocess_nir(nir_shader *nir, const nir_shader *libagx)
+agx_preprocess_nir(nir_shader *nir)
 {
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    /* Lower large arrays to scratch and small arrays to csel */
    NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 256,
-            glsl_get_natural_size_align_bytes,
-            glsl_get_natural_size_align_bytes);
+            glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
    NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_function_temp, ~0);
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
@@ -3704,8 +3715,6 @@ agx_preprocess_nir(nir_shader *nir, const nir_shader *libagx)
 
    /* Clean up deref gunk after lowering I/O */
    NIR_PASS(_, nir, nir_opt_dce);
-
-   agx_link_libagx(nir, libagx);
 
    /* Runs before we lower away idiv, to work at all. But runs after lowering
     * textures, since the cube map array lowering generates division by 6.
@@ -3775,21 +3784,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       info->tag_write_disable = !nir->info.writes_memory;
 
-   bool needs_libagx = true /* TODO: Optimize */;
+   NIR_PASS(_, nir, nir_lower_printf_buffer, LIBAGX_PRINTF_BUFFER_ADDRESS,
+            LIBAGX_PRINTF_BUFFER_SIZE - 8);
 
    NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-
-   if (needs_libagx) {
-      agx_link_libagx(nir, key->libagx);
-
-      NIR_PASS(_, nir, nir_opt_deref);
-      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-      NIR_PASS(_, nir, nir_lower_explicit_io,
-               nir_var_shader_temp | nir_var_function_temp |
-                  nir_var_mem_shared | nir_var_mem_global,
-               nir_address_format_62bit_generic);
-   }
 
    /* Late sysval lowering creates large loads. Load lowering creates unpacks */
    nir_lower_mem_access_bit_sizes_options lower_mem_access_options = {
@@ -3799,6 +3798,13 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       .callback = mem_access_size_align_cb,
    };
    NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &lower_mem_access_options);
+
+   /* Optimize scratch access */
+   NIR_PASS(_, nir, nir_lower_scratch_to_var);
+   NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 256,
+            glsl_get_natural_size_align_bytes,
+            glsl_get_natural_size_align_bytes);
+   NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_function_temp, ~0);
 
    /* Cleanup 8-bit math before lowering */
    bool progress;

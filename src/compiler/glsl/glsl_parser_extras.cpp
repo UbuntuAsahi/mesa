@@ -33,6 +33,7 @@
 #include "util/u_atomic.h" /* for p_atomic_cmpxchg */
 #include "util/ralloc.h"
 #include "util/disk_cache.h"
+#include "util/log.h"
 #include "util/mesa-blake3.h"
 #include "ast.h"
 #include "glsl_parser_extras.h"
@@ -813,6 +814,7 @@ static const _mesa_glsl_extension _mesa_glsl_supported_extensions[] = {
    EXT(EXT_draw_buffers),
    EXT(EXT_draw_instanced),
    EXT(EXT_clip_cull_distance),
+   EXT(EXT_conservative_depth),
    EXT(EXT_geometry_point_size),
    EXT_AEP(EXT_geometry_shader),
    EXT(EXT_gpu_shader4),
@@ -1030,6 +1032,9 @@ _mesa_glsl_process_extension(const char *name, YYLTYPE *name_locp,
          }
       }
    }
+
+   if (state->OVR_multiview2_enable)
+      state->OVR_multiview_enable = true;
 
    return true;
 }
@@ -2092,6 +2097,7 @@ set_shader_inout_layout(struct gl_shader *shader,
       break;
    }
 
+   shader->view_mask = state->view_mask;
    shader->bindless_sampler = state->bindless_sampler_specified;
    shader->bindless_image = state->bindless_image_specified;
    shader->bound_sampler = state->bound_sampler_specified;
@@ -2504,7 +2510,6 @@ do_common_optimization(exec_list *ir, bool linked,
       OPT(opt_flip_matrices, ir);
 
    OPT(do_dead_code_unlinked, ir);
-   OPT(do_dead_code_local, ir);
    OPT(do_tree_grafting, ir);
    OPT(do_minmax_prune, ir);
    OPT(do_rebalance_tree, ir);

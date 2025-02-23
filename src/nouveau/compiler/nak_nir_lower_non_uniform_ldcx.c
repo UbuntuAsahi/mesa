@@ -7,6 +7,13 @@
 #include "nir_builder.h"
 #include "nir_vla.h"
 
+/*
+ * This pass relies on nak_nir_mark_lcssa_invariants being run first, because it
+ * assumes that convergent values used in convergent control flow can be
+ * allocated to uniform registers. See the example in that file for more
+ * details.
+ */
+
 static void
 lower_ldcx_to_global(nir_builder *b, nir_intrinsic_instr *load)
 {
@@ -470,7 +477,7 @@ nak_nir_lower_non_uniform_ldcx(nir_shader *nir)
    nir_builder b = nir_builder_create(impl);
 
    /* We use block indices to determine when something is a predecessor */
-   nir_metadata_require(impl, nir_metadata_block_index);
+   nir_metadata_require(impl, nir_metadata_block_index | nir_metadata_divergence);
 
    if (lower_cf_list(&b, &impl->body)) {
       nir_metadata_preserve(impl, nir_metadata_none);

@@ -134,7 +134,7 @@ nvk_CreateDescriptorSetLayout(VkDevice device,
                               VkDescriptorSetLayout *pSetLayout)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -386,7 +386,7 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
                                   VkDescriptorSetLayoutSupport *pSupport)
 {
    VK_FROM_HANDLE(nvk_device, dev, device);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
       vk_find_struct_const(pCreateInfo->pNext,
@@ -425,14 +425,8 @@ nvk_GetDescriptorSetLayoutSupport(VkDevice device,
       if (binding_flags != NULL && binding_flags->bindingCount > 0)
          flags = binding_flags->pBindingFlags[i];
 
-      switch (binding->descriptorType) {
-      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      if (vk_descriptor_type_is_dynamic(binding->descriptorType))
          dynamic_buffer_count += binding->descriptorCount;
-         break;
-      default:
-         break;
-      }
 
       const VkMutableDescriptorTypeListEXT *type_list =
          nvk_descriptor_get_type_list(binding->descriptorType,

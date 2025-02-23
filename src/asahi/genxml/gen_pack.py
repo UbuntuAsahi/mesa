@@ -395,7 +395,7 @@ class Group(object):
             convert = None
 
             args = []
-            args.append('(CONSTANT_ uint32_t *) cl')
+            args.append('(CONST uint32_t *) cl')
             args.append(str(fieldref.start))
             args.append(str(fieldref.end))
 
@@ -497,7 +497,6 @@ class Parser(object):
         self.parser = xml.parsers.expat.ParserCreate()
         self.parser.StartElementHandler = self.start_element
         self.parser.EndElementHandler = self.end_element
-        self.os = platform.system().lower()
 
         self.struct = None
         self.structs = {}
@@ -508,9 +507,6 @@ class Parser(object):
         return f'{global_prefix.upper()}_{name}'
 
     def start_element(self, name, attrs):
-        if "os" in attrs and attrs["os"] != self.os:
-            return
-
         if name == "genxml":
             print(pack_header)
         elif name == "struct":
@@ -573,7 +569,7 @@ class Parser(object):
         print("};\n")
 
     def emit_pack_function(self, name, group):
-        print("static inline void\n%s_pack(GLOBAL_ uint32_t * restrict cl,\n%sconst struct %s * restrict values)\n{" %
+        print("static inline void\n%s_pack(GLOBAL uint32_t * restrict cl,\n%sconst struct %s * restrict values)\n{" %
               (name, ' ' * (len(name) + 6), name))
 
         group.emit_pack_function()
@@ -590,7 +586,7 @@ class Parser(object):
 
     def emit_unpack_function(self, name, group):
         print("static inline bool")
-        print("%s_unpack(FILE_TYPE *fp, CONSTANT_ uint8_t * restrict cl,\n%sstruct %s * restrict values)\n{" %
+        print("%s_unpack(FILE *fp, CONST uint8_t * restrict cl,\n%sstruct %s * restrict values)\n{" %
               (name.upper(), ' ' * (len(name) + 8), name))
 
         group.emit_unpack_function()

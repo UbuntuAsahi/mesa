@@ -1468,6 +1468,13 @@ validate_ra(Program* program)
             assignments[def.tempId()].reg = def.physReg();
             assignments[def.tempId()].valid = true;
          }
+
+         int op_fixed_to_def = get_op_fixed_to_def(instr.get());
+         if (op_fixed_to_def != -1 &&
+             instr->definitions[0].physReg() != instr->operands[op_fixed_to_def].physReg()) {
+            err |= ra_fail(program, loc, Location(),
+                           "Operand %d must have the same register as definition", op_fixed_to_def);
+         }
       }
    }
 
@@ -1515,8 +1522,7 @@ validate_ra(Program* program)
             }
          }
 
-         if (!instr->isBranch() || block.linear_succs.size() != 1)
-            err |= validate_instr_defs(program, regs, assignments, loc, instr);
+         err |= validate_instr_defs(program, regs, assignments, loc, instr);
 
          if (!is_phi(instr)) {
             for (const Operand& op : instr->operands) {
@@ -1526,13 +1532,6 @@ validate_ra(Program* program)
                   for (unsigned j = 0; j < op.getTemp().bytes(); j++)
                      regs[op.physReg().reg_b + j] = 0;
                }
-            }
-         } else if (block.linear_preds.size() != 1 ||
-                    program->blocks[block.linear_preds[0]].linear_succs.size() == 1) {
-            for (unsigned pred : block.linear_preds) {
-               aco_ptr<Instruction>& br = program->blocks[pred].instructions.back();
-               assert(br->isBranch());
-               err |= validate_instr_defs(program, regs, assignments, loc, br);
             }
          }
       }

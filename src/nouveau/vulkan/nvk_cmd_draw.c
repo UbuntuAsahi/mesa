@@ -25,6 +25,7 @@
 #include "nv_push_cla097.h"
 #include "nv_push_clb097.h"
 #include "nv_push_clb197.h"
+#include "nv_push_clc197.h"
 #include "nv_push_clc397.h"
 #include "nv_push_clc597.h"
 #include "drf.h"
@@ -33,7 +34,7 @@ static inline uint16_t
 nvk_cmd_buffer_3d_cls(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    return pdev->info.cls_eng3d;
 }
 
@@ -106,7 +107,7 @@ VkResult
 nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
 {
    struct nvk_device *dev = nvk_queue_device(queue);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    /* 3D state */
    P_MTHD(p, NV9097, SET_OBJECT);
@@ -1650,7 +1651,7 @@ static void
 nvk_flush_vi_state(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
 
@@ -1781,7 +1782,8 @@ nvk_flush_ts_state(struct nvk_cmd_buffer *cmd)
 static void
 nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
 {
-   const struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
 
    const struct vk_dynamic_graphics_state *dyn =
       &cmd->vk.dynamic_graphics_state;
@@ -1890,13 +1892,16 @@ nvk_flush_vp_state(struct nvk_cmd_buffer *cmd)
    }
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_VP_SCISSORS)) {
+      const uint32_t sr_max =
+         nvk_image_max_dimension(&pdev->info, VK_IMAGE_TYPE_2D);
+
       for (unsigned i = 0; i < dyn->vp.scissor_count; i++) {
          const VkRect2D *s = &dyn->vp.scissors[i];
 
-         const uint32_t xmin = MIN2(16384, s->offset.x);
-         const uint32_t xmax = MIN2(16384, s->offset.x + s->extent.width);
-         const uint32_t ymin = MIN2(16384, s->offset.y);
-         const uint32_t ymax = MIN2(16384, s->offset.y + s->extent.height);
+         const uint32_t xmin = MIN2(sr_max, s->offset.x);
+         const uint32_t xmax = MIN2(sr_max, s->offset.x + s->extent.width);
+         const uint32_t ymin = MIN2(sr_max, s->offset.y);
+         const uint32_t ymax = MIN2(sr_max, s->offset.y + s->extent.height);
 
          P_MTHD(p, NV9097, SET_SCISSOR_ENABLE(i));
          P_NV9097_SET_SCISSOR_ENABLE(p, i, V_TRUE);
@@ -2177,8 +2182,8 @@ nvk_flush_rs_state(struct nvk_cmd_buffer *cmd)
          unreachable("Unsupported depth bias representation");
       }
       /* TODO: The blob multiplies by 2 for some reason. We don't. */
-      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant));
-      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope));
+      P_IMMD(p, NV9097, SET_DEPTH_BIAS, fui(dyn->rs.depth_bias.constant_factor));
+      P_IMMD(p, NV9097, SET_SLOPE_SCALE_DEPTH_BIAS, fui(dyn->rs.depth_bias.slope_factor));
       P_IMMD(p, NV9097, SET_DEPTH_BIAS_CLAMP, fui(dyn->rs.depth_bias.clamp));
    }
 
@@ -3300,7 +3305,7 @@ nvk_mme_bind_cbuf_desc(struct mme_builder *b)
 
    struct mme_value cb = mme_alloc_reg(b);
    mme_if(b, ieq, size, mme_zero()) {
-      /* Bottim bit is the valid bit, 8:4 are shader slot */
+      /* Bottom bit is the valid bit, 8:4 are shader slot */
       mme_merge_to(b, cb, mme_zero(), group_slot, 4, 5, 4);
    }
 
@@ -3340,7 +3345,7 @@ void
 nvk_cmd_flush_gfx_cbufs(struct nvk_cmd_buffer *cmd)
 {
    struct nvk_device *dev = nvk_cmd_buffer_device(cmd);
-   struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
    const uint32_t min_cbuf_alignment = nvk_min_cbuf_alignment(&pdev->info);
    struct nvk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
@@ -3793,18 +3798,27 @@ nvk_mme_build_draw_loop(struct mme_builder *b,
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   mme_loop(b, instance_count) {
-      mme_mthd(b, NV9097_BEGIN);
-      mme_emit(b, begin);
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
+      mme_start_loop(b, instance_count);
+   } else {
+      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+      mme_emit(b, instance_count);
+      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+   }
 
-      mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
-      mme_emit(b, first_vertex);
-      mme_emit(b, vertex_count);
+   mme_mthd(b, NV9097_BEGIN);
+   mme_emit(b, begin);
 
-      mme_mthd(b, NV9097_END);
-      mme_emit(b, mme_zero());
+   mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
+   mme_emit(b, first_vertex);
+   mme_emit(b, vertex_count);
 
+   mme_mthd(b, NV9097_END);
+   mme_emit(b, mme_zero());
+
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
       mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+      mme_end_loop(b);
    }
 
    mme_free_reg(b, begin);
@@ -3929,18 +3943,27 @@ nvk_mme_build_draw_indexed_loop(struct mme_builder *b,
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   mme_loop(b, instance_count) {
-      mme_mthd(b, NV9097_BEGIN);
-      mme_emit(b, begin);
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
+      mme_start_loop(b, instance_count);
+   } else {
+      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+      mme_emit(b, instance_count);
+      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+   }
 
-      mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
-      mme_emit(b, first_index);
-      mme_emit(b, index_count);
+   mme_mthd(b, NV9097_BEGIN);
+   mme_emit(b, begin);
 
-      mme_mthd(b, NV9097_END);
-      mme_emit(b, mme_zero());
+   mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
+   mme_emit(b, first_index);
+   mme_emit(b, index_count);
 
+   mme_mthd(b, NV9097_END);
+   mme_emit(b, mme_zero());
+
+   if (b->devinfo->cls_eng3d < PASCAL_B) {
       mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+      mme_end_loop(b);
    }
 
    mme_free_reg(b, begin);
@@ -4398,6 +4421,10 @@ nvk_mme_xfb_draw_indirect_loop(struct mme_builder *b,
 {
    struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
+   /* NVC197_BEGIN_INSTANCE_ITERATE_ENABLE seems to be incompatible with xfb.
+    * Always use an mme loop instead.
+    */
+
    mme_loop(b, instance_count) {
       mme_mthd(b, NV9097_BEGIN);
       mme_emit(b, begin);
@@ -4578,7 +4605,7 @@ nvk_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    }
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);
@@ -4618,7 +4645,7 @@ nvk_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
    P_IMMD(p, NV9097, SET_STREAM_OUTPUT, ENABLE_FALSE);
 
    for (uint32_t i = 0; i < counterBufferCount; ++i) {
-      if (pCounterBuffers[i] == VK_NULL_HANDLE)
+      if (pCounterBuffers == NULL || pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
       VK_FROM_HANDLE(nvk_buffer, buffer, pCounterBuffers[i]);

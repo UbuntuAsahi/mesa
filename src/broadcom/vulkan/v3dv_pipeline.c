@@ -33,6 +33,7 @@
 
 #include "util/u_atomic.h"
 #include "util/os_time.h"
+#include "util/perf/cpu_trace.h"
 
 #include "vk_format.h"
 #include "vk_nir_convert_ycbcr.h"
@@ -742,7 +743,7 @@ lower_image_deref(nir_builder *b,
    }
 
    if (index)
-      index = nir_umin(b, index, nir_imm_int(b, array_elements - 1));
+      nir_umin(b, index, nir_imm_int(b, array_elements - 1));
 
    uint32_t set = deref->var->data.descriptor_set;
    uint32_t binding = deref->var->data.binding;
@@ -1080,11 +1081,20 @@ enable_line_smooth(struct v3dv_pipeline *pipeline,
    if (!ls_info)
       return false;
 
-   /* Although topology is dynamic now, the topology class can't change
-    * because we don't support dynamicPrimitiveTopologyUnrestricted, so we can
-    * use the static topology from the pipeline for this.
-    */
-   switch(pipeline->topology) {
+   enum mesa_prim output_topology;
+   if (pipeline->has_gs) {
+      struct v3dv_pipeline_stage *p_stage_gs = pipeline->stages[BROADCOM_SHADER_GEOMETRY];
+      assert(p_stage_gs);
+      output_topology = p_stage_gs->nir->info.gs.output_primitive;
+   } else {
+      /* Although topology is dynamic now, the topology class can't change
+       * because we don't support dynamicPrimitiveTopologyUnrestricted, so we
+       * can use the static topology from the pipeline for this.
+       */
+      output_topology = pipeline->topology;
+   }
+
+   switch(output_topology) {
    case MESA_PRIM_LINES:
    case MESA_PRIM_LINE_LOOP:
    case MESA_PRIM_LINE_STRIP:
@@ -2816,7 +2826,7 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
       /* FIXME: right now we don't support multiViewport so viewporst[0] would
        * work now, but would need to change if we allow multiple viewports.
        */
-      v3dv_X(device, viewport_compute_xform)(&dyn->vp.viewports[0],
+      v3d_X((&device->devinfo), viewport_compute_xform)(&dyn->vp.viewports[0],
                                              v3dv_dyn->viewport.scale[0],
                                              v3dv_dyn->viewport.translate[0]);
 
@@ -2920,7 +2930,7 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    if (depth_clip_control)
       pipeline->negative_one_to_one = depth_clip_control->negativeOneToOne;
 
-   v3dv_X(device, pipeline_pack_state)(pipeline, cb_info, ds_info,
+   v3d_X((&device->devinfo), pipeline_pack_state)(pipeline, cb_info, ds_info,
                                        rs_info, pv_info, ls_info,
                                        ms_info,
                                        &pipeline_state);
@@ -2945,11 +2955,11 @@ pipeline_init(struct v3dv_pipeline *pipeline,
       vk_find_struct_const(vi_info->pNext,
                            PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT);
 
-   v3dv_X(device, pipeline_pack_compile_state)(pipeline, vi_info, vd_info);
+   v3d_X((&device->devinfo), pipeline_pack_compile_state)(pipeline, vi_info, vd_info);
 
-   if (v3dv_X(device, pipeline_needs_default_attribute_values)(pipeline)) {
+   if (v3d_X((&device->devinfo), pipeline_needs_default_attribute_values)(pipeline)) {
       pipeline->default_attribute_values =
-         v3dv_X(pipeline->device, create_default_attribute_values)(pipeline->device, pipeline);
+         v3d_X((&pipeline->device->devinfo), create_default_attribute_values)(pipeline->device, pipeline);
 
       if (!pipeline->default_attribute_values)
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -3027,6 +3037,7 @@ v3dv_CreateGraphicsPipelines(VkDevice _device,
                              const VkAllocationCallbacks *pAllocator,
                              VkPipeline *pPipelines)
 {
+   MESA_TRACE_FUNC();
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
    VkResult result = VK_SUCCESS;
 
@@ -3291,6 +3302,7 @@ v3dv_CreateComputePipelines(VkDevice _device,
                             const VkAllocationCallbacks *pAllocator,
                             VkPipeline *pPipelines)
 {
+   MESA_TRACE_FUNC();
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
    VkResult result = VK_SUCCESS;
 
