@@ -1,3 +1,14 @@
+mesa-asahi (25.1.0~git20250221.67b507f-1) UNRELEASED; urgency=medium
+
+  * New upstream release (asahi-20250221)
+  * Import packaging changes from debian/25.0.0-1:
+    - control: Remove libglapi-mesa, provided by mesa-libgallium now
+    - control: Make mesa-va-drivers depend on the same version of
+      mesa-libgallium
+    - rules: Enable panvk, it's production quality now
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Sun, 23 Feb 2025 15:56:30 +0100
+
 mesa-asahi (25.0.0~git20241211.819a5d4-4) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/24.3.4-2:
