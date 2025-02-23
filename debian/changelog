@@ -6,6 +6,7 @@ mesa-asahi (25.1.0~git20250221.67b507f-1) UNRELEASED; urgency=medium
     - control: Make mesa-va-drivers depend on the same version of
       mesa-libgallium
     - rules: Enable panvk, it's production quality now
+  * d/*.lintian-overrides: refresh
 
  -- NoisyCoil <noisycoil@tutanota.com>  Sun, 23 Feb 2025 15:56:30 +0100
 
