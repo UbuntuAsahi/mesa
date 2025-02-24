@@ -163,7 +163,6 @@ deploy-bananas:
     - when: never
   variables:
     BT_REPO: wip/mesa-asahi
-    BA_KEYFILE: ba_keyfile
     BA_SUITE: unstable-bananas
   needs:
     - build
