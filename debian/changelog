@@ -1,10 +1,10 @@
-mesa-asahi (25.1.0~git20250221.67b507f-2) UNRELEASED; urgency=medium
+mesa-asahi (25.1.0~git20250221.67b507f-2) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/25.0.0-1:
     - control: Drop python3 dependency from mesa-vulkan-drivers
     - rules: enable gfxstream
 
- -- NoisyCoil <noisycoil@tutanota.com>  Thu, 06 Mar 2025 13:18:14 +0100
+ -- NoisyCoil <noisycoil@tutanota.com>  Thu, 06 Mar 2025 13:38:33 +0100
 
 mesa-asahi (25.1.0~git20250221.67b507f-1) unstable-bananas; urgency=medium
 
