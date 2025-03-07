@@ -2,12 +2,13 @@ mesa-asahi (25.1.0~git20250221.67b507f-3) UNRELEASED; urgency=medium
 
   * Import packaging changes from debian/25.0.1-2:
     - rules: Build gfxstream only on 64bit
+  * Fix last changelog entry (was: 'from debian/25.0.0-1')
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 07 Mar 2025 11:10:16 +0100
 
 mesa-asahi (25.1.0~git20250221.67b507f-2) unstable-bananas; urgency=medium
 
-  * Import packaging changes from debian/25.0.0-1:
+  * Import packaging changes from debian/25.0.1-1:
     - control: Drop python3 dependency from mesa-vulkan-drivers
     - rules: enable gfxstream
 
