@@ -1,3 +1,17 @@
+mesa (25.0.0~pre20250221-1asahi2.24.10) oracular; urgency=medium
+
+  * Build for oracular
+  * Bump to asahi-20250221
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Mon, 17 Mar 2025 06:37:00 +0100
+
+mesa (25.0.0~pre20250221-1asahi2.24.04) noble; urgency=medium
+
+  * Build for noble
+  * Bump to asahi-20250221
+
+ -- Andreas Schröder <andreas@kernelpanik.net>  Sat, 16 Mar 2025 21:08:00 +0100
+
 mesa (25.0.0~pre20241112-1asahi0.24.04) noble; urgency=medium
 
   * Bump to asahi-20241112
