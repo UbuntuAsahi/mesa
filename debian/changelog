@@ -1,3 +1,11 @@
+mesa-asahi (25.1.0~git20250221.67b507f-4) UNRELEASED; urgency=medium
+
+  * Import packaging changes from debian/25.0.2-1
+    - patches: Fix spam from gfxstream (readapted for 25.1.0)
+    - rules: Update gentarball target to use xz and the current tree
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Thu, 20 Mar 2025 17:40:04 +0100
+
 mesa-asahi (25.1.0~git20250221.67b507f-3) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/25.0.1-2:
