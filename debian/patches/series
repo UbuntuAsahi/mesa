@@ -3,3 +3,4 @@ src_glx_dri_common.h.diff
 disable_ppc64el_assembly.diff
 gfxstream-check-device-before-using.diff
 gfxstream-refactor-device-init.diff
+gfxstream-follow-the-semantics-desired-by-distro-VK.diff
