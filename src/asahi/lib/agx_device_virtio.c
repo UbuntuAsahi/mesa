@@ -124,7 +124,7 @@ agx_virtio_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
 
    *req = (struct asahi_ccmd_vm_bind_req){
       .hdr.cmd = ASAHI_CCMD_VM_BIND,
-      .hdr.len = sizeof(struct asahi_ccmd_vm_bind_req),
+      .hdr.len = req_len,
       .vm_id = dev->vm_id,
       .stride = sizeof(*ops),
       .count = count,
@@ -215,12 +215,8 @@ agx_virtio_get_params(struct agx_device *dev, void *buf, size_t size)
                         sizeof(struct asahi_ccmd_get_params_rsp) + size);
 
    int ret = vdrm_send_req(vdrm, &req.hdr, true);
-   if (!ret)
-      return ret;
-
-   ret = rsp->ret;
-   if (ret)
-      return ret;
+   if (ret || rsp->ret)
+      return ret ? ret : rsp->ret;
 
    memcpy(buf, &rsp->payload, size);
    return size;
