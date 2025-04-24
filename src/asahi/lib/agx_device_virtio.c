@@ -292,7 +292,7 @@ agx_virtio_open_device(struct agx_device *dev)
 {
    struct vdrm_device *vdrm;
 
-   vdrm = vdrm_device_connect(dev->fd, 2);
+   vdrm = vdrm_device_connect(dev->fd, 4);
    if (!vdrm) {
       fprintf(stderr, "could not connect vdrm\n");
       return false;
