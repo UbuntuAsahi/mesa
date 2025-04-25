@@ -3,6 +3,8 @@ mesa-asahi (25.1.0~git20250425.01ac84e-1~exp1) UNRELEASED; urgency=medium
   * New upstream release
   * d/patches/gfxstream-*: remove (upstreamed)
   * d/control: do not build osmesa (dropped upstream)
+  * d/mesa-vulkan-drivers.lintian-overrides: add libvulkan-gfxstream
+    to package-name-doesnt-match-sonames
 
  -- NoisyCoil <noisycoil@tutanota.com>  Fri, 25 Apr 2025 18:25:57 +0200
 
