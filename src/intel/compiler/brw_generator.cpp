@@ -379,7 +379,8 @@ brw_generator::generate_shuffle(brw_inst *inst,
          /* We use VxH indirect addressing, clobbering a0.0 through a0.7. */
          struct brw_reg addr = vec8(brw_address_reg(0));
 
-         struct brw_reg group_idx = suboffset(idx, group);
+         struct brw_reg group_idx = idx.is_scalar || is_uniform(idx) ?
+            component(idx, 0) : suboffset(idx, group);
 
          if (lower_width == 8 && group_idx.width == BRW_WIDTH_16) {
             /* Things get grumpy if the register is too wide. */
@@ -740,19 +741,6 @@ brw_generator::enable_debug(const char *shader_name)
    this->shader_name = shader_name;
 }
 
-static gfx12_systolic_depth
-translate_systolic_depth(unsigned d)
-{
-   /* Could also return (ffs(d) - 1) & 3. */
-   switch (d) {
-   case 2:  return BRW_SYSTOLIC_DEPTH_2;
-   case 4:  return BRW_SYSTOLIC_DEPTH_4;
-   case 8:  return BRW_SYSTOLIC_DEPTH_8;
-   case 16: return BRW_SYSTOLIC_DEPTH_16;
-   default: unreachable("Invalid systolic depth.");
-   }
-}
-
 int
 brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
                             struct brw_shader_stats shader_stats,
@@ -772,7 +760,7 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 
    struct disasm_info *disasm_info = disasm_initialize(p->isa, cfg);
 
-   enum opcode prev_opcode = BRW_OPCODE_ILLEGAL;
+   brw_inst *prev_inst = NULL;
    foreach_block_and_inst (block, brw_inst, inst, cfg) {
       if (inst->opcode == SHADER_OPCODE_UNDEF)
          continue;
@@ -1083,6 +1071,10 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 	 brw_DO(p, brw_get_default_exec_size(p));
 	 break;
 
+      case SHADER_OPCODE_FLOW:
+         /* Do nothing. */
+         break;
+
       case BRW_OPCODE_BREAK:
 	 brw_BREAK(p);
 	 break;
@@ -1091,11 +1083,12 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
 	 break;
 
       case BRW_OPCODE_WHILE:
-         /* On LNL and newer, if we don't put a NOP in between two consecutive
-          * WHILE instructions we may end up with misrendering or GPU hangs.
-          * See HSD 22020521218.
+         /* Workaround for an issue with branch prediction for WHILE
+          * instructions that may lead to misrendering or GPU hangs.
+          * See HSDs 22020521218 and 16026360541.
           */
-         if (devinfo->ver >= 20 && unlikely(prev_opcode == BRW_OPCODE_WHILE))
+         if (devinfo->ver >= 20 && prev_inst &&
+             unlikely(prev_inst->is_control_flow()))
             brw_NOP(p);
 
          brw_WHILE(p);
@@ -1359,7 +1352,7 @@ brw_generator::generate_code(const cfg_t *cfg, int dispatch_width,
       case SHADER_OPCODE_LOAD_PAYLOAD:
          unreachable("Should be lowered by lower_load_payload()");
       }
-      prev_opcode = inst->opcode;
+      prev_inst = inst;
 
       if (multiple_instructions_emitted)
          continue;
@@ -1535,4 +1528,17 @@ brw_generator::get_assembly()
    prog_data->relocs = brw_get_shader_relocs(p, &prog_data->num_relocs);
 
    return brw_get_program(p, &prog_data->program_size);
+}
+
+void brw_prog_data_init(struct brw_stage_prog_data *prog_data,
+                        const struct brw_compile_params *params)
+{
+   /* Do not memset the structure to 0, the driver might have put some bits of
+    * information in there.
+    */
+   prog_data->ray_queries = params->nir->info.ray_queries;
+   prog_data->stage = params->nir->info.stage;
+   prog_data->source_hash = params->source_hash;
+   prog_data->total_scratch = 0;
+   prog_data->total_shared = params->nir->info.shared_size;
 }

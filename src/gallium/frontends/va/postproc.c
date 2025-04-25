@@ -223,7 +223,6 @@ vlVaPostProcCompositor(vlVaDriver *drv,
       }
    } else {
       /* YUV/RGB -> RGB */
-      vl_compositor_clear_layers(&drv->cstate);
       vl_compositor_set_buffer_layer(&drv->cstate, &drv->compositor, 0, src,
                                      &src_rect, NULL, deinterlace);
       vl_compositor_set_layer_dst_area(&drv->cstate, 0, &dst_rect);
@@ -372,6 +371,9 @@ static VAStatus vlVaVidEngineBlit(vlVaDriver *drv, vlVaContext *context,
       context->desc.vidproc.out_chroma_siting |= PIPE_VIDEO_VPP_CHROMA_SITING_HORIZONTAL_LEFT;
    else if (param->output_color_properties.chroma_sample_location & VA_CHROMA_SITING_HORIZONTAL_CENTER)
       context->desc.vidproc.out_chroma_siting |= PIPE_VIDEO_VPP_CHROMA_SITING_HORIZONTAL_CENTER;
+
+   if (param->filter_flags & VA_FILTER_SCALING_FAST)
+      context->desc.vidproc.filter_flags |= PIPE_VIDEO_VPP_FILTER_FLAG_SCALING_FAST;
 
    if (context->needs_begin_frame) {
       context->decoder->begin_frame(context->decoder, dst,

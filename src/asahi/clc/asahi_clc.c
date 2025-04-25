@@ -59,7 +59,13 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 64,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select,
+               &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
@@ -214,6 +220,9 @@ gather_atomic_info(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 static const char *
 remap_variant(nir_function *func, unsigned variant, const char *target)
 {
+   /* pass_flags is only 32-bit */
+   assert(variant < 32 && "maximum # of variants");
+
    bool has_atomic = func->pass_flags & BITFIELD_BIT(variant);
 
    if (!has_atomic && !strcmp(target, "g13x"))
@@ -347,7 +356,7 @@ main(int argc, char **argv)
             }
 
             nir_shader *clone = nir_shader_clone(NULL, s);
-            agx_compile_shader_nir(clone, &key, NULL, &compiled);
+            agx_compile_shader_nir(clone, &key, &compiled);
             print_shader(fp_c, libfunc->name, *target, v, &compiled);
             free(compiled.binary);
             ralloc_free(clone);

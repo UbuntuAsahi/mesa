@@ -32,16 +32,20 @@
 static bool
 bi_is_ubo(bi_instr *ins)
 {
-   return (bi_opcode_props[ins->op].message == BIFROST_MESSAGE_LOAD) &&
+   return (bi_get_opcode_props(ins)->message == BIFROST_MESSAGE_LOAD) &&
           (ins->seg == BI_SEG_UBO);
 }
 
+/* For now, we only allow pushing UBO 0. This matches the Gallium convention
+ * where UBO 0 is mapped on the CPU but other UBOs are not. When we switch to
+ * pushing UBOs with a compute kernel (or CSF instructions), we can relax this.
+ */
 static bool
-bi_is_direct_aligned_ubo(bi_instr *ins)
+bi_is_pushable_ubo(bi_instr *ins)
 {
    return bi_is_ubo(ins) && (ins->src[0].type == BI_INDEX_CONSTANT) &&
           (ins->src[1].type == BI_INDEX_CONSTANT) &&
-          ((ins->src[0].value & 0x3) == 0);
+          ((ins->src[0].value & 0x3) == 0) && (ins->src[1].value == 0);
 }
 
 /* Represents use data for a single UBO */
@@ -69,12 +73,12 @@ bi_analyze_ranges(bi_context *ctx)
    res.blocks = calloc(res.nr_blocks, sizeof(struct bi_ubo_block));
 
    bi_foreach_instr_global(ctx, ins) {
-      if (!bi_is_direct_aligned_ubo(ins))
+      if (!bi_is_pushable_ubo(ins))
          continue;
 
       unsigned ubo = pan_res_handle_get_index(ins->src[1].value);
       unsigned word = ins->src[0].value / 4;
-      unsigned channels = bi_opcode_props[ins->op].sr_count;
+      unsigned channels = bi_get_opcode_props(ins)->sr_count;
 
       assert(ubo < res.nr_blocks);
       assert(channels > 0 && channels <= 4);
@@ -130,6 +134,9 @@ bi_pick_ubo(struct panfrost_ubo_push *push, struct bi_ubo_analysis *analysis)
 void
 bi_opt_push_ubo(bi_context *ctx)
 {
+   /* We only push from the "default" UBO 0 */
+   assert(ctx->nir->info.first_ubo_is_default_ubo && "precondition");
+
    struct bi_ubo_analysis analysis = bi_analyze_ranges(ctx);
    bi_pick_ubo(ctx->info.push, &analysis);
 
@@ -142,7 +149,7 @@ bi_opt_push_ubo(bi_context *ctx)
       unsigned ubo = pan_res_handle_get_index(ins->src[1].value);
       unsigned offset = ins->src[0].value;
 
-      if (!bi_is_direct_aligned_ubo(ins)) {
+      if (!bi_is_pushable_ubo(ins)) {
          /* The load can't be pushed, so this UBO needs to be
           * uploaded conventionally */
          if (ins->src[1].type == BI_INDEX_CONSTANT)
@@ -163,7 +170,7 @@ bi_opt_push_ubo(bi_context *ctx)
       /* Replace the UBO load with moves from FAU */
       bi_builder b = bi_init_builder(ctx, bi_after_instr(ins));
 
-      unsigned nr = bi_opcode_props[ins->op].sr_count;
+      unsigned nr = bi_get_opcode_props(ins)->sr_count;
       bi_instr *vec = bi_collect_i32_to(&b, ins->dest[0], nr);
 
       bi_foreach_src(vec, w) {

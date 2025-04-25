@@ -364,11 +364,14 @@ impl Device {
 
         // if we can't advertize 3d image write ext, we have to disable them all
         if !self.caps.has_3d_image_writes {
-            for f in &mut self.formats.values_mut() {
-                *f.get_mut(&CL_MEM_OBJECT_IMAGE3D).unwrap() &= !cl_mem_flags::from(
-                    CL_MEM_WRITE_ONLY | CL_MEM_READ_WRITE | CL_MEM_KERNEL_READ_AND_WRITE,
-                );
-            }
+            self.formats
+                .values_mut()
+                .filter_map(|f| f.get_mut(&CL_MEM_OBJECT_IMAGE3D))
+                .for_each(|flags| {
+                    *flags &= !cl_mem_flags::from(
+                        CL_MEM_WRITE_ONLY | CL_MEM_READ_WRITE | CL_MEM_KERNEL_READ_AND_WRITE,
+                    )
+                });
         }
 
         // we require formatted loads
@@ -608,7 +611,7 @@ impl Device {
 
     fn fill_extensions(&mut self) {
         let mut exts_str: Vec<String> = Vec::new();
-        let mut exts = PLATFORM_EXTENSIONS.to_vec();
+        let mut exts = Vec::new();
         let mut feats = Vec::new();
         let mut spirv_exts = Vec::new();
         let mut add_ext = |major, minor, patch, ext: &str| {
@@ -623,18 +626,26 @@ impl Device {
         };
 
         // add extensions all drivers support for now
+        add_ext(1, 0, 0, "cl_khr_byte_addressable_store");
+        add_ext(1, 0, 0, "cl_khr_create_command_queue");
+        add_ext(1, 0, 0, "cl_khr_expect_assume");
+        add_ext(1, 0, 0, "cl_khr_extended_versioning");
         add_ext(1, 0, 0, "cl_khr_global_int32_base_atomics");
         add_ext(1, 0, 0, "cl_khr_global_int32_extended_atomics");
+        add_ext(1, 0, 0, "cl_khr_il_program");
+        add_ext(1, 0, 0, "cl_khr_local_int32_base_atomics");
+        add_ext(1, 0, 0, "cl_khr_local_int32_extended_atomics");
         add_ext(2, 0, 0, "cl_khr_integer_dot_product");
+        add_ext(1, 0, 0, "cl_khr_spirv_no_integer_wrap_decoration");
+        add_ext(1, 0, 0, "cl_khr_suggested_local_work_size");
+
+        add_feat(2, 0, 0, "__opencl_c_integer_dot_product_input_4x8bit");
         add_feat(
             2,
             0,
             0,
             "__opencl_c_integer_dot_product_input_4x8bit_packed",
         );
-        add_feat(2, 0, 0, "__opencl_c_integer_dot_product_input_4x8bit");
-        add_ext(1, 0, 0, "cl_khr_local_int32_base_atomics");
-        add_ext(1, 0, 0, "cl_khr_local_int32_extended_atomics");
 
         add_spirv(c"SPV_KHR_expect_assume");
         add_spirv(c"SPV_KHR_float_controls");
@@ -715,7 +726,7 @@ impl Device {
 
         self.extensions = exts;
         self.clc_features = feats;
-        self.extension_string = format!("{} {}", PLATFORM_EXTENSION_STR, exts_str.join(" "));
+        self.extension_string = exts_str.join(" ");
         self.spirv_extensions = spirv_exts;
     }
 
@@ -1017,9 +1028,18 @@ impl Device {
         self.screen.compute_caps().grid_dimension
     }
 
+    /// Returns the maximum size in bytes of a memory allocation for this
+    /// device.
     pub fn max_mem_alloc(&self) -> cl_ulong {
-        // TODO: at the moment gallium doesn't support bigger buffers
-        min(self.screen.compute_caps().max_mem_alloc_size, 0x80000000)
+        // The returned value must always be less than or equal to `isize::MAX`,
+        // as this method may be used for bounds checking on allocations.
+        // TODO: Add support for larger allocations. gallium doesn't support
+        // buffers larger than `i32::MAX` due to constraints in the buffer
+        // mapping API.
+        min(
+            self.screen.compute_caps().max_mem_alloc_size,
+            i32::MAX as cl_ulong,
+        )
     }
 
     pub fn max_samplers(&self) -> cl_uint {

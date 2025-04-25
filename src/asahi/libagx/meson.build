@@ -13,20 +13,19 @@ libagx_shader_files = files(
   'helper.cl',
 )
 
-# We need to set -fmacro-prefix-map properly for reproducability.
-relative_dir = fs.relative_to(meson.global_source_root(), meson.global_build_root()) + '/'
-
 libagx_spv = custom_target(
   input : libagx_shader_files,
   output : 'libagx.spv',
   command : [
     prog_mesa_clc, '-o', '@OUTPUT@', '--depfile', '@DEPFILE@',
     libagx_shader_files, '--',
+    '-I' + join_paths(meson.project_source_root(), 'include'),
+    '-I' + join_paths(meson.project_source_root(), 'src/compiler/libcl'),
     '-I' + join_paths(meson.current_source_dir(), '.'),
     '-I' + join_paths(meson.current_source_dir(), '../../'),
     '-I' + join_paths(meson.current_source_dir(), 'shaders'),
     '-I' + join_paths(meson.current_build_dir(), '../genxml'),
-    '-fmacro-prefix-map=@0@='.format(relative_dir),
+    cl_args,
     ],
   depends : [agx_pack],
   depfile : 'libagx_shaders.h.d',

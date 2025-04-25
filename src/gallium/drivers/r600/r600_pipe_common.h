@@ -85,7 +85,7 @@ struct u_log_context;
 #define R600_MAP_BUFFER_ALIGNMENT 64
 #define R600_MAX_VIEWPORTS        16
 
-#define SI_MAX_VARIABLE_THREADS_PER_BLOCK 1024
+#define R600_MAX_VARIABLE_THREADS_PER_BLOCK 1024
 
 enum r600_coherency {
 	R600_COHERENCY_NONE, /* no cache flushes needed */
@@ -446,6 +446,16 @@ struct r600_viewports {
 	struct r600_signed_scissor	as_scissor[R600_MAX_VIEWPORTS];
 };
 
+/* EXT_window_rectangles */
+#define R600_MAX_WINDOW_RECTANGLES 4
+
+struct r600_window_rectangles {
+	unsigned			number;
+	bool				include;
+	struct pipe_scissor_state	states[R600_MAX_WINDOW_RECTANGLES];
+	struct r600_atom		atom;
+};
+
 struct r600_ring {
 	struct radeon_cmdbuf		cs;
 	void (*flush)(void *ctx, unsigned flags,
@@ -493,6 +503,7 @@ struct r600_common_context {
 	struct r600_streamout		streamout;
 	struct r600_scissors		scissors;
 	struct r600_viewports		viewports;
+	struct r600_window_rectangles	window_rectangles;
 	bool				scissor_enabled;
 	bool				clip_halfz;
 	bool				vs_writes_viewport_index;
@@ -657,7 +668,7 @@ void r600_draw_rectangle(struct blitter_context *blitter,
 			 int x1, int y1, int x2, int y2,
 			 float depth, unsigned num_instances,
 			 enum blitter_attrib_type type,
-			 const union blitter_attrib *attrib);
+			 const struct blitter_attrib *attrib);
 bool r600_common_screen_init(struct r600_common_screen *rscreen,
 			     struct radeon_winsys *ws);
 void r600_destroy_common_screen(struct r600_common_screen *rscreen);
@@ -740,8 +751,7 @@ struct pipe_resource *r600_texture_create(struct pipe_screen *screen,
 struct pipe_surface *r600_create_surface_custom(struct pipe_context *pipe,
 						struct pipe_resource *texture,
 						const struct pipe_surface *templ,
-						unsigned width0, unsigned height0,
-						unsigned width, unsigned height);
+						unsigned width0, unsigned height0);
 unsigned r600_translate_colorswap(enum pipe_format format, bool do_endian_swap);
 void evergreen_do_fast_color_clear(struct r600_common_context *rctx,
 				   struct pipe_framebuffer_state *fb,

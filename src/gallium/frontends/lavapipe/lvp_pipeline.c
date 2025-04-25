@@ -36,6 +36,8 @@
 #include "pipe/p_context.h"
 #include "nir/nir_xfb_info.h"
 
+#include "gallivm/lp_bld_debug.h"
+
 #define SPIR_V_MAGIC_NUMBER 0x07230203
 
 #define MAX_DYNAMIC_STATES 72
@@ -230,7 +232,13 @@ optimize(nir_shader *nir)
 
       NIR_PASS(progress, nir, nir_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 8, true, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 8,
+         .indirect_load_ok = true,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
 
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
@@ -250,7 +258,12 @@ optimize(nir_shader *nir)
       }
       NIR_PASS(progress, nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
-      NIR_PASS(progress, nir, nir_opt_conditional_discard);
+
+      nir_opt_peephole_select_options peephole_discard_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_discard_options);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_cse);
       NIR_PASS(progress, nir, nir_opt_undef);
@@ -307,6 +320,7 @@ compile_spirv(struct lvp_device *pdevice,
 #ifdef VK_ENABLE_BETA_EXTENSIONS
       .shader_index = node_info ? node_info->index : 0,
 #endif
+      .debug_info = gallivm_debug & GALLIVM_DEBUG_SYMBOLS,
    };
 
    result = vk_pipeline_shader_stage_to_nir(&pdevice->vk, pipeline_flags, sinfo,

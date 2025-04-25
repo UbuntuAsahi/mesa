@@ -347,6 +347,7 @@ trtt_make_page_table_bo(struct anv_device *device, struct anv_bo **bo)
                                 ANV_TRTT_PAGE_TABLE_BO_SIZE,
                                 ANV_BO_ALLOC_INTERNAL,
                                 0 /* explicit_address */, bo);
+   ANV_DMR_BO_ALLOC(&device->vk.base, *bo, result);
    if (result != VK_SUCCESS)
       return result;
 
@@ -360,6 +361,7 @@ trtt_make_page_table_bo(struct anv_device *device, struct anv_bo **bo)
                     new_capacity * sizeof(*trtt->page_table_bos), 8,
                     VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
       if (!new_page_table_bos) {
+         ANV_DMR_BO_FREE(&device->vk.base, *bo);
          anv_device_release_bo(device, *bo);
          return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
@@ -1526,7 +1528,7 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
     * formats due to the additional image plane. It would make the
     * implementation extremely complicated.
     */
-   if (anv_is_format_emulated(pdevice, vk_format))
+   if (anv_is_compressed_format_emulated(pdevice, vk_format))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* While the spec itself says linear is not supported (see above), deqp-vk

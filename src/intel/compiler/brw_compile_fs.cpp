@@ -58,7 +58,7 @@ brw_emit_single_fb_write(brw_shader &s, const brw_builder &bld,
 static void
 brw_do_emit_fb_writes(brw_shader &s, int nr_color_regions, bool replicate_alpha)
 {
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    brw_inst *inst = NULL;
 
    for (int target = 0; target < nr_color_regions; target++) {
@@ -179,7 +179,7 @@ static void
 brw_emit_interpolation_setup(brw_shader &s)
 {
    const struct intel_device_info *devinfo = s.devinfo;
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    brw_builder abld = bld.annotate("compute pixel centers");
 
    s.pixel_x = bld.vgrf(BRW_TYPE_F);
@@ -504,8 +504,6 @@ brw_emit_interpolation_setup(brw_shader &s)
    }
 
    if (wm_key->persample_interp == INTEL_SOMETIMES) {
-      assert(!devinfo->needs_unlit_centroid_workaround);
-
       const brw_builder ubld = bld.exec_all().group(16, 0);
       bool loaded_flag = false;
 
@@ -556,42 +554,6 @@ brw_emit_interpolation_setup(brw_shader &s)
       s.delta_xy[i] = brw_fetch_barycentric_reg(
          bld, payload.barycentric_coord_reg[i]);
    }
-
-   uint32_t centroid_modes = wm_prog_data->barycentric_interp_modes &
-      (1 << INTEL_BARYCENTRIC_PERSPECTIVE_CENTROID |
-       1 << INTEL_BARYCENTRIC_NONPERSPECTIVE_CENTROID);
-
-   if (devinfo->needs_unlit_centroid_workaround && centroid_modes) {
-      /* Get the pixel/sample mask into f0 so that we know which
-       * pixels are lit.  Then, for each channel that is unlit,
-       * replace the centroid data with non-centroid data.
-       */
-      for (unsigned i = 0; i < DIV_ROUND_UP(s.dispatch_width, 16); i++) {
-         bld.exec_all().group(1, 0)
-            .MOV(retype(brw_flag_reg(0, i), BRW_TYPE_UW),
-                 retype(brw_vec1_grf(1 + i, 7), BRW_TYPE_UW));
-      }
-
-      for (int i = 0; i < INTEL_BARYCENTRIC_MODE_COUNT; ++i) {
-         if (!(centroid_modes & (1 << i)))
-            continue;
-
-         const brw_reg centroid_delta_xy = s.delta_xy[i];
-         const brw_reg &pixel_delta_xy = s.delta_xy[i - 1];
-
-         s.delta_xy[i] = bld.vgrf(BRW_TYPE_F, 2);
-
-         for (unsigned c = 0; c < 2; c++) {
-            for (unsigned q = 0; q < s.dispatch_width / 8; q++) {
-               set_predicate(BRW_PREDICATE_NORMAL,
-                  bld.quarter(q).SEL(
-                     quarter(offset(s.delta_xy[i], bld, c), q),
-                     quarter(offset(centroid_delta_xy, bld, c), q),
-                     quarter(offset(pixel_delta_xy, bld, c), q)));
-            }
-         }
-      }
-   }
 }
 
 
@@ -618,7 +580,7 @@ brw_emit_repclear_shader(brw_shader &s)
               BRW_VERTICAL_STRIDE_8, BRW_WIDTH_2, BRW_HORIZONTAL_STRIDE_4,
               BRW_SWIZZLE_XYZW, WRITEMASK_XYZW);
 
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    bld.exec_all().group(4, 0).MOV(color_output, color_input);
 
    if (key->nr_color_regions > 1) {
@@ -629,7 +591,7 @@ brw_emit_repclear_shader(brw_shader &s)
 
    for (int i = 0; i < key->nr_color_regions; ++i) {
       if (i > 0)
-         bld.exec_all().group(1, 0).MOV(component(header, 2), brw_imm_ud(i));
+         bld.uniform().MOV(component(header, 2), brw_imm_ud(i));
 
       write = bld.emit(SHADER_OPCODE_SEND);
       write->resize_sources(3);
@@ -638,7 +600,7 @@ brw_emit_repclear_shader(brw_shader &s)
       write->header_size = i == 0 ? 0 : 2;
       write->mlen = 1 + write->header_size;
 
-      write->sfid = GFX6_SFID_DATAPORT_RENDER_CACHE;
+      write->sfid = BRW_SFID_RENDER_CACHE;
       write->src[0] = brw_imm_ud(
          brw_fb_write_desc(
             s.devinfo, i,
@@ -662,17 +624,6 @@ brw_emit_repclear_shader(brw_shader &s)
    s.first_non_payload_grf = s.payload().num_regs;
 
    brw_lower_scoreboard(s);
-}
-
-/**
- * Turn one of the two CENTROID barycentric modes into PIXEL mode.
- */
-static enum intel_barycentric_mode
-centroid_to_pixel(enum intel_barycentric_mode bary)
-{
-   assert(bary == INTEL_BARYCENTRIC_PERSPECTIVE_CENTROID ||
-          bary == INTEL_BARYCENTRIC_NONPERSPECTIVE_CENTROID);
-   return (enum intel_barycentric_mode) ((unsigned) bary - 1);
 }
 
 static void
@@ -976,15 +927,10 @@ brw_compute_barycentric_interp_modes(const struct intel_device_info *devinfo,
             if (!is_used_in_not_interp_frag_coord(&intrin->def))
                continue;
 
-            nir_intrinsic_op bary_op = intrin->intrinsic;
             enum intel_barycentric_mode bary =
                brw_barycentric_mode(key, intrin);
 
             barycentric_interp_modes |= 1 << bary;
-
-            if (devinfo->needs_unlit_centroid_workaround &&
-                bary_op == nir_intrinsic_load_barycentric_centroid)
-               barycentric_interp_modes |= 1 << centroid_to_pixel(bary);
          }
       }
    }
@@ -1221,7 +1167,7 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
     * us to lose out on the eliminate_find_live_channel() optimization.
     */
    prog_data->uses_vmask = devinfo->verx10 < 125 ||
-                           shader->info.fs.needs_quad_helper_invocations ||
+                           shader->info.fs.needs_coarse_quad_helper_invocations ||
                            shader->info.uses_wide_subgroup_intrinsics ||
                            prog_data->coarse_pixel_dispatch != INTEL_NEVER;
 
@@ -1454,7 +1400,7 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
    const struct intel_device_info *devinfo = s.devinfo;
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(s.prog_data);
    brw_wm_prog_key *wm_key = (brw_wm_prog_key *) s.key;
-   const brw_builder bld = brw_builder(&s).at_end();
+   const brw_builder bld = brw_builder(&s);
    const nir_shader *nir = s.nir;
 
    assert(s.stage == MESA_SHADER_FRAGMENT);
@@ -1488,9 +1434,8 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
             const brw_reg dispatch_mask =
                devinfo->ver >= 20 ? xe2_vec1_grf(i, 15) :
                                     brw_vec1_grf(i + 1, 7);
-            bld.exec_all().group(1, 0)
-               .MOV(brw_sample_mask_reg(bld.group(lower_width, i)),
-                    retype(dispatch_mask, BRW_TYPE_UW));
+            bld.uniform().MOV(brw_sample_mask_reg(bld.group(lower_width, i)),
+                              retype(dispatch_mask, BRW_TYPE_UW));
          }
       }
 
@@ -1518,7 +1463,6 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
       brw_assign_urb_setup(s);
 
       brw_lower_3src_null_dest(s);
-      brw_workaround_memory_fence_before_eot(s);
       brw_workaround_emit_dummy_mov_instruction(s);
 
       brw_allocate_registers(s, allow_spilling);
@@ -1541,9 +1485,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
       brw_should_print_shader(nir, params->base.debug_flag ?
                                    params->base.debug_flag : DEBUG_WM);
 
-   prog_data->base.stage = MESA_SHADER_FRAGMENT;
-   prog_data->base.ray_queries = nir->info.ray_queries;
-   prog_data->base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base, &params->base);
 
    const struct intel_device_info *devinfo = compiler->devinfo;
    const unsigned max_subgroup_size = 32;

@@ -32,6 +32,7 @@
 
 #include "clc/panfrost_compile.h"
 #include "kmod/pan_kmod.h"
+#include "util/os_file.h"
 #include "util/u_printf.h"
 #include "pan_props.h"
 #include "pan_samples.h"
@@ -121,7 +122,8 @@ panvk_meta_cmd_bind_map_buffer(struct vk_command_buffer *cmd,
    if (!mem.gpu)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-   buffer->dev_addr = mem.gpu;
+   assert(buffer->vk.device_address == 0);
+   buffer->vk.device_address = mem.gpu;
    *map_out = mem.cpu;
    return VK_SUCCESS;
 }
@@ -282,7 +284,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
       .priv = &device->vk.alloc,
    };
    device->kmod.dev =
-      pan_kmod_dev_create(dup(physical_device->kmod.dev->fd),
+      pan_kmod_dev_create(os_dupfd_cloexec(physical_device->kmod.dev->fd),
                           PAN_KMOD_DEV_FLAG_OWNS_FD, &device->kmod.allocator);
 
    if (!device->kmod.dev) {
@@ -351,6 +353,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    u_printf_init(&device->printf.ctx, device->printf.bo,
                  device->printf.bo->addr.host);
 
+   device->drm_fd = device->kmod.dev->fd;
    vk_device_set_drm_fd(&device->vk, device->kmod.dev->fd);
 
 

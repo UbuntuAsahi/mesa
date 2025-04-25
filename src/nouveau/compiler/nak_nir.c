@@ -18,7 +18,7 @@
    this_progress;                                        \
 })
 
-#define OPT_V(nir, pass, ...) NIR_PASS_V(nir, pass, ##__VA_ARGS__)
+#define OPT_V(nir, pass, ...) NIR_PASS(_, nir, pass, ##__VA_ARGS__)
 
 bool
 nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
@@ -136,7 +136,11 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
       OPT(nir, nir_opt_dce);
       OPT(nir, nir_opt_cse);
 
-      OPT(nir, nir_opt_peephole_select, 0, false, false);
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 0,
+         .discard_ok = true,
+      };
+      OPT(nir, nir_opt_peephole_select, &peephole_select_options);
       OPT(nir, nir_opt_intrinsics);
       OPT(nir, nir_opt_idiv_const, 32);
       OPT(nir, nir_opt_algebraic);
@@ -160,7 +164,6 @@ optimize_nir(nir_shader *nir, const struct nak_compiler *nak, bool allow_copies)
          OPT(nir, nir_opt_dce);
       }
       OPT(nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
-      OPT(nir, nir_opt_conditional_discard);
       if (nir->options->max_unroll_iterations != 0) {
          OPT(nir, nir_opt_loop_unroll);
       }
@@ -903,6 +906,30 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
    return glsl_count_vec4_slots(type, false, bindless);
 }
 
+static bool
+atomic_supported(const nir_instr *instr, const void *data)
+{
+   /* Shared atomics don't support 64-bit arithmetic */
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   return !(intr->intrinsic == nir_intrinsic_shared_atomic &&
+            intr->def.bit_size == 64);
+}
+
+static unsigned
+split_conversions_cb(const nir_instr *instr, void *data)
+{
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   unsigned src_bit_size = nir_src_bit_size(alu->src[0].src);
+   unsigned dst_bit_size = alu->def.bit_size;
+
+   /* We can't cross the 64-bit boundary in one conversion */
+   if ((src_bit_size <= 32 && dst_bit_size <= 32) ||
+       (src_bit_size >= 32 && dst_bit_size >= 32))
+      return 0;
+
+   return 32;
+}
+
 void
 nak_postprocess_nir(nir_shader *nir,
                     const struct nak_compiler *nak,
@@ -927,6 +954,7 @@ nak_postprocess_nir(nir_shader *nir,
       .lower_rotate_to_shuffle = true
    };
    OPT(nir, nir_lower_subgroups, &subgroups_options);
+   OPT(nir, nir_lower_atomics, atomic_supported);
    OPT(nir, nak_nir_lower_scan_reduce);
 
    if (nir_shader_has_local_variables(nir)) {
@@ -959,6 +987,10 @@ nak_postprocess_nir(nir_shader *nir,
 
    nak_optimize_nir(nir, nak);
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      nir_divergence_analysis(nir);
+      OPT(nir, nir_opt_tex_skip_helpers, true);
+   }
    OPT(nir, nak_nir_lower_tex, nak);
    OPT(nir, nir_lower_idiv, NULL);
 
@@ -1042,12 +1074,26 @@ nak_postprocess_nir(nir_shader *nir,
       }
    } while (progress);
 
-   if (nak->sm < 70)
-      OPT(nir, nak_nir_split_64bit_conversions);
+   if (nak->sm < 70) {
+      const nir_split_conversions_options split_conv_opts = {
+         .callback = split_conversions_cb,
+         .has_convert_alu_types = true,
+      };
+      OPT(nir, nir_split_conversions, &split_conv_opts);
+   }
+
+   /* Re-materialize load_const instructions in the blocks that use them.
+    * This is both a register pressure optimization and a ensures correctness
+    * in the presence of all of the control flow modifications we're about to
+    * do.  Without this, we can't rely on anything to be constant in NIR to
+    * NAK translation.
+    */
+   if (OPT(nir, nak_nir_rematerialize_load_const))
+      OPT(nir, nir_opt_dce);
 
    bool lcssa_progress = nir_convert_to_lcssa(nir, false, false);
 
-   if (nak->sm >= 75) {
+   if (nak->sm >= 73) {
       if (lcssa_progress) {
          OPT(nir, nak_nir_mark_lcssa_invariants);
       }

@@ -300,6 +300,41 @@ brw_opt_constant_fold_instruction(const intel_device_info *devinfo, brw_inst *in
       }
       break;
 
+   case SHADER_OPCODE_BROADCAST:
+      if (inst->src[0].file == IMM) {
+         inst->opcode = BRW_OPCODE_MOV;
+         inst->force_writemask_all = true;
+         inst->resize_sources(1);
+
+         /* The destination of BROADCAST will always be is_scalar, so the
+          * allocation will always be REG_SIZE * reg_unit. Adjust the
+          * exec_size to match.
+          */
+         inst->exec_size = 8 * reg_unit(devinfo);
+         assert(inst->size_written == inst->dst.component_size(inst->exec_size));
+         progress = true;
+      }
+      break;
+
+   case SHADER_OPCODE_SHUFFLE:
+      if (inst->src[0].file == IMM) {
+         inst->opcode = BRW_OPCODE_MOV;
+         inst->resize_sources(1);
+         progress = true;
+      }
+      break;
+
+   case FS_OPCODE_DDX_COARSE:
+   case FS_OPCODE_DDX_FINE:
+   case FS_OPCODE_DDY_COARSE:
+   case FS_OPCODE_DDY_FINE:
+      if (is_uniform(inst->src[0]) || inst->src[0].is_scalar) {
+         inst->opcode = BRW_OPCODE_MOV;
+         inst->src[0] = retype(brw_imm_uq(0), inst->dst.type);
+         progress = true;
+      }
+      break;
+
    default:
       break;
    }
@@ -419,7 +454,7 @@ brw_opt_algebraic(brw_shader &s)
             if (inst->dst.type != inst->src[0].type &&
                 inst->dst.type != BRW_TYPE_DF &&
                 inst->src[0].type != BRW_TYPE_F)
-               assert(!"unimplemented: saturate mixed types");
+               unreachable("unimplemented: saturate mixed types");
 
             if (brw_reg_saturate_immediate(&inst->src[0])) {
                inst->saturate = false;
@@ -511,10 +546,20 @@ brw_opt_algebraic(brw_shader &s)
          }
          break;
       case BRW_OPCODE_SEL:
-         if (inst->src[0].equals(inst->src[1])) {
+         /* Floating point SEL.CMOD may flush denorms to zero. We don't have
+          * enough information at this point in compilation to know whether or
+          * not it is safe to remove that.
+          *
+          * Integer SEL or SEL without a conditional modifier is just a fancy
+          * MOV. Those are always safe to eliminate.
+          */
+         if (inst->src[0].equals(inst->src[1]) &&
+             (!brw_type_is_float(inst->dst.type) ||
+              inst->conditional_mod == BRW_CONDITIONAL_NONE)) {
             inst->opcode = BRW_OPCODE_MOV;
             inst->predicate = BRW_PREDICATE_NONE;
             inst->predicate_inverse = false;
+            inst->conditional_mod = BRW_CONDITIONAL_NONE;
             inst->resize_sources(1);
             progress = true;
          } else if (inst->saturate && inst->src[1].file == IMM) {
@@ -548,6 +593,7 @@ brw_opt_algebraic(brw_shader &s)
                default:
                   break;
                }
+               break;
             default:
                break;
             }
@@ -664,6 +710,11 @@ brw_opt_algebraic(brw_shader &s)
          if (is_uniform(inst->src[0])) {
             inst->opcode = BRW_OPCODE_MOV;
             inst->force_writemask_all = true;
+
+            /* The destination of BROADCAST will always be is_scalar, so the
+             * allocation will always be REG_SIZE * reg_unit. Adjust the
+             * exec_size to match.
+             */
             inst->exec_size = 8 * reg_unit(devinfo);
             assert(inst->size_written == inst->dst.component_size(inst->exec_size));
             inst->resize_sources(1);

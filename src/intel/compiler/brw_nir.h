@@ -37,6 +37,10 @@ extern const struct nir_shader_compiler_options brw_scalar_nir_options;
 int type_size_vec4(const struct glsl_type *type, bool bindless);
 int type_size_dvec4(const struct glsl_type *type, bool bindless);
 
+struct brw_mem_access_cb_data {
+   const struct intel_device_info *devinfo;
+};
+
 static inline int
 type_size_scalar_bytes(const struct glsl_type *type, bool bindless)
 {
@@ -191,10 +195,20 @@ struct brw_nir_lower_storage_image_opts {
 
    bool lower_loads;
    bool lower_stores;
+   bool lower_stores_64bit;
 };
 
 bool brw_nir_lower_storage_image(nir_shader *nir,
                                  const struct brw_nir_lower_storage_image_opts *opts);
+
+bool brw_nir_lower_texel_address(nir_shader *shader,
+                                 const struct intel_device_info *devinfo,
+                                 enum isl_tiling tiling);
+
+bool brw_nir_lower_texture(nir_shader *nir,
+                           const struct intel_device_info *devinfo);
+
+bool brw_nir_lower_sample_index_in_coord(nir_shader *nir);
 
 bool brw_nir_lower_mem_access_bit_sizes(nir_shader *shader,
                                         const struct

@@ -87,16 +87,16 @@ uncollapsed_section_start cuttlefish "Downloading, building and installing Cuttl
 
 CUTTLEFISH_PROJECT_PATH=ao2/aosp-manifest
 CUTTLEFISH_BUILD_VERSION_TAGS=mesa-venus
-CUTTLEFISH_BUILD_NUMBER=20250115.001
+CUTTLEFISH_BUILD_NUMBER=20250215.001
 
 mkdir /cuttlefish
 pushd /cuttlefish
 
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
-  -o aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CUTTLEFISH_PROJECT_PATH}/aosp-${CUTTLEFISH_BUILD_VERSION_TAGS}.${CUTTLEFISH_BUILD_NUMBER}/aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip"
+  -o aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip "https://${S3_HOST}/${S3_ANDROID_BUCKET}/${CUTTLEFISH_PROJECT_PATH}/aosp-${CUTTLEFISH_BUILD_VERSION_TAGS}.${CUTTLEFISH_BUILD_NUMBER}/aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip"
 
-unzip aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
-rm aosp_cf_x86_64_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
+unzip aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
+rm aosp_cf_x86_64_only_phone-img-$CUTTLEFISH_BUILD_NUMBER.zip
 ls -lhS ./*
 
 curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
@@ -130,15 +130,48 @@ git checkout FETCH_HEAD
 
 apt-get install -y --allow-downgrades ./cuttlefish-base_*.deb ./cuttlefish-user_*.deb
 
-section_end cuttlefish
-
 popd
 rm -rf android-cuttlefish
 
 addgroup --system kvm
 usermod -a -G kvm,cvdnetwork root
 
+section_end cuttlefish
+
+############### Downloading Android CTS tools
+
+uncollapsed_section_start android-cts "Downloading Android CTS tools"
+
+ANDROID_CTS_VERSION="${ANDROID_VERSION}_r1"
+ANDROID_CTS_DEVICE_ARCH="x86"
+
+mkdir /android-tools
+pushd /android-tools
+
+curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+  -o "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip" \
+  "https://dl.google.com/dl/android/cts/android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+unzip "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+rm "android-cts-${ANDROID_CTS_VERSION}-linux_x86-${ANDROID_CTS_DEVICE_ARCH}.zip"
+
+# Keep only the interesting tests to save space
+# shellcheck disable=SC2086 # we want word splitting
+ANDROID_CTS_MODULES_KEEP_EXPRESSION=$(printf "%s|" $ANDROID_CTS_MODULES | sed -e 's/|$//g')
+find android-cts/testcases/ -mindepth 1 -type d | grep -v -E "$ANDROID_CTS_MODULES_KEEP_EXPRESSION" | xargs rm -rf
+
+curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+  -o "build-tools_r${ANDROID_SDK_VERSION}-linux.zip" "https://dl.google.com/android/repository/build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+unzip "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+rm "build-tools_r${ANDROID_SDK_VERSION}-linux.zip"
+mv "android-$ANDROID_VERSION" build-tools
+
+popd
+
+section_end android-cts
+
 ############### Uninstall the build software
+
+uncollapsed_section_switch debian_cleanup "Cleaning up base Debian system"
 
 rm -rf "/${ndk:?}"
 
@@ -146,5 +179,9 @@ export SUDO_FORCE_REMOVE=yes
 apt-get purge -y "${EPHEMERAL[@]}"
 
 . .gitlab-ci/container/container_post_build.sh
+
+section_end debian_cleanup
+
+############### Remove unused packages
 
 . .gitlab-ci/container/strip-rootfs.sh

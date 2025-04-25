@@ -60,8 +60,8 @@ i915_util_blitter_save_states(struct i915_context *i915)
    util_blitter_save_viewport(i915->blitter, &i915->viewport);
    util_blitter_save_scissor(i915->blitter, &i915->scissor);
    util_blitter_save_vertex_elements(i915->blitter, i915->velems);
-   util_blitter_save_vertex_buffers(i915->blitter, i915->vertex_buffers,
-                                    i915->nr_vertex_buffers);
+   util_blitter_save_vertex_buffers(i915->blitter, i915->draw->pt.vertex_buffer,
+                                    i915->draw->pt.nr_vertex_buffers);
 
    util_blitter_save_framebuffer(i915->blitter, &i915->framebuffer);
 
@@ -140,8 +140,8 @@ i915_clear_render_target_render(struct pipe_context *pipe,
 
    util_blitter_save_framebuffer(i915->blitter, &i915->framebuffer);
 
-   fb_state.width = dst->width;
-   fb_state.height = dst->height;
+   fb_state.width = width;
+   fb_state.height = height;
    fb_state.nr_cbufs = 1;
    fb_state.cbufs[0] = dst;
    fb_state.zsbuf = NULL;
@@ -170,8 +170,8 @@ i915_clear_depth_stencil_render(struct pipe_context *pipe,
 
    util_blitter_save_framebuffer(i915->blitter, &i915->framebuffer);
 
-   fb_state.width = dst->width;
-   fb_state.height = dst->height;
+   fb_state.width = width;
+   fb_state.height = height;
    fb_state.nr_cbufs = 0;
    fb_state.zsbuf = dst;
    pipe->set_framebuffer_state(pipe, &fb_state);
@@ -404,8 +404,6 @@ i915_create_surface_custom(struct pipe_context *ctx, struct pipe_resource *pt,
    pipe_reference_init(&ps->reference, 1);
    pipe_resource_reference(&ps->texture, pt);
    ps->format = surf_tmpl->format;
-   ps->width = u_minify(width0, surf_tmpl->u.tex.level);
-   ps->height = u_minify(height0, surf_tmpl->u.tex.level);
    ps->u.tex.level = surf_tmpl->u.tex.level;
    ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
    ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;

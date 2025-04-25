@@ -508,7 +508,7 @@ brw_alu2(struct brw_codegen *p, unsigned opcode,
    return insn;
 }
 
-static enum gfx10_align1_3src_vertical_stride
+static enum brw_align1_3src_vertical_stride
 to_3src_align1_vstride(const struct intel_device_info *devinfo,
                        enum brw_vertical_stride vstride)
 {
@@ -531,8 +531,20 @@ to_3src_align1_vstride(const struct intel_device_info *devinfo,
    }
 }
 
+static enum brw_align1_3src_dst_horizontal_stride
+to_3src_align1_dst_hstride(enum brw_horizontal_stride hstride)
+{
+   switch (hstride) {
+   case BRW_HORIZONTAL_STRIDE_1:
+      return BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_1;
+   case BRW_HORIZONTAL_STRIDE_2:
+      return BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_2;
+   default:
+      unreachable("invalid hstride");
+   }
+}
 
-static enum gfx10_align1_3src_src_horizontal_stride
+static enum brw_align1_3src_src_horizontal_stride
 to_3src_align1_hstride(enum brw_horizontal_stride hstride)
 {
    switch (hstride) {
@@ -596,9 +608,10 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
       brw_eu_inst_set_3src_a1_dst_reg_file(devinfo, inst, phys_file(dest));
       brw_eu_inst_set_3src_dst_reg_nr(devinfo, inst, phys_nr(devinfo, dest));
       brw_eu_inst_set_3src_a1_dst_subreg_nr(devinfo, inst, phys_subnr(devinfo, dest) / 8);
-      brw_eu_inst_set_3src_a1_dst_hstride(devinfo, inst, BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_1);
+      brw_eu_inst_set_3src_a1_dst_hstride(devinfo, inst,
+                                          to_3src_align1_dst_hstride(dest.hstride));
 
-      if (brw_type_is_float(dest.type)) {
+      if (brw_type_is_float_or_bfloat(dest.type)) {
          brw_eu_inst_set_3src_a1_exec_type(devinfo, inst,
                                         BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT);
       } else {
@@ -758,7 +771,7 @@ brw_dpas_three_src(struct brw_codegen *p, enum opcode opcode,
    brw_eu_inst_set_dpas_3src_dst_reg_nr(devinfo, inst, phys_nr(devinfo, dest));
    brw_eu_inst_set_dpas_3src_dst_subreg_nr(devinfo, inst, phys_subnr(devinfo, dest));
 
-   if (brw_type_is_float(dest.type)) {
+   if (brw_type_is_float_or_bfloat(dest.type)) {
       brw_eu_inst_set_dpas_3src_exec_type(devinfo, inst,
                                        BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT);
    } else {
@@ -1512,7 +1525,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
       brw_eu_inst_set_send_sel_reg32_ex_desc(devinfo, send, 1);
       brw_eu_inst_set_send_ex_desc_ia_subreg_nr(devinfo, send, phys_subnr(devinfo, ex_desc) >> 2);
 
-      if (devinfo->ver >= 20 && sfid == GFX12_SFID_UGM)
+      if (devinfo->ver >= 20 && sfid == BRW_SFID_UGM)
          brw_eu_inst_set_bits(send, 103, 99, ex_mlen / reg_unit(devinfo));
    }
 
@@ -1522,7 +1535,7 @@ brw_send_indirect_split_message(struct brw_codegen *p,
        *
        * BSpec 56890
        */
-      if (devinfo->ver < 20 || sfid != GFX12_SFID_UGM)
+      if (devinfo->ver < 20 || sfid != BRW_SFID_UGM)
          brw_eu_inst_set_send_ex_bso(devinfo, send, true);
       brw_eu_inst_set_send_src1_len(devinfo, send, ex_mlen / reg_unit(devinfo));
    }
@@ -1608,8 +1621,7 @@ brw_find_loop_end(struct brw_codegen *p, int start_offset)
 	    return offset;
       }
    }
-   assert(!"not reached");
-   return start_offset;
+   unreachable("not reached");
 }
 
 /* After program generation, go back and update the UIP and JIP of

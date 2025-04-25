@@ -113,14 +113,27 @@ void r600_draw_rectangle(struct blitter_context *blitter,
 			 int x1, int y1, int x2, int y2,
 			 float depth, unsigned num_instances,
 			 enum blitter_attrib_type type,
-			 const union blitter_attrib *attrib)
+			 const struct blitter_attrib *attrib)
 {
-	struct r600_common_context *rctx =
-		(struct r600_common_context*)util_blitter_get_pipe(blitter);
+	struct r600_context *cctx =
+		(struct r600_context*)util_blitter_get_pipe(blitter);
+	struct r600_common_context *rctx = &cctx->b;
 	struct pipe_viewport_state viewport;
 	struct pipe_resource *buf = NULL;
 	unsigned offset = 0;
 	float *vb;
+
+	if (unlikely(MAX2(abs(x1), abs(x2)) > INT16_MAX ||
+		     MAX2(abs(y1), abs(y2)) > INT16_MAX)) {
+		/* Fallback when coordinates can't fit in int16. */
+		util_blitter_save_vertex_elements(cctx->blitter,
+						  cctx->vertex_fetch_shader.cso);
+		util_blitter_draw_rectangle(blitter, vertex_elements_cso, get_vs,
+					    x1, y1, x2, y2,
+					    depth, num_instances,
+					    type, attrib);
+		return;
+	}
 
 	rctx->b.bind_vertex_elements_state(&rctx->b, vertex_elements_cso);
 	rctx->b.bind_vs_state(&rctx->b, get_vs(blitter));
@@ -163,11 +176,6 @@ void r600_draw_rectangle(struct blitter_context *blitter,
 	vb[19] = 1;
 
 	switch (type) {
-	case UTIL_BLITTER_ATTRIB_COLOR:
-		memcpy(vb+4, attrib->color, sizeof(float)*4);
-		memcpy(vb+12, attrib->color, sizeof(float)*4);
-		memcpy(vb+20, attrib->color, sizeof(float)*4);
-		break;
 	case UTIL_BLITTER_ATTRIB_TEXCOORD_XYZW:
 	case UTIL_BLITTER_ATTRIB_TEXCOORD_XY:
 		vb[6] = vb[14] = vb[22] = attrib->texcoord.z;
@@ -1214,6 +1222,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_image_offset_to_range_base = 1,
 		.vectorize_tess_levels = 1,
 		.io_options = nir_io_mediump_is_32bit,
+		.vertex_id_zero_based = rscreen->info.gfx_level >= EVERGREEN,
 	};
 
 	rscreen->nir_options = nir_options;
@@ -1234,8 +1243,14 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 	}
 
 	if (rscreen->info.gfx_level < CAYMAN) {
-		rscreen->nir_options.lower_doubles_options = nir_lower_fp64_full_software;
 		rscreen->nir_options.lower_atomic_offset_to_range_base = true;
+
+		rscreen->nir_options.lower_doubles_options =
+			nir_lower_fp64_full_software |
+			nir_lower_dceil |
+			nir_lower_dsqrt |
+			nir_lower_drcp |
+			nir_lower_drsq;
 	} else {
 		rscreen->nir_options.lower_doubles_options =
 			nir_lower_ddiv |

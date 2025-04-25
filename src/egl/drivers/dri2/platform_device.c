@@ -211,7 +211,6 @@ static const __DRIkopperLoaderExtension kopper_loader_extension = {
 static const __DRIextension *image_loader_extensions[] = {
    &image_loader_extension.base,
    &image_lookup_extension.base,
-   &use_invalidate.base,
    &kopper_loader_extension.base,
    NULL,
 };
@@ -219,7 +218,6 @@ static const __DRIextension *image_loader_extensions[] = {
 static const __DRIextension *swrast_loader_extensions[] = {
    &swrast_pbuffer_loader_extension.base,
    &image_lookup_extension.base,
-   &use_invalidate.base,
    &kopper_loader_extension.base,
    NULL,
 };
@@ -338,14 +336,11 @@ EGLBoolean
 dri2_initialize_device(_EGLDisplay *disp)
 {
    const char *err;
-   struct dri2_egl_display *dri2_dpy = dri2_display_create();
-   if (!dri2_dpy)
-      return EGL_FALSE;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
    /* Extension requires a PlatformDisplay - the EGLDevice. */
    disp->Device = disp->PlatformDisplay;
 
-   disp->DriverData = (void *)dri2_dpy;
    err = "DRI2: failed to load driver";
    if (_eglDeviceSupports(disp->Device, _EGL_DEVICE_DRM)) {
       if (!device_probe_device(disp))
@@ -381,6 +376,5 @@ dri2_initialize_device(_EGLDisplay *disp)
    return EGL_TRUE;
 
 cleanup:
-   dri2_display_destroy(disp);
    return _eglError(EGL_NOT_INITIALIZED, err);
 }

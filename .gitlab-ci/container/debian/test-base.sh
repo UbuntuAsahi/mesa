@@ -169,10 +169,12 @@ section_end debian_setup
 ############### Download prebuilt kernel
 
 if [ "$DEBIAN_ARCH" = amd64 ]; then
-  uncollapsed_section_start kernel "Downloading kernel"
+  uncollapsed_section_start kernel "Downloading kernel for crosvm"
   export KERNEL_IMAGE_NAME=bzImage
-  mkdir -p /lava-files/
-  . .gitlab-ci/container/download-prebuilt-kernel.sh
+  mkdir -p /kernel
+  # shellcheck disable=SC2153 # KERNEL_IMAGE_BASE is set in the root .gitlab-ci.yml file
+  curl -L --retry 4 -f --retry-all-errors --retry-delay 60 \
+      -o "/kernel/${KERNEL_IMAGE_NAME}" "${KERNEL_IMAGE_BASE}/${DEBIAN_ARCH}/${KERNEL_IMAGE_NAME}"
   section_end kernel
 fi
 
@@ -200,7 +202,6 @@ fi
 
 # crosvm build fails on ARMv7 due to Xlib type-size issues
 if [ "$DEBIAN_ARCH" != "armhf" ]; then
-  uncollapsed_section_switch crosvm "Building crosvm"
   . .gitlab-ci/container/build-crosvm.sh
 fi
 
@@ -209,8 +210,6 @@ fi
 . .gitlab-ci/container/build-deqp-runner.sh
 
 ############### Build apitrace
-
-uncollapsed_section_switch apitrace "Building apitrace"
 
 . .gitlab-ci/container/build-apitrace.sh
 

@@ -5,6 +5,8 @@
 
 #include "panvk_utrace.h"
 
+#include "drm-uapi/panthor_drm.h"
+
 #include "genxml/cs_builder.h"
 #include "panvk_cmd_buffer.h"
 #include "panvk_device.h"
@@ -148,9 +150,11 @@ void
 panvk_per_arch(utrace_clone_init_builder)(struct cs_builder *b,
                                           struct panvk_pool *pool)
 {
+   const struct drm_panthor_csif_info *csif_info =
+      panthor_kmod_get_csif_props(pool->dev->kmod.dev);
    const struct cs_builder_conf builder_conf = {
-      .nr_registers = 96,
-      .nr_kernel_registers = 4,
+      .nr_registers = csif_info->cs_reg_count,
+      .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
       .alloc_buffer = alloc_clone_buffer,
       .cookie = pool,
    };
@@ -163,8 +167,9 @@ panvk_per_arch(utrace_clone_finish_builder)(struct cs_builder *b)
    const struct cs_index flush_id = cs_scratch_reg32(b, 0);
 
    cs_move32_to(b, flush_id, 0);
-   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_NONE, false,
-                   flush_id, cs_defer(SB_IMM_MASK, SB_ID(IMM_FLUSH)));
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_NONE,
+                   MALI_CS_OTHER_FLUSH_MODE_NONE, flush_id,
+                   cs_defer(SB_IMM_MASK, SB_ID(IMM_FLUSH)));
    cs_wait_slot(b, SB_ID(IMM_FLUSH), false);
 
    cs_finish(b);

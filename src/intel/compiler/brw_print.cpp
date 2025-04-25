@@ -30,8 +30,14 @@ brw_print_instructions(const brw_shader &s, FILE *file)
          fprintf(file, "\n");
 
          foreach_inst_in_block(brw_inst, inst, block) {
-            if (inst->is_control_flow_end())
+            /* SHADER_OPCODE_FLOW ends a block, but it does not change the
+             * control flow nested (i.e., the indentation).
+             */
+            if (inst->is_control_flow_end() && inst->opcode != SHADER_OPCODE_FLOW) {
+               /* If cf_count is 0 and decremented, bad things will happen. */
+               assert(cf_count > 0);
                cf_count -= 1;
+            }
 
             if (rp) {
                max_pressure = MAX2(max_pressure, rp->regs_live_at_ip[ip]);
@@ -280,6 +286,8 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
       return "inclusive_scan";
    case SHADER_OPCODE_EXCLUSIVE_SCAN:
       return "exclusive_scan";
+   case SHADER_OPCODE_LOAD_REG:
+      return "load_reg";
    case SHADER_OPCODE_VOTE_ANY:
       return "vote_any";
    case SHADER_OPCODE_VOTE_ALL:
@@ -294,6 +302,9 @@ brw_instruction_name(const struct brw_isa_info *isa, enum opcode op)
       return "read_from_live_channel";
    case SHADER_OPCODE_READ_FROM_CHANNEL:
       return "read_from_channel";
+
+   case SHADER_OPCODE_FLOW:
+      return "flow";
    }
 
    unreachable("not reached");

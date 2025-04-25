@@ -77,12 +77,9 @@
 
   <enum name="Layout">
     <value name="Linear" value="0"/>
-    <!-- Needs investigation, blob uses this with sparse -->
-    <value name="Tiled" value="1"/>
-    <!-- Morton order -->
-    <value name="Twiddled" value="2"/>
-    <!-- With a metadata buffer -->
-    <value name="Compressed" value="3"/>
+    <value name="Twiddled" value="1"/>
+    <value name="GPU" value="2"/>
+    <value name="Interchange" value="3"/>
   </enum>
 
   <enum name="Channels">
@@ -206,12 +203,9 @@
 
   <enum name="Image Mode">
     <value name="Normal" value="0"/>
-    <!-- Needs investigation, only seen with null textures so far -->
-    <value name="Null" value="1"/>
-    <!-- This is r/e, I can name things however I'd like.
-         Might be a legacy mode of some kind, we should investigate.
-      -->
-    <value name="Sparse but it does not seem to work" value="2"/>
+    <!-- This is r/e, I can name things however I'd like. -->
+    <value name="Not sparse but probably with counters" value="1"/>
+    <value name="Sparse but probably no counters" value="2"/>
     <value name="Sparse" value="3"/>
   </enum>
 
@@ -1120,6 +1114,11 @@
     <field name="Z Format" start="25" size="2" type="ZLS Format"/>
     <field name="Z Resolve" start="56" size="1" type="bool"/>
     <field name="S Resolve" start="58" size="1" type="bool"/>
+  </struct>
+
+  <struct name="CR ISP ZLS Pixels" size="4">
+    <field name="X" start="0" size="15" type="uint" modifier="minus(1)"/>
+    <field name="Y" start="15" size="15" type="uint" modifier="minus(1)"/>
   </struct>
 
 </genxml>

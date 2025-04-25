@@ -2957,7 +2957,7 @@ static void si_build_shader_variant(struct si_shader *shader, int thread_index, 
       compiler = &shader->compiler_ctx_state.compiler;
    }
 
-   if (!sel->info.base.use_aco_amd && !*compiler)
+   if (!si_shader_uses_aco(shader) && !*compiler)
       *compiler = si_create_llvm_compiler(sscreen);
 
    if (unlikely(!si_create_shader_variant(sscreen, *compiler, shader, debug))) {
@@ -3011,6 +3011,7 @@ static bool si_check_missing_main_part(struct si_screen *sscreen, struct si_shad
          main_part->key.ge.as_es = key->ge.as_es;
          main_part->key.ge.as_ls = key->ge.as_ls;
          main_part->key.ge.as_ngg = key->ge.as_ngg;
+         main_part->key.ge.use_aco = key->ge.use_aco;
       }
       main_part->is_monolithic = false;
       main_part->wave_size = wave_size;
@@ -3172,11 +3173,11 @@ current_not_ready:
    }
 
    util_queue_fence_init(&shader->ready);
+   shader->selector = sel;
 
-   if (!sel->info.base.use_aco_amd && !sctx->compiler)
+   if (!si_shader_uses_aco(shader) && !sctx->compiler)
       sctx->compiler = si_create_llvm_compiler(sctx->screen);
 
-   shader->selector = sel;
    *((SHADER_KEY_TYPE*)&shader->key) = *key;
    shader->wave_size = si_determine_wave_size(sscreen, shader);
    shader->compiler_ctx_state.compiler = sctx->compiler;
@@ -3225,6 +3226,8 @@ current_not_ready:
          } else {
             assert(0);
          }
+
+         shader1_key.ge.use_aco = ((struct si_shader_key_ge*)key)->use_aco;
 
          simple_mtx_lock(&previous_stage_sel->mutex);
          ok = si_check_missing_main_part(sscreen, previous_stage_sel, &shader->compiler_ctx_state,
@@ -3426,12 +3429,15 @@ static void si_init_shader_selector_async(void *job, void *gdata, int thread_ind
       shader->is_monolithic = false;
       si_parse_next_shader_property(&sel->info, &shader->key);
 
-      if (sel->stage <= MESA_SHADER_GEOMETRY &&
-          sscreen->use_ngg && (!sel->info.enabled_streamout_buffer_mask ||
-                               sscreen->info.gfx_level >= GFX11) &&
-          ((sel->stage == MESA_SHADER_VERTEX && !shader->key.ge.as_ls) ||
-           sel->stage == MESA_SHADER_TESS_EVAL || sel->stage == MESA_SHADER_GEOMETRY))
-         shader->key.ge.as_ngg = 1;
+      if (sel->stage <= MESA_SHADER_GEOMETRY) {
+         if (sscreen->use_ngg && (!sel->info.enabled_streamout_buffer_mask ||
+                                  sscreen->info.gfx_level >= GFX11) &&
+             ((sel->stage == MESA_SHADER_VERTEX && !shader->key.ge.as_ls) ||
+              sel->stage == MESA_SHADER_TESS_EVAL || sel->stage == MESA_SHADER_GEOMETRY))
+            shader->key.ge.as_ngg = 1;
+
+         shader->key.ge.use_aco = sel->nir->info.use_aco_amd;
+      }
 
       shader->wave_size = si_determine_wave_size(sscreen, shader);
 
@@ -3657,7 +3663,6 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
       sscreen->info.gfx_level >= GFX10 &&
       sscreen->use_ngg_culling &&
       sel->info.writes_position &&
-      !sel->info.writes_viewport_index && /* cull only against viewport 0 */
       !sel->nir->info.writes_memory &&
       /* NGG GS supports culling with streamout because it culls after streamout. */
       (sel->stage == MESA_SHADER_GEOMETRY || !sel->info.enabled_streamout_buffer_mask) &&
@@ -3697,19 +3702,10 @@ static void *si_create_shader(struct pipe_context *ctx, const struct pipe_shader
       ctx, &sscreen->live_shader_cache, state, &cache_hit);
 
    if (sel && cache_hit && sctx->debug.debug_message) {
-      for (unsigned i = 0; i < 2; i++) {
-         if (sel->main_shader_part[i])
-            si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part[i], &sctx->debug);
-         if (sel->main_shader_part_ls[i])
-            si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_ls[i], &sctx->debug);
-         if (sel->main_shader_part_ngg[i])
-            si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_ngg[i], &sctx->debug);
-         if (sel->main_shader_part_ngg_es[i])
-            si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_ngg_es[i], &sctx->debug);
+      for (unsigned i = 0; i < ARRAY_SIZE(sel->main_parts.variants); i++) {
+         if (sel->main_parts.variants[i])
+            si_shader_dump_stats_for_shader_db(sscreen, sel->main_parts.variants[i], &sctx->debug);
       }
-
-      if (sel->main_shader_part_es)
-         si_shader_dump_stats_for_shader_db(sscreen, sel->main_shader_part_es, &sctx->debug);
    }
    return sel;
 }
@@ -3821,17 +3817,26 @@ static void si_update_last_vgt_stage_state(struct si_context *sctx,
 static void si_bind_vs_shader(struct pipe_context *ctx, void *state)
 {
    struct si_context *sctx = (struct si_context *)ctx;
-   struct si_shader_selector *old_hw_vs = si_get_vs(sctx)->cso;
-   struct si_shader *old_hw_vs_variant = si_get_vs(sctx)->current;
    struct si_shader_selector *sel = (struct si_shader_selector*)state;
 
    if (sctx->shader.vs.cso == sel)
       return;
 
+   struct si_shader_selector *old_hw_vs = si_get_vs(sctx)->cso;
+   struct si_shader *old_hw_vs_variant = si_get_vs(sctx)->current;
+   bool old_uses_vbos = si_vs_uses_vbos(sctx->shader.vs.cso);
+   bool new_uses_vbos = si_vs_uses_vbos(sel);
+
    sctx->shader.vs.cso = sel;
    sctx->shader.vs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+   sctx->shader.vs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
    sctx->num_vs_blit_sgprs = sel ? sel->info.base.vs.blit_sgprs_amd : 0;
    sctx->vs_uses_draw_id = sel ? sel->info.uses_drawid : false;
+
+   if (old_uses_vbos != new_uses_vbos) {
+      sctx->num_vertex_elements = new_uses_vbos ? sctx->vertex_elements->count : 0;
+      sctx->vertex_buffers_dirty = new_uses_vbos;
+   }
 
    if (si_update_ngg(sctx))
       si_shader_change_notify(sctx);
@@ -3916,6 +3921,7 @@ static void si_bind_gs_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.gs.cso = sel;
    sctx->shader.gs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+   sctx->shader.gs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
    sctx->ia_multi_vgt_param_key.u.uses_gs = sel != NULL;
 
    si_update_common_shader_state(sctx, sel, PIPE_SHADER_GEOMETRY);
@@ -3947,6 +3953,7 @@ static void si_bind_tcs_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.tcs.cso = sel;
    sctx->shader.tcs.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+   sctx->shader.tcs.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
    si_update_tess_uses_prim_id(sctx);
    si_update_tess_in_out_patch_vertices(sctx);
 
@@ -3969,6 +3976,7 @@ static void si_bind_tes_shader(struct pipe_context *ctx, void *state)
 
    sctx->shader.tes.cso = sel;
    sctx->shader.tes.current = (sel && sel->variants_count) ? sel->variants[0] : NULL;
+   sctx->shader.tes.key.ge.use_aco = sel ? sel->info.base.use_aco_amd : 0;
    sctx->ia_multi_vgt_param_key.u.uses_tess = sel != NULL;
    si_update_tess_uses_prim_id(sctx);
 
@@ -4142,19 +4150,10 @@ static void si_destroy_shader_selector(struct pipe_context *ctx, void *cso)
       si_delete_shader(sctx, sel->variants[i]);
    }
 
-   for (unsigned i = 0; i < 2; i++) {
-      if (sel->main_shader_part[i])
-         si_delete_shader(sctx, sel->main_shader_part[i]);
-      if (sel->main_shader_part_ls[i])
-         si_delete_shader(sctx, sel->main_shader_part_ls[i]);
-      if (sel->main_shader_part_ngg[i])
-         si_delete_shader(sctx, sel->main_shader_part_ngg[i]);
-      if (sel->main_shader_part_ngg_es[i])
-         si_delete_shader(sctx, sel->main_shader_part_ngg_es[i]);
+   for (unsigned i = 0; i < ARRAY_SIZE(sel->main_parts.variants); i++) {
+      if (sel->main_parts.variants[i])
+         si_delete_shader(sctx, sel->main_parts.variants[i]);
    }
-
-   if (sel->main_shader_part_es)
-      si_delete_shader(sctx, sel->main_shader_part_es);
 
    free(sel->keys);
    free(sel->variants);

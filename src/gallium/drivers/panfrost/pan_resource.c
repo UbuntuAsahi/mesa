@@ -45,6 +45,7 @@
 #include "util/u_surface.h"
 #include "util/u_transfer.h"
 #include "util/u_transfer_helper.h"
+#include "util/perf/cpu_trace.h"
 
 #include "decode.h"
 #include "pan_bo.h"
@@ -85,7 +86,7 @@ panfrost_clear_render_target(struct pipe_context *pipe,
       return;
 
    panfrost_blitter_save(
-      ctx, render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE);
+      ctx, (render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE) | PAN_SAVE_FRAGMENT_CONSTANT);
    util_blitter_clear_render_target(ctx->blitter, dst, color, dstx, dsty, width,
                                     height);
 }
@@ -259,22 +260,14 @@ panfrost_create_surface(struct pipe_context *pipe, struct pipe_resource *pt,
 
       if (pt->target != PIPE_BUFFER) {
          assert(surf_tmpl->u.tex.level <= pt->last_level);
-         ps->width = u_minify(pt->width0, surf_tmpl->u.tex.level);
-         ps->height = u_minify(pt->height0, surf_tmpl->u.tex.level);
          ps->nr_samples = surf_tmpl->nr_samples;
          ps->u.tex.level = surf_tmpl->u.tex.level;
          ps->u.tex.first_layer = surf_tmpl->u.tex.first_layer;
          ps->u.tex.last_layer = surf_tmpl->u.tex.last_layer;
       } else {
-         /* setting width as number of elements should get us correct
-          * renderbuffer width */
-         ps->width =
-            surf_tmpl->u.buf.last_element - surf_tmpl->u.buf.first_element + 1;
-         ps->height = pt->height0;
          ps->u.buf.first_element = surf_tmpl->u.buf.first_element;
          ps->u.buf.last_element = surf_tmpl->u.buf.last_element;
          assert(ps->u.buf.first_element <= ps->u.buf.last_element);
-         assert(ps->u.buf.last_element < ps->width);
       }
    }
 
@@ -730,6 +723,8 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
                                        const struct pipe_resource *template,
                                        uint64_t modifier)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_device *dev = pan_device(screen);
 
    struct panfrost_resource *so = CALLOC_STRUCT(panfrost_resource);
@@ -908,6 +903,8 @@ panfrost_resource_create_with_modifiers(struct pipe_screen *screen,
 static void
 panfrost_resource_destroy(struct pipe_screen *screen, struct pipe_resource *pt)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_device *dev = pan_device(screen);
    struct panfrost_resource *rsrc = (struct panfrost_resource *)pt;
 
@@ -1220,6 +1217,8 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
                  const struct pipe_box *box,
                  struct pipe_transfer **out_transfer)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_context *ctx = pan_context(pctx);
    struct panfrost_device *dev = pan_device(pctx->screen);
    struct panfrost_resource *rsrc = pan_resource(resource);
@@ -1439,7 +1438,9 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
       if (usage & PIPE_MAP_WRITE) {
          BITSET_SET(rsrc->valid.data, level);
          panfrost_minmax_cache_invalidate(
-            rsrc->index_cache, transfer->base.box.x, transfer->base.box.width);
+            rsrc->index_cache,
+            util_format_get_blocksize(rsrc->base.format),
+            transfer->base.box.x, transfer->base.box.width);
       }
 
       return bo->ptr.cpu + rsrc->image.layout.slices[level].offset +
@@ -1454,6 +1455,8 @@ pan_resource_modifier_convert(struct panfrost_context *ctx,
                               struct panfrost_resource *rsrc, uint64_t modifier,
                               bool copy_resource, const char *reason)
 {
+   MESA_TRACE_FUNC();
+
    bool need_shadow = rsrc->modifier_constant;
 
    assert(!rsrc->modifier_constant || copy_resource);
@@ -1689,6 +1692,8 @@ void
 panfrost_pack_afbc(struct panfrost_context *ctx,
                    struct panfrost_resource *prsrc)
 {
+   MESA_TRACE_FUNC();
+
    struct panfrost_screen *screen = pan_screen(ctx->base.screen);
    struct panfrost_device *dev = pan_device(ctx->base.screen);
    struct panfrost_bo *metadata_bo;
@@ -1817,6 +1822,8 @@ panfrost_pack_afbc(struct panfrost_context *ctx,
 static void
 panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
 {
+   MESA_TRACE_FUNC();
+
    /* Gallium expects writeback here, so we tile */
 
    struct panfrost_context *ctx = pan_context(pctx);
@@ -1900,7 +1907,9 @@ panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
                   transfer->box.x + transfer->box.width);
 
    if (transfer->usage & PIPE_MAP_WRITE) {
-      panfrost_minmax_cache_invalidate(prsrc->index_cache, transfer->box.x,
+      panfrost_minmax_cache_invalidate(prsrc->index_cache,
+                                       util_format_get_blocksize(prsrc->base.format),
+                                       transfer->box.x,
                                        transfer->box.width);
    }
 

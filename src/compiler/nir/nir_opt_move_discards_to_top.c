@@ -261,7 +261,7 @@ opt_move_discards_to_top_impl(nir_function_impl *impl)
                   instr->pass_flags = STOP_PROCESSING_INSTR_FLAG;
                   goto break_all;
                }
-            FALLTHROUGH;
+               FALLTHROUGH;
             case nir_intrinsic_demote_if:
                try_move_discard(intrin, &next_discard_id);
                break;
@@ -344,8 +344,8 @@ break_all:
    return progress;
 }
 
-/* This optimization only operates on discard_if/demoe_if so
- * nir_opt_conditional_discard and nir_lower_discard_or_demote
+/* This optimization only operates on terminate_if/demote_if so
+ * nir_opt_peephole_select and nir_lower_discard_or_demote
  * should have been called before.
  */
 bool
@@ -360,8 +360,7 @@ nir_opt_move_discards_to_top(nir_shader *shader)
 
    nir_foreach_function_impl(impl, shader) {
       if (opt_move_discards_to_top_impl(impl)) {
-         nir_metadata_preserve(impl, nir_metadata_control_flow);
-         progress = true;
+         progress = nir_progress(true, impl, nir_metadata_control_flow);
       }
    }
 

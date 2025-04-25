@@ -1114,6 +1114,10 @@ v3d_fixup_fs_output_types(struct v3d_compile *c)
                 case FRAG_RESULT_DATA1:
                 case FRAG_RESULT_DATA2:
                 case FRAG_RESULT_DATA3:
+                case FRAG_RESULT_DATA4:
+                case FRAG_RESULT_DATA5:
+                case FRAG_RESULT_DATA6:
+                case FRAG_RESULT_DATA7:
                         mask = 1 << (var->data.location - FRAG_RESULT_DATA0);
                         break;
                 }
@@ -1136,6 +1140,7 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
         if (c->fs_key->int_color_rb || c->fs_key->uint_color_rb)
                 v3d_fixup_fs_output_types(c);
 
+        NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
         NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
 
         if (c->fs_key->line_smoothing) {
@@ -1576,8 +1581,7 @@ v3d_nir_sort_constant_ubo_loads(nir_shader *s, struct v3d_compile *c)
                         c->sorted_any_ubo_loads |=
                                 v3d_nir_sort_constant_ubo_loads_block(c, block);
                 }
-                nir_metadata_preserve(impl,
-                                      nir_metadata_control_flow);
+                nir_progress(true, impl, nir_metadata_control_flow);
         }
         return c->sorted_any_ubo_loads;
 }
@@ -1672,8 +1676,7 @@ v3d_nir_lower_subgroup_intrinsics(nir_shader *s, struct v3d_compile *c)
                 nir_foreach_block(block, impl)
                         progress |= lower_subgroup_intrinsics(c, block, &b);
 
-                nir_metadata_preserve(impl,
-                                      nir_metadata_control_flow);
+                nir_progress(true, impl, nir_metadata_control_flow);
         }
         return progress;
 }
@@ -2198,10 +2201,7 @@ vir_compile_destroy(struct v3d_compile *c)
         c->cursor.link = NULL;
 
         vir_for_each_block(block, c) {
-                while (!list_is_empty(&block->instructions)) {
-                        struct qinst *qinst =
-                                list_first_entry(&block->instructions,
-                                                 struct qinst, link);
+                list_for_each_entry_safe(struct qinst, qinst, &block->instructions, link) {
                         vir_remove_instruction(c, qinst);
                 }
         }

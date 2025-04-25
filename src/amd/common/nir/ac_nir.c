@@ -57,6 +57,7 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
    options->lower_unpack_unorm_4x8 = true;
    options->lower_unpack_half_2x16 = true;
    options->lower_fpow = true;
+   options->lower_mul_high16 = true;
    options->lower_mul_2x32_64 = true;
    options->lower_iadd_sat = info->gfx_level <= GFX8;
    options->lower_hadd = true;
@@ -82,6 +83,7 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
    options->has_fmulz = true;
    options->has_msad = true;
    options->has_shfr32 = true;
+   options->has_mul24_relaxed = true;
    options->lower_int64_options = nir_lower_imul64 | nir_lower_imul_high64 | nir_lower_imul_2x32_64 | nir_lower_divmod64 |
                                   nir_lower_minmax64 | nir_lower_iabs64 | nir_lower_iadd_sat64 | nir_lower_conv64;
    options->divergence_analysis_options = nir_divergence_view_index_uniform;

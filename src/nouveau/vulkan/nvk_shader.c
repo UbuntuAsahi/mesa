@@ -179,12 +179,14 @@ nvk_get_spirv_options(struct vk_physical_device *vk_pdev,
 }
 
 static void
-nvk_preprocess_nir(struct vk_physical_device *vk_pdev, nir_shader *nir)
+nvk_preprocess_nir(struct vk_physical_device *vk_pdev,
+                   nir_shader *nir,
+                   UNUSED const struct vk_pipeline_robustness_state *rs)
 {
    const struct nvk_physical_device *pdev =
       container_of(vk_pdev, struct nvk_physical_device, vk);
 
-   NIR_PASS_V(nir, nir_lower_io_to_temporaries,
+   NIR_PASS(_, nir, nir_lower_io_to_temporaries,
               nir_shader_get_entrypoint(nir), true, false);
 
    if (use_nak(pdev, nir->info.stage))
@@ -1248,7 +1250,53 @@ nvk_shader_get_executable_statistics(
    }
 
    vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-      WRITE_STR(stat->name, "Code Size");
+      WRITE_STR(stat->name, "Static cycle count");
+      WRITE_STR(stat->description,
+                "Total cycles used by fixed-latency instructions in this shader");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.num_static_cycles;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Max warps/SM");
+      WRITE_STR(stat->description,
+                "Maximum number of warps per SM based on static information");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.max_warps_per_sm;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Spills to memory");
+      WRITE_STR(stat->description, "Number of spills from GPRs to memory");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.num_spills_to_mem;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Fills from memory");
+      WRITE_STR(stat->description, "Number of fills from memory to GPRs");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.num_spills_to_mem;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Spills to reg");
+      WRITE_STR(stat->description,
+                "Number of spills between different register files");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.num_spills_to_reg;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Fills from reg");
+      WRITE_STR(stat->description,
+                "Number of fills between different register files");
+      stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
+      stat->value.u64 = shader->info.num_fills_from_reg;
+   }
+
+   vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
+      WRITE_STR(stat->name, "Code size");
       WRITE_STR(stat->description,
                 "Size of the compiled shader binary, in bytes");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;
@@ -1263,7 +1311,7 @@ nvk_shader_get_executable_statistics(
    }
 
    vk_outarray_append_typed(VkPipelineExecutableStatisticKHR, &out, stat) {
-      WRITE_STR(stat->name, "SLM Size");
+      WRITE_STR(stat->name, "SLM size");
       WRITE_STR(stat->description,
                 "Size of shader local (scratch) memory, in bytes");
       stat->format = VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR;

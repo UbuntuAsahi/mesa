@@ -930,7 +930,9 @@ brw_fb_write_desc_coarse_write(const struct intel_device_info *devinfo,
 static inline bool
 lsc_opcode_has_cmask(enum lsc_opcode opcode)
 {
-   return opcode == LSC_OP_LOAD_CMASK || opcode == LSC_OP_STORE_CMASK;
+   return opcode == LSC_OP_LOAD_CMASK || opcode == LSC_OP_STORE_CMASK ||
+          opcode == LSC_OP_LOAD_CMASK_MSRT ||
+          opcode == LSC_OP_STORE_CMASK_MSRT;
 }
 
 static inline bool
@@ -943,7 +945,8 @@ static inline bool
 lsc_opcode_is_store(enum lsc_opcode opcode)
 {
    return opcode == LSC_OP_STORE ||
-          opcode == LSC_OP_STORE_CMASK;
+          opcode == LSC_OP_STORE_CMASK ||
+          opcode == LSC_OP_STORE_CMASK_MSRT;
 }
 
 static inline bool
@@ -1006,6 +1009,7 @@ lsc_op_num_data_values(unsigned _op)
    case LSC_OP_LOAD:
    case LSC_OP_LOAD_CMASK:
    case LSC_OP_FENCE:
+   case LSC_OP_LOAD_CMASK_MSRT:
       /* XXX: actually check docs */
       return 0;
    default:
@@ -1062,6 +1066,8 @@ lsc_op_to_legacy_atomic(unsigned _op)
    case LSC_OP_STORE:
    case LSC_OP_STORE_CMASK:
    case LSC_OP_FENCE:
+   case LSC_OP_LOAD_CMASK_MSRT:
+   case LSC_OP_STORE_CMASK_MSRT:
       unreachable("not an atomic op");
    }
 
@@ -1417,6 +1423,19 @@ brw_pixel_interp_desc(UNUSED const struct intel_device_info *devinfo,
            SET_BITS(!!noperspective, 14, 14) |
            SET_BITS(coarse_pixel_rate, 15, 15) |
            SET_BITS(simd_mode, 16, 16));
+}
+
+static inline enum gfx12_systolic_depth
+translate_systolic_depth(unsigned d)
+{
+   /* Could also return (ffs(d) - 1) & 3. */
+   switch (d) {
+   case 2:  return BRW_SYSTOLIC_DEPTH_2;
+   case 4:  return BRW_SYSTOLIC_DEPTH_4;
+   case 8:  return BRW_SYSTOLIC_DEPTH_8;
+   case 16: return BRW_SYSTOLIC_DEPTH_16;
+   default: unreachable("Invalid systolic depth.");
+   }
 }
 
 /**

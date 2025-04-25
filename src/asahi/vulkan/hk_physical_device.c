@@ -23,7 +23,6 @@
 #include "util/simple_mtx.h"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/wsi/wsi_common.h"
-#include "unstable_asahi_drm.h"
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 
@@ -68,11 +67,8 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
       .KHR_external_memory_fd = true,
-      /* XXX: External timeline semaphores maybe broken in kernel, see
-       * dEQP-VK.synchronization.signal_order.shared_timeline_semaphore.write_copy_buffer_to_image_read_image_compute.image_128_r32_uint_opaque_fd
-       */
-      .KHR_external_semaphore = false,
-      .KHR_external_semaphore_fd = false,
+      .KHR_external_semaphore = true,
+      .KHR_external_semaphore_fd = true,
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = false,
       .KHR_get_memory_requirements2 = true,
@@ -91,6 +87,8 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance4 = true,
       .KHR_maintenance5 = true,
       .KHR_maintenance6 = true,
+      .KHR_maintenance7 = true,
+      .KHR_maintenance8 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_pipeline_executable_properties = true,
@@ -105,7 +103,6 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
-      // TODO: wait for nvk
       .KHR_shader_float_controls2 = true,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_integer_dot_product = true,
@@ -153,6 +150,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_hdr_metadata = true,
       .EXT_host_query_reset = true,
       .EXT_host_image_copy = true,
       .EXT_image_2d_view_of_3d = true,
@@ -178,6 +176,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = false,
       .EXT_provoking_vertex = true,
+      .EXT_queue_family_foreign = true,
       .EXT_robustness2 = true,
       .EXT_sample_locations = true,
       .EXT_sampler_filter_minmax = false,
@@ -273,14 +272,7 @@ hk_get_device_features(
       .sparseResidency8Samples = false,
       .sparseResidencyAliased = true,
       .sparseResidencyImage2D = true,
-
-      /* We depend on soft fault to implement sparse residency on buffers with
-       * the appropriate semantics. Lifting this requirement would be possible
-       * but challenging, given the requirements imposed by
-       * sparseResidencyNonResidentStrict.
-       */
-      .sparseResidencyBuffer =
-         (dev->params.feat_compat & DRM_ASAHI_FEAT_SOFT_FAULTS),
+      .sparseResidencyBuffer = true,
 
       /* This needs investigation. */
       .sparseResidencyImage3D = false,
@@ -394,6 +386,12 @@ hk_get_device_features(
       /* VK_KHR_maintenance6 */
       .maintenance6 = true,
 
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
+
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
@@ -442,7 +440,7 @@ hk_get_device_features(
       .borderColorSwizzleFromImage = false,
 
       /* VK_EXT_buffer_device_address */
-      .bufferDeviceAddressCaptureReplayEXT = false,
+      .bufferDeviceAddressCaptureReplayEXT = true,
 
       /* VK_EXT_color_write_enable */
       .colorWriteEnable = true,
@@ -618,6 +616,14 @@ hk_get_device_properties(const struct agx_device *dev,
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
 
+   /* The hardware limit is 128. However, we need to set a lower limit to
+    * account for duplicated system values: clip/cull and viewport targets.
+    * There are up to 8 combined clip/cull planes and only 1 viewport target,
+    * giving a theoretical limit of 119. We round down to 116 to give a sensible
+    * limit in vec4s.
+    */
+   unsigned max_vgt_output_components = 116;
+
    *properties = (struct vk_properties){
       .apiVersion = hk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
@@ -669,13 +675,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxVertexInputAttributeOffset = 65535,
       .maxVertexInputBindingStride = 2048,
 
-      /* Hardware limit is 128 but we need to reserve some for internal purposes
-       * (like cull distance emulation). Set 96 to be safe.
-       */
-      .maxVertexOutputComponents = 96,
+      .maxVertexOutputComponents = max_vgt_output_components,
       .maxGeometryShaderInvocations = 32,
       .maxGeometryInputComponents = 128,
-      .maxGeometryOutputComponents = 128,
+      .maxGeometryOutputComponents = max_vgt_output_components,
       .maxGeometryOutputVertices = 1024,
       .maxGeometryTotalOutputComponents = 1024,
       .maxTessellationGenerationLevel = 64,
@@ -685,10 +688,10 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxTessellationControlPerPatchOutputComponents = 120,
       .maxTessellationControlTotalOutputComponents = 4216,
       .maxTessellationEvaluationInputComponents = 128,
-      .maxTessellationEvaluationOutputComponents = 128,
+      .maxTessellationEvaluationOutputComponents = max_vgt_output_components,
 
       /* Set to match maxVertexOutputComponents, hardware limit is higher. */
-      .maxFragmentInputComponents = 96,
+      .maxFragmentInputComponents = max_vgt_output_components,
       .maxFragmentOutputAttachments = HK_MAX_RTS,
       .maxFragmentDualSrcAttachments = 1,
       .maxFragmentCombinedOutputResources = 16,
@@ -732,7 +735,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .sampledImageStencilSampleCounts = sample_counts,
       .storageImageSampleCounts = sample_counts,
       .maxSampleMaskWords = 1,
-      .timestampComputeAndGraphics = agx_supports_timestamps(dev),
+      .timestampComputeAndGraphics = true,
       /* FIXME: Is timestamp period actually 1? */
       .timestampPeriod = 1.0f,
       .maxClipDistances = 8,
@@ -897,6 +900,19 @@ hk_get_device_properties(const struct agx_device *dev,
       .blockTexelViewCompatibleMultipleLayers = false,
       .maxCombinedImageSamplerDescriptorCount = 3,
       .fragmentShadingRateClampCombinerInputs = false,
+
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = false, /* TODO */
+      .maxDescriptorSetTotalUniformBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetTotalStorageBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetTotalBuffersDynamic = HK_MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS / 2,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic =
+         HK_MAX_DYNAMIC_BUFFERS,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = os_page_size,
@@ -1406,8 +1422,7 @@ hk_GetPhysicalDeviceQueueFamilyProperties2(
       {
          p->queueFamilyProperties.queueFlags = queue_family->queue_flags;
          p->queueFamilyProperties.queueCount = queue_family->queue_count;
-         p->queueFamilyProperties.timestampValidBits =
-            agx_supports_timestamps(&pdev->dev) ? 64 : 0;
+         p->queueFamilyProperties.timestampValidBits = 64;
          p->queueFamilyProperties.minImageTransferGranularity =
             (VkExtent3D){1, 1, 1};
 

@@ -79,10 +79,10 @@ option(
   type : 'array',
   value : ['auto'],
   choices : [
-    'auto', 'radeonsi', 'r300', 'r600', 'nouveau', 'freedreno',
-    'swrast', 'v3d', 'vc4', 'etnaviv', 'tegra', 'i915', 'svga', 'virgl',
-    'panfrost', 'iris', 'lima', 'zink', 'd3d12', 'asahi', 'crocus', 'all',
-    'softpipe', 'llvmpipe',
+    'all', 'auto',
+    'asahi', 'crocus', 'd3d12', 'etnaviv', 'freedreno', 'i915', 'iris',
+    'lima', 'llvmpipe', 'nouveau', 'panfrost', 'r300', 'r600', 'radeonsi',
+    'softpipe', 'svga', 'tegra', 'v3d', 'vc4', 'virgl', 'zink',
   ],
   description : 'List of gallium drivers to build. If this is set to auto ' +
                 'all drivers applicable to the target OS/architecture ' +
@@ -127,8 +127,8 @@ option(
 option(
   'gallium-xa',
   type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
   description : 'enable gallium xa frontend.',
+  deprecated: true,
 )
 
 option(
@@ -136,6 +136,7 @@ option(
   type : 'boolean',
   value : false,
   description : 'build gallium "nine" Direct3D 9.x frontend.',
+  deprecated: true,
 )
 
 option(
@@ -151,6 +152,7 @@ option(
   choices : ['icd', 'standalone', 'disabled'],
   value : 'disabled',
   description : 'build gallium "clover" OpenCL frontend.',
+  deprecated: true,
 )
 
 option(
@@ -297,9 +299,8 @@ option(
 option(
   'shared-glapi',
   type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
-  description : 'Whether to build a shared or static glapi. Defaults to ' +
-                'disabled on Windows, enabled elsewhere'
+  deprecated: true,
+  description : 'Does nothing, left here for a while to avoid build breakages.',
 )
 
 option(
@@ -328,6 +329,13 @@ option(
   type : 'feature',
   deprecated: {'true': 'enabled', 'false': 'disabled'},
   description : 'Build support for gbm platform'
+)
+
+option(
+  'libgbm-external',
+  type: 'boolean',
+  value: false,
+  description: 'Whether to use external libgbm (default: use in-tree copy)'
 )
 
 option(
@@ -466,6 +474,13 @@ option(
 )
 
 option(
+  'build-radv-tests',
+  type : 'boolean',
+  value : false,
+  description : 'Build RADV tests. These do not require an AMD GPU.'
+)
+
+option(
   'build-aco-tests',
   type : 'boolean',
   value : false,
@@ -513,7 +528,8 @@ option(
   'osmesa',
   type : 'boolean',
   value : false,
-  description : 'Build OSmesa.'
+  deprecated : true,
+  description : 'Does nothing, left here for a while to avoid build breakages.',
 )
 
 option(
@@ -529,8 +545,8 @@ option(
 option(
   'power8',
   type : 'feature',
-  deprecated: {'true': 'enabled', 'false': 'disabled'},
-  description : 'Enable power8 optimizations.',
+  description : 'Does nothing, left here for a while to avoid build breakages.',
+  deprecated: true,
 )
 
 option(

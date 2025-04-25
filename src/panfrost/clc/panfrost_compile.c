@@ -43,6 +43,9 @@ static const struct spirv_to_nir_options spirv_options = {
 static const nir_shader_compiler_options *
 get_compiler_options(unsigned arch)
 {
+   if (arch >= 11)
+      return &bifrost_nir_options_v11;
+
    if (arch >= 9)
       return &bifrost_nir_options_v9;
 
@@ -68,7 +71,12 @@ optimize(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
       NIR_PASS(progress, nir, nir_opt_cse);
-      NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+
+      nir_opt_peephole_select_options peephole_select_options = {
+         .limit = 64,
+         .expensive_alu_ok = true,
+      };
+      NIR_PASS(progress, nir, nir_opt_peephole_select, &peephole_select_options);
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
@@ -295,6 +303,16 @@ void pan_shader_compile_v10(nir_shader *nir,
                             struct util_dynarray *binary,
                             struct pan_shader_info *info);
 
+void pan_shader_compile_v12(nir_shader *nir,
+                            struct panfrost_compile_inputs *inputs,
+                            struct util_dynarray *binary,
+                            struct pan_shader_info *info);
+
+void pan_shader_compile_v13(nir_shader *nir,
+                            struct panfrost_compile_inputs *inputs,
+                            struct util_dynarray *binary,
+                            struct pan_shader_info *info);
+
 static void
 shader_compile(int arch, nir_shader *nir,
                struct panfrost_compile_inputs *inputs,
@@ -312,6 +330,12 @@ shader_compile(int arch, nir_shader *nir,
       break;
    case 10:
       pan_shader_compile_v10(nir, inputs, binary, info);
+      break;
+   case 12:
+      pan_shader_compile_v12(nir, inputs, binary, info);
+      break;
+   case 13:
+      pan_shader_compile_v13(nir, inputs, binary, info);
       break;
    default:
       unreachable("Unknown arch!");
@@ -337,7 +361,7 @@ main(int argc, const char **argv)
 
    int target_arch = atoi(target_arch_str);
 
-   if (target_arch < 4 || target_arch > 10) {
+   if (target_arch < 4 || target_arch > 13) {
       fprintf(stderr, "Unsupported target arch %d\n", target_arch);
       return 1;
    }
@@ -414,7 +438,6 @@ main(int argc, const char **argv)
 
          struct panfrost_compile_inputs inputs = {
             .gpu_id = target_arch << 12,
-            .no_ubo_to_push = true,
          };
 
          nir_link_shader_functions(s, nir);

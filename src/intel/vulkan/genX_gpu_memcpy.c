@@ -83,7 +83,8 @@ emit_common_so_memcpy(struct anv_memcpy_state *state,
       /* Memcpy has no requirement that we need to disable geometry
        * distribution.
        */
-      vf.GeometryDistributionEnable = true;
+      vf.GeometryDistributionEnable =
+         device->physical->instance->enable_vf_distribution;
 #endif
    }
    anv_batch_emit(batch, GENX(3DSTATE_VF_SGVS), sgvs);
@@ -355,7 +356,8 @@ genX(emit_so_memcpy_fini)(struct anv_memcpy_state *state)
       }
 
       state->cmd_buffer->state.gfx.dirty |= ~(ANV_CMD_DIRTY_PIPELINE |
-                                              ANV_CMD_DIRTY_INDEX_BUFFER);
+                                              ANV_CMD_DIRTY_INDEX_BUFFER |
+                                              ANV_CMD_DIRTY_INDEX_TYPE);
 
       memcpy(&state->cmd_buffer->state.gfx.urb_cfg, &state->urb_cfg,
              sizeof(struct intel_urb_config));

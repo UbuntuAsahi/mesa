@@ -16,6 +16,7 @@
 #include "panvk_image.h"
 #include "panvk_image_view.h"
 #include "panvk_physical_device.h"
+#include "panvk_shader.h"
 
 #include "vk_command_buffer.h"
 #include "vk_format.h"
@@ -145,6 +146,12 @@ struct panvk_cmd_graphics_state {
       unsigned count;
    } vb;
 
+#if PAN_ARCH >= 10
+   struct {
+      uint32_t attribs_changing_on_base_instance;
+   } vi;
+#endif
+
    /* Index buffer */
    struct {
       struct panvk_buffer *buffer;
@@ -199,19 +206,16 @@ struct panvk_cmd_graphics_state {
 
 static inline uint32_t
 panvk_select_tiler_hierarchy_mask(const struct panvk_physical_device *phys_dev,
-                                  const struct panvk_cmd_graphics_state *state)
+                                  const struct panvk_cmd_graphics_state *state,
+                                  unsigned bin_ptr_mem_budget)
 {
    struct panfrost_tiler_features tiler_features =
       panfrost_query_tiler_features(&phys_dev->kmod.props);
 
-   uint32_t hierarchy_mask =
-      pan_select_tiler_hierarchy_mask(state->render.fb.info.width,
-                                      state->render.fb.info.height,
-                                      tiler_features.max_levels);
-
-   /* For effective tile size larger than 16x16, disable first level */
-   if (state->render.fb.info.tile_size > 16 * 16)
-      hierarchy_mask &= ~1;
+   uint32_t hierarchy_mask = GENX(pan_select_tiler_hierarchy_mask)(
+      state->render.fb.info.width, state->render.fb.info.height,
+      tiler_features.max_levels, state->render.fb.info.tile_size,
+      bin_ptr_mem_budget);
 
    return hierarchy_mask;
 }
@@ -353,5 +357,77 @@ struct panvk_draw_info {
 void
 panvk_per_arch(cmd_prepare_draw_sysvals)(struct panvk_cmd_buffer *cmdbuf,
                                          const struct panvk_draw_info *info);
+
+static inline uint32_t
+color_attachment_written_mask(
+   const struct panvk_shader *fs,
+   const struct vk_color_attachment_location_state *cal)
+{
+   uint32_t written_by_shader =
+      (fs->info.outputs_written >> FRAG_RESULT_DATA0) & BITFIELD_MASK(8);
+   uint32_t catt_written_mask = 0;
+
+   for (uint32_t i = 0; i < MAX_RTS; i++) {
+      if (cal->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
+         continue;
+
+      uint32_t shader_rt = cal->color_map[i];
+
+      if (written_by_shader & BITFIELD_BIT(shader_rt))
+         catt_written_mask |= BITFIELD_BIT(i);
+   }
+
+   return catt_written_mask;
+}
+
+static inline uint32_t
+color_attachment_read_mask(const struct panvk_shader *fs,
+                           const struct vk_input_attachment_location_state *ial,
+                           uint8_t color_attachment_mask)
+{
+   uint32_t color_attachment_count =
+      ial->color_attachment_count == MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN
+         ? util_last_bit(color_attachment_mask)
+         : ial->color_attachment_count;
+   uint32_t catt_read_mask = 0;
+
+   for (uint32_t i = 0; i < color_attachment_count; i++) {
+      if (ial->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
+         continue;
+
+      uint32_t catt_idx = ial->color_map[i] + 1;
+      if (fs->fs.input_attachment_read & BITFIELD_BIT(catt_idx)) {
+         assert(color_attachment_mask & BITFIELD_BIT(i));
+         catt_read_mask |= BITFIELD_BIT(i);
+      }
+   }
+
+   return catt_read_mask;
+}
+
+static inline bool
+z_attachment_read(const struct panvk_shader *fs,
+                  const struct vk_input_attachment_location_state *ial)
+{
+   uint32_t depth_mask = ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX
+                            ? BITFIELD_BIT(0)
+                         : ial->depth_att != MESA_VK_ATTACHMENT_UNUSED
+                            ? BITFIELD_BIT(ial->depth_att + 1)
+                            : 0;
+   return depth_mask & fs->fs.input_attachment_read;
+}
+
+static inline bool
+s_attachment_read(const struct panvk_shader *fs,
+                  const struct vk_input_attachment_location_state *ial)
+{
+   uint32_t stencil_mask = ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX
+                              ? BITFIELD_BIT(0)
+                           : ial->stencil_att != MESA_VK_ATTACHMENT_UNUSED
+                              ? BITFIELD_BIT(ial->stencil_att + 1)
+                              : 0;
+
+   return stencil_mask & fs->fs.input_attachment_read;
+}
 
 #endif

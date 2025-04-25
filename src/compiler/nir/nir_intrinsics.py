@@ -332,6 +332,9 @@ index("unsigned", "repeat_count")
 # coordinates in compute.
 index("bool", "explicit_coord")
 
+# The index of the format string used by a printf. (u_printf_info element of the shader)
+index("unsigned", "fmt_idx")
+
 intrinsic("nop", flags=[CAN_ELIMINATE])
 
 # Uses a value and cannot be eliminated.
@@ -1283,10 +1286,9 @@ intrinsic("load_frag_shading_rate", dest_comp=1, bit_sizes=[32],
 system_value("fully_covered", dest_comp=1, bit_sizes=[1])
 
 # OpenCL printf instruction
-# First source is an index to the format string (u_printf_info element of the shader)
 # Second source is a deref to a struct containing the args
 # Dest is success or failure
-intrinsic("printf", src_comp=[1, 1], dest_comp=1, bit_sizes=[32])
+intrinsic("printf", src_comp=[1], dest_comp=1, bit_sizes=[32], indices=[FMT_IDX])
 # Since most drivers will want to lower to just dumping args
 # in a buffer, nir_lower_printf will do that, but requires
 # the driver to at least provide a base location and size
@@ -1505,6 +1507,10 @@ intrinsic("prefetch_ubo_ir3", [1], flags=[CAN_REORDER])
 # src[] = { vertex_id, instance_id, offset }
 load("attribute_pan", [1, 1, 1], [BASE, COMPONENT, DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
+# Panfrost-specific intrinsic to load the shader_output special-FAU value on Avalon.
+intrinsic("load_shader_output_pan", dest_comp=1, src_comp=[], bit_sizes=[32],
+          indices=[], flags=[CAN_REORDER, CAN_ELIMINATE])
+
 # Panfrost-specific intrinsics for accessing the raw vertex ID and the
 # associated offset such that
 #   vertex_id = raw_vertex_id_pan + raw_vertex_offset_pan
@@ -1544,8 +1550,30 @@ intrinsic("load_frag_coord_zw_pan", [2], dest_comp=1, indices=[COMPONENT], flags
 # src[] = { sampler_index }
 load("sampler_lod_parameters_pan", [1], flags=[CAN_ELIMINATE, CAN_REORDER])
 
-# Like load_output but using a specified render target conversion descriptor
-load("converted_output_pan", [1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+# Like load_output but using a specified render target and conversion descriptor
+# src[] = { target, sample, conversion }
+# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
+# and is ignored otherwise
+load("converted_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+
+# Like converted_output_pan but for case where the output is never written by the shader
+# This is used to relax waits on tile-buffer accesses and the target is read-only
+# src[] = { target, sample, conversion }
+# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
+# and is ignored otherwise
+load("readonly_output_pan", [1, 1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+
+# Load input attachment target
+# src[] = { input_attachment_index }
+# valid targets are:
+# 0..7: Color[0..7]
+# 255:  Depth or stencil (the actual target is known based on the nir_alu_type)
+# ~0:   No target (input attachment load must be lowered to texture load in that case)
+intrinsic("load_input_attachment_target_pan", [1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
+
+# Load input attachment conversion descriptor
+# src[] = { input_attachment_index }
+intrinsic("load_input_attachment_conv_pan", [1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
 
 # Load the render target conversion descriptor for a given render target given
 # in the BASE index. Converts to a type with size given by the source type.
@@ -2399,6 +2427,9 @@ intrinsic("ipa_nv", dest_comp=1, src_comp=[1, 1], bit_sizes=[32],
 # FLAGS indicate if we load vertex_id == 2
 intrinsic("ldtram_nv", dest_comp=2, bit_sizes=[32],
           indices=[BASE, FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# NVIDIA-specific Image intrinsics
+image("load_raw_nv", src_comp=[4, 1, 1], extra_indices=[DEST_TYPE], dest_comp=0, flags=[CAN_ELIMINATE])
 
 # NVIDIA-specific Geometry Shader intrinsics.
 # These contain an additional integer source and destination with the primitive handle input/output.

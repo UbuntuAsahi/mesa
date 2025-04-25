@@ -582,6 +582,8 @@ Intel driver environment variables
       mark all state dirty on each draw call
    ``rt``
       dump shader assembly for ray tracing shaders
+   ``rt_notrace``
+      skip trace rays operation (does not disable AS generation; see bvh_no_build)
    ``sf``
       emit messages about the strips & fans unit (for old gens, includes
       the SF program)
@@ -779,7 +781,7 @@ Intel driver environment variables
    this folder and have a name formatted as ``sha1_of_assembly.bin``.
    The SHA-1 of a shader assembly is printed when assembly is dumped via
    corresponding :envvar:`INTEL_DEBUG` flag (e.g. ``vs`` for vertex shader).
-   A binary could be generated from a dumped assembly by ``i965_asm``.
+   A binary could be generated from a dumped assembly by ``brw_asm`` or ``elk_asm``.
    For :envvar:`INTEL_SHADER_ASM_READ_PATH` to work it is necessary to enable
    dumping of corresponding shader stages via :envvar:`INTEL_DEBUG`.
    It is advised to use ``nocompact`` flag of :envvar:`INTEL_DEBUG` when
@@ -795,7 +797,7 @@ Intel driver environment variables
    this folder and have a name formatted as ``sha1_of_assembly.bin``.
    The SHA-1 of a shader assembly is printed when assembly is dumped via
    corresponding :envvar:`INTEL_DEBUG` flag (e.g. ``vs`` for vertex shader).
-   A binary could be generated from a dumped assembly by ``i965_asm``.
+   A binary could be generated from a dumped assembly by ``brw_asm`` or ``elk_asm``.
    For :envvar:`INTEL_SHADER_ASM_READ_PATH` to work it is necessary to enable
    dumping of corresponding shader stages via :envvar:`INTEL_DEBUG`.
    It is advised to use ``nocompact`` flag of :envvar:`INTEL_DEBUG` when
@@ -858,34 +860,32 @@ Intel driver environment variables
 Anvil(ANV) driver environment variables
 ---------------------------------------
 
-.. envvar:: ANV_ENABLE_PIPELINE_CACHE
+.. envvar:: ANV_DEBUG
 
-   If defined to ``0`` or ``false``, this will disable pipeline
-   caching, forcing ANV to reparse and recompile any VkShaderModule
-   (SPIRV) it is given.
+  Accepts the following comma-separated list of flags:
 
-.. envvar:: ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS
+  ``bindless``
+    Forces all descriptor sets to use the internal :ref:`Bindless model`
+  ``no-gpl``
+    Disables `VK_KHR_graphics_pipeline_library` support
+  ``no-secondary-call``
+    Disables secondary command buffer calls
+  ``no-sparse``
+    Disables sparse support
+  ``sparse-trtt``
+    Forces use of TR-TT hardware for sparse support
+  ``video-decode``
+    Enables video decoding support
+  ``video-encode``
+    Enables video encoding support
+  ``shader-hash``
+    Emits dummy (MI_STORE_DATA_IMM) instructions containing the shader
+    source hash, preceding shader programming instructions (internal
+    shaders & ray-tracing shaders are omitted)
 
    If defined to ``1`` or ``true``, this will prevent usage of self
    modifying command buffers to implement ``vkCmdExecuteCommands``. As
    a result of this, it will also disable :ext:`VK_KHR_performance_query`.
-
-.. envvar:: ANV_ALWAYS_BINDLESS
-
-   If defined to ``1`` or ``true``, this forces all descriptor sets to
-   use the internal :ref:`Bindless model`.
-
-.. envvar:: ANV_QUEUE_THREAD_DISABLE
-
-   If defined to ``1`` or ``true``, this disables support for timeline
-   semaphores.
-
-.. envvar:: ANV_USERSPACE_RELOCS
-
-   If defined to ``1`` or ``true``, this forces ANV to always do
-   kernel relocations in command buffers. This should only have an
-   effect on hardware that doesn't support soft-pinning (Ivybridge,
-   Haswell, Cherryview).
 
 .. envvar:: ANV_PRIMITIVE_REPLICATION_MAX_VIEWS
 
@@ -894,10 +894,32 @@ Anvil(ANV) driver environment variables
    using instanced rendering. If unspecified, the value default to
    ``2``.
 
-.. envvar:: ANV_NO_GPL
+.. envvar:: ANV_PRINTF_BUFFER_SIZE
 
-   If set to 1, true, or yes, then VK_EXT_graphics_pipeline_library
-   will be disabled.
+   Specifies the size of the printf buffer.
+
+.. envvar:: ANV_QUEUE_OVERRIDE
+
+   Override exposed queue families & counts. The variable is a comma
+   separated list of queue overrides. To override the number queues:
+
+   - ``gc`` is for graphics queues with compute support
+   - ``g`` is for graphics queues with no compute support
+   - ``c`` is for compute queues with no graphics support
+   - ``v`` is for video queues with no graphics support
+   - ``b`` is for copy (blitter) queues with no graphics support
+
+   For example, ``ANV_QUEUE_OVERRIDE=gc=2,c=1`` would override the number
+   of advertised queues to be 2 queues with graphics+compute support,
+   and 1 queue with compute-only support.
+
+   ``ANV_QUEUE_OVERRIDE=c=1`` would override the number of advertised
+   queues to include 1 queue with compute-only support, but it will
+   not change the number of graphics+compute queues.
+
+   ``ANV_QUEUE_OVERRIDE=gc=0,c=1`` would override the number of
+   advertised queues to include 1 queue with compute-only support, and
+   it would override the number of graphics+compute queues to be 0.
 
 .. envvar:: ANV_SPARSE
 
@@ -911,6 +933,50 @@ Anvil(ANV) driver environment variables
    changes the implementation of sparse resources feature.
    For i915 there is no option, sparse resources is always implemented with
    TRTT.
+
+Hasvk driver environment variables
+---------------------------------------
+
+.. envvar:: HASVK_DISABLE_SECONDARY_CMD_BUFFER_CALLS
+
+   If defined to ``1`` or ``true``, this will prevent usage of self
+   modifying command buffers to implement ``vkCmdExecuteCommands``. As
+   a result of this, it will also disable :ext:`VK_KHR_performance_query`.
+
+.. envvar:: HASVK_ALWAYS_BINDLESS
+
+   If defined to ``1`` or ``true``, this forces all descriptor sets to
+   use the internal :ref:`Bindless model`.
+
+.. envvar:: HASVK_QUEUE_OVERRIDE
+
+   Override exposed queue families & counts. The variable is a comma
+   separated list of queue overrides. To override the number queues:
+
+   - ``gc`` is for graphics queues with compute support
+   - ``g`` is for graphics queues with no compute support
+   - ``c`` is for compute queues with no graphics support
+   - ``v`` is for video queues with no graphics support
+   - ``b`` is for copy (blitter) queues with no graphics support
+
+   For example, ``HASVK_QUEUE_OVERRIDE=gc=2,c=1`` would override the
+   number of advertised queues to be 2 queues with graphics+compute
+   support, and 1 queue with compute-only support.
+
+   ``HASVK_QUEUE_OVERRIDE=c=1`` would override the number of
+   advertised queues to include 1 queue with compute-only support, but
+   it will not change the number of graphics+compute queues.
+
+   ``HASVK_QUEUE_OVERRIDE=gc=0,c=1`` would override the number of
+   advertised queues to include 1 queue with compute-only support, and
+   it would override the number of graphics+compute queues to be 0.
+
+.. envvar:: HASVK_USERSPACE_RELOCS
+
+   If defined to ``1`` or ``true``, this forces ANV to always do
+   kernel relocations in command buffers. This should only have an
+   effect on hardware that doesn't support soft-pinning (Ivybridge,
+   Haswell, Cherryview).
 
 DRI environment variables
 -------------------------
@@ -1383,7 +1449,7 @@ RADV driver environment variables
    ``nongg``
       disable NGG for GFX10 and GFX10.3
    ``nonggc``
-      disable NGG culling on GPUs where it's enabled by default (GFX10.3 only).
+      disable NGG culling for GFX10 and GFX10.3
    ``nongg_gs``
       disable NGG GS for GFX10 and GFX10.3
    ``nort``
@@ -1402,6 +1468,9 @@ RADV driver environment variables
       dump vertex shader prologs
    ``psocachestats``
      dump PSO cache stats (hits/misses) to verify precompilation of shaders
+   ``pso_history``
+     dump PSO history (pipeline hash + shader VA) to /tmp/radv_pso_history.log.
+     Useful for debugging GPU hangs with UMR and Fossilize.
    ``shaders``
       dump shaders
    ``shaderstats``
@@ -1476,7 +1545,7 @@ RADV driver environment variables
    ``localbos``
       enable local BOs
    ``nggc``
-      enable NGG culling on GPUs where it's not enabled by default (GFX10.1 only).
+      enable NGG culling for GFX11+
    ``nircache``
       cache per-stage NIR for graphics pipelines
    ``nosam``
@@ -1492,7 +1561,9 @@ RADV driver environment variables
    ``transfer_queue``
       enable experimental transfer queue support (GFX9+, not yet spec compliant)
    ``video_decode``
-      enable experimental video decoding support
+      enable experimental video decoding support on GFX6-9
+   ``video_encode``
+      enable experimental video encoding support on GFX6-9
 
 .. envvar:: RADV_TEX_ANISO
 

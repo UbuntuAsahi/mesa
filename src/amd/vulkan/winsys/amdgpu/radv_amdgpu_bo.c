@@ -513,7 +513,8 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
       request.flags |= AMDGPU_GEM_CREATE_DISCARDABLE;
 
    if (flags & RADEON_FLAG_GFX12_ALLOW_DCC && ws->info.drm_minor >= 58) {
-      assert(ws->info.gfx_level >= GFX12 && (initial_domain & RADEON_DOMAIN_VRAM));
+      assert(ws->info.gfx_level >= GFX12 && (initial_domain & RADEON_DOMAIN_VRAM) &&
+             (flags & RADEON_FLAG_NO_CPU_ACCESS));
       bo->base.gfx12_allow_dcc = true;
       request.flags |= AMDGPU_GEM_CREATE_GFX12_DCC;
    }
@@ -544,6 +545,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    bo->base.use_global_list = false;
    bo->priority = priority;
    bo->cpu_map = NULL;
+   bo->base.obj_id = (uintptr_t)(buf_handle.abo);
 
    if (initial_domain & RADEON_DOMAIN_VRAM) {
       /* Buffers allocated in VRAM with the NO_CPU_ACCESS flag
@@ -735,6 +737,7 @@ radv_amdgpu_winsys_bo_from_ptr(struct radeon_winsys *_ws, void *pointer, uint64_
    bo->base.use_global_list = false;
    bo->priority = priority;
    bo->cpu_map = NULL;
+   bo->base.obj_id = (uintptr_t)(buf_handle.abo);
 
    p_atomic_add(&ws->allocated_gtt, align64(bo->base.size, ws->info.gart_page_size));
 
@@ -826,6 +829,7 @@ radv_amdgpu_winsys_bo_from_fd(struct radeon_winsys *_ws, int fd, unsigned priori
    bo->base.size = result.alloc_size;
    bo->priority = priority;
    bo->cpu_map = NULL;
+   bo->base.obj_id = (uintptr_t)(result.bo.abo);
 
    if (bo->base.initial_domain & RADEON_DOMAIN_VRAM)
       p_atomic_add(&ws->allocated_vram, align64(bo->base.size, ws->info.gart_page_size));

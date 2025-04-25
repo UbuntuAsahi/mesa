@@ -256,7 +256,8 @@ anv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice,
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_H264_CAPABILITIES_KHR);
 
       if (ext) {
-         ext->flags = VK_VIDEO_ENCODE_H264_CAPABILITY_HRD_COMPLIANCE_BIT_KHR;
+         ext->flags = VK_VIDEO_ENCODE_H264_CAPABILITY_HRD_COMPLIANCE_BIT_KHR |
+                      VK_VIDEO_ENCODE_H264_CAPABILITY_PER_PICTURE_TYPE_MIN_MAX_QP_BIT_KHR;
          ext->maxLevelIdc = STD_VIDEO_H264_LEVEL_IDC_5_1;
          ext->maxSliceCount = 1;
          ext->maxPPictureL0ReferenceCount = 8;
@@ -268,7 +269,17 @@ anv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice,
          ext->requiresGopRemainingFrames = 0;
          ext->minQp = 10;
          ext->maxQp = 51;
+         ext->stdSyntaxFlags = VK_VIDEO_ENCODE_H264_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_ENTROPY_CODING_MODE_FLAG_UNSET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_ENTROPY_CODING_MODE_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_DEBLOCKING_FILTER_DISABLED_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_DEBLOCKING_FILTER_ENABLED_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_DEBLOCKING_FILTER_PARTIAL_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_TRANSFORM_8X8_MODE_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_CHROMA_QP_INDEX_OFFSET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H264_STD_SECOND_CHROMA_QP_INDEX_OFFSET_BIT_KHR;
       }
+
 
       pCapabilities->minBitstreamBufferOffsetAlignment = 32;
       pCapabilities->minBitstreamBufferSizeAlignment = 4096;
@@ -289,7 +300,7 @@ anv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice,
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_H265_CAPABILITIES_KHR);
 
       if (ext) {
-         ext->flags = 0;
+         ext->flags = VK_VIDEO_ENCODE_H265_CAPABILITY_PER_PICTURE_TYPE_MIN_MAX_QP_BIT_KHR;
          ext->maxLevelIdc = STD_VIDEO_H265_LEVEL_IDC_5_1;
          ext->ctbSizes = VK_VIDEO_ENCODE_H265_CTB_SIZE_64_BIT_KHR;
          ext->transformBlockSizes = VK_VIDEO_ENCODE_H265_TRANSFORM_BLOCK_SIZE_4_BIT_KHR |
@@ -308,6 +319,10 @@ anv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice,
          ext->expectDyadicTemporalSubLayerPattern = false;
          ext->prefersGopRemainingFrames = 0;
          ext->requiresGopRemainingFrames = 0;
+         ext->stdSyntaxFlags = VK_VIDEO_ENCODE_H265_STD_SAMPLE_ADAPTIVE_OFFSET_ENABLED_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H265_STD_PCM_ENABLED_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H265_STD_TRANSFORM_SKIP_ENABLED_FLAG_SET_BIT_KHR |
+                               VK_VIDEO_ENCODE_H265_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR;
       }
 
       pCapabilities->minBitstreamBufferOffsetAlignment = 4096;
@@ -344,6 +359,14 @@ anv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
    const struct VkVideoProfileListInfoKHR *prof_list = (struct VkVideoProfileListInfoKHR *)
       vk_find_struct_const(pVideoFormatInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
 
+   /* We only support VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT with
+    * Y-tiling/Tile4, as supported by the hardware for video decoding.
+    * However, we are unable to determine the tiling without modifiers here.
+    * So just disable them all.
+    */
+   const bool decode_dst = !!(pVideoFormatInfo->imageUsage &
+                              VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR);
+
    if (prof_list) {
       for (unsigned i = 0; i < prof_list->profileCount; i++) {
          const VkVideoProfileInfoKHR *profile = &prof_list->pProfiles[i];
@@ -358,12 +381,14 @@ anv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
                p->imageUsageFlags = pVideoFormatInfo->imageUsage;
             }
 
-            vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
-               p->format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-               p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-               p->imageType = VK_IMAGE_TYPE_2D;
-               p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-               p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+            if (!decode_dst) {
+               vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
+                  p->format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+                  p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+                  p->imageType = VK_IMAGE_TYPE_2D;
+                  p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+                  p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+               }
             }
          }
 
@@ -376,16 +401,21 @@ anv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
                p->imageTiling = VK_IMAGE_TILING_OPTIMAL;
                p->imageUsageFlags = pVideoFormatInfo->imageUsage;
             }
-            vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
-               p->format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
-               p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-               p->imageType = VK_IMAGE_TYPE_2D;
-               p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-               p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+            if (!decode_dst) {
+               vk_outarray_append_typed(VkVideoFormatPropertiesKHR, &out, p) {
+                  p->format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+                  p->imageCreateFlags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+                  p->imageType = VK_IMAGE_TYPE_2D;
+                  p->imageTiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+                  p->imageUsageFlags = pVideoFormatInfo->imageUsage;
+               }
             }
          }
       }
    }
+
+   if (*pVideoFormatPropertyCount == 0)
+      return VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR;
 
    return vk_outarray_status(&out);
 }

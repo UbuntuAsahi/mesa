@@ -53,7 +53,6 @@ run_bs(brw_shader &s, bool allow_spilling)
    s.assign_curb_setup();
 
    brw_lower_3src_null_dest(s);
-   brw_workaround_memory_fence_before_eot(s);
    brw_workaround_emit_dummy_mov_instruction(s);
 
    brw_allocate_registers(s, allow_spilling);
@@ -76,7 +75,6 @@ compile_single_bs(const struct brw_compiler *compiler,
 {
    const bool debug_enabled = brw_should_print_shader(shader, DEBUG_RT);
 
-   prog_data->base.stage = shader->info.stage;
    prog_data->max_stack_size = MAX2(prog_data->max_stack_size,
                                     shader->scratch_size);
 
@@ -170,9 +168,7 @@ brw_compile_bs(const struct brw_compiler *compiler,
    nir_shader **resume_shaders = params->resume_shaders;
    const bool debug_enabled = brw_should_print_shader(shader, DEBUG_RT);
 
-   prog_data->base.stage = shader->info.stage;
-   prog_data->base.ray_queries = shader->info.ray_queries;
-   prog_data->base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base, &params->base);
 
    prog_data->max_stack_size = 0;
    prog_data->num_resume_shaders = num_resume_shaders;

@@ -21,8 +21,14 @@ use std::ops::Index;
 
 fn init_info_from_nir(nak: &nak_compiler, nir: &nir_shader) -> ShaderInfo {
     ShaderInfo {
+        max_warps_per_sm: 0,
         num_gprs: 0,
         num_instrs: 0,
+        num_static_cycles: 0,
+        num_spills_to_mem: 0,
+        num_fills_from_mem: 0,
+        num_spills_to_reg: 0,
+        num_fills_from_reg: 0,
         num_control_barriers: 0,
         slm_size: nir.scratch_size,
         max_crs_depth: 0,
@@ -274,6 +280,18 @@ impl ShaderFloatControls {
         }
 
         fc
+    }
+}
+
+fn f_rnd_mode_from_nir(mode: nir_rounding_mode) -> FRndMode {
+    match mode {
+        nir_rounding_mode_undef | nir_rounding_mode_rtne => {
+            FRndMode::NearestEven
+        }
+        nir_rounding_mode_ru => FRndMode::PosInf,
+        nir_rounding_mode_rd => FRndMode::NegInf,
+        nir_rounding_mode_rtz => FRndMode::Zero,
+        _ => panic!("Invalid NIR rounding mode"),
     }
 }
 
@@ -537,8 +555,15 @@ impl<'a> ShaderFromNir<'a> {
                 let mut comps = Vec::new();
                 match src_bit_size {
                     1 | 32 | 64 => {
-                        for (ssa, _) in srcs {
-                            comps.push(ssa);
+                        for (ssa, byte) in srcs {
+                            assert!(byte == 0);
+                            // Always insert a copy regardless of whether or not
+                            // we need to permute bytes.  It's possible that the
+                            // source is uniform but the destination is not and
+                            // we'll need a copy in that case.  If the copy
+                            // isn't needed, copy-prop should clean it up for
+                            // us.
+                            comps.push(b.copy(ssa.into())[0]);
                         }
                     }
                     8 => {
@@ -1779,6 +1804,7 @@ impl<'a> ShaderFromNir<'a> {
         } else {
             debug_assert!(mask != 0);
         }
+        let channel_mask = ChannelMask::new(mask);
 
         let dst_comps = u8::try_from(mask.count_ones()).unwrap();
         let dst = b.alloc_ssa(RegFile::GPR, dst_comps);
@@ -1806,7 +1832,8 @@ impl<'a> ShaderFromNir<'a> {
                 tex: tex_ref,
                 src: src,
                 query: TexQuery::Dimension,
-                mask: mask,
+                nodep: flags.nodep(),
+                channel_mask,
             });
         } else if tex.op == nir_texop_tex_type_nv {
             let src = self.get_src(&srcs[0].src);
@@ -1816,7 +1843,8 @@ impl<'a> ShaderFromNir<'a> {
                 tex: tex_ref,
                 src: src,
                 query: TexQuery::TextureType,
-                mask: mask,
+                nodep: flags.nodep(),
+                channel_mask,
             });
         } else {
             let lod_mode = match flags.lod_mode() {
@@ -1836,7 +1864,13 @@ impl<'a> ShaderFromNir<'a> {
                 _ => panic!("Invalid offset mode"),
             };
 
-            let srcs = [self.get_src(&srcs[0].src), self.get_src(&srcs[1].src)];
+            let src0 = self.get_src(&srcs[0].src);
+            let src1 = if srcs.len() > 1 {
+                self.get_src(&srcs[1].src)
+            } else {
+                SrcRef::Zero.into()
+            };
+            let srcs = [src0, src1];
 
             if tex.op == nir_texop_txd {
                 assert!(lod_mode == TexLodMode::Auto);
@@ -1850,7 +1884,8 @@ impl<'a> ShaderFromNir<'a> {
                     dim: dim,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
-                    mask: mask,
+                    nodep: flags.nodep(),
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_lod {
                 assert!(offset_mode == Tld4OffsetMode::None);
@@ -1859,7 +1894,8 @@ impl<'a> ShaderFromNir<'a> {
                     tex: tex_ref,
                     srcs: srcs,
                     dim: dim,
-                    mask: mask,
+                    nodep: flags.nodep(),
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_txf || tex.op == nir_texop_txf_ms {
                 assert!(offset_mode != Tld4OffsetMode::PerPx);
@@ -1873,7 +1909,8 @@ impl<'a> ShaderFromNir<'a> {
                     is_ms: tex.op == nir_texop_txf_ms,
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
-                    mask: mask,
+                    nodep: flags.nodep(),
+                    channel_mask,
                 });
             } else if tex.op == nir_texop_tg4 {
                 b.push_op(OpTld4 {
@@ -1886,7 +1923,8 @@ impl<'a> ShaderFromNir<'a> {
                     offset_mode: offset_mode,
                     z_cmpr: flags.has_z_cmpr(),
                     mem_eviction_priority: MemEvictionPriority::Normal,
-                    mask: mask,
+                    nodep: flags.nodep(),
+                    channel_mask,
                 });
             } else {
                 assert!(offset_mode != Tld4OffsetMode::PerPx);
@@ -1900,7 +1938,8 @@ impl<'a> ShaderFromNir<'a> {
                     z_cmpr: flags.has_z_cmpr(),
                     offset: offset_mode == Tld4OffsetMode::AddOffI,
                     mem_eviction_priority: MemEvictionPriority::Normal,
-                    mask: mask,
+                    nodep: flags.nodep(),
+                    channel_mask,
                 });
             }
         }
@@ -2008,6 +2047,19 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
+    fn get_image_mem_type(&self, intrin: &nir_intrinsic_instr) -> MemType {
+        match intrin.format() {
+            PIPE_FORMAT_R8_UINT => MemType::U8,
+            PIPE_FORMAT_R8_SINT => MemType::I8,
+            PIPE_FORMAT_R16_UINT => MemType::U16,
+            PIPE_FORMAT_R16_SINT => MemType::I16,
+            PIPE_FORMAT_R32_UINT => MemType::B32,
+            PIPE_FORMAT_R32G32_UINT => MemType::B64,
+            PIPE_FORMAT_R32G32B32A32_UINT => MemType::B128,
+            _ => panic!("Unknown format"),
+        }
+    }
+
     fn get_image_coord(
         &mut self,
         intrin: &nir_intrinsic_instr,
@@ -2034,19 +2086,15 @@ impl<'a> ShaderFromNir<'a> {
                 let flags: nak_nir_attr_io_flags =
                     unsafe { std::mem::transmute_copy(&flags) };
 
-                let access = AttrAccess {
-                    addr: addr,
-                    comps: 1,
-                    patch: flags.patch(),
-                    output: flags.output(),
-                    phys: false,
-                };
+                assert!(!flags.patch());
 
                 let dst = b.alloc_ssa(RegFile::GPR, 1);
                 b.push_op(OpAL2P {
                     dst: dst.into(),
-                    offset: offset,
-                    access: access,
+                    offset,
+                    addr,
+                    output: flags.output(),
+                    comps: 1,
                 });
                 self.set_dst(&intrin.def, dst);
             }
@@ -2088,25 +2136,23 @@ impl<'a> ShaderFromNir<'a> {
                     panic!("Must be a VTG stage");
                 }
 
-                let access = AttrAccess {
-                    addr: addr,
-                    comps: intrin.num_components,
-                    patch: flags.patch(),
-                    output: flags.output(),
-                    phys: flags.phys(),
-                };
+                let comps = intrin.num_components;
 
                 if intrin.intrinsic == nir_intrinsic_ald_nv {
                     let vtx = self.get_src(&srcs[0]);
                     let offset = self.get_src(&srcs[1]);
 
                     assert!(intrin.def.bit_size() == 32);
-                    let dst = b.alloc_ssa(RegFile::GPR, access.comps);
+                    let dst = b.alloc_ssa(RegFile::GPR, comps);
                     b.push_op(OpALd {
                         dst: dst.into(),
-                        vtx: vtx,
-                        offset: offset,
-                        access: access,
+                        vtx,
+                        addr,
+                        offset,
+                        comps,
+                        patch: flags.patch(),
+                        output: flags.output(),
+                        phys: flags.phys(),
                     });
                     self.set_dst(&intrin.def, dst);
                 } else if intrin.intrinsic == nir_intrinsic_ast_nv {
@@ -2116,10 +2162,13 @@ impl<'a> ShaderFromNir<'a> {
                     let offset = self.get_src(&srcs[2]);
 
                     b.push_op(OpASt {
-                        data: data,
-                        vtx: vtx,
-                        offset: offset,
-                        access: access,
+                        data,
+                        vtx,
+                        addr,
+                        offset,
+                        comps,
+                        patch: flags.patch(),
+                        phys: flags.phys(),
                     });
                 } else {
                     panic!("Invalid VTG I/O intrinsic");
@@ -2129,7 +2178,7 @@ impl<'a> ShaderFromNir<'a> {
                 let src = self.get_ssa(srcs[0].as_def());
                 let mut dst = Vec::new();
                 for comp in src {
-                    let u = b.alloc_ssa(RegFile::UGPR, 1);
+                    let u = b.alloc_ssa(comp.file().to_uniform().unwrap(), 1);
                     b.push_op(OpR2UR {
                         src: [*comp].into(),
                         dst: u.into(),
@@ -2137,6 +2186,98 @@ impl<'a> ShaderFromNir<'a> {
                     dst.push(u[0]);
                 }
                 self.set_ssa(&intrin.def, dst);
+            }
+            nir_intrinsic_convert_alu_types => {
+                let src_base_type = intrin.src_type().base_type();
+                let src_bit_size = intrin.src_type().bit_size();
+                let dst_base_type = intrin.dest_type().base_type();
+                let dst_bit_size = intrin.dest_type().bit_size();
+                let rnd_mode = f_rnd_mode_from_nir(intrin.rounding_mode());
+
+                assert!(srcs[0].as_def().bit_size() == src_bit_size);
+                assert!(intrin.def.bit_size() == dst_bit_size);
+
+                let def_bits =
+                    intrin.def.bit_size() * intrin.def.num_components();
+                let dst = b.alloc_ssa(RegFile::GPR, def_bits.div_ceil(32));
+
+                match dst_base_type {
+                    ALUType::INT | ALUType::UINT => {
+                        let dst_type = IntType::from_bits(
+                            dst_bit_size.into(),
+                            dst_base_type == ALUType::INT,
+                        );
+                        match src_base_type {
+                            ALUType::INT | ALUType::UINT => {
+                                let src_type = IntType::from_bits(
+                                    src_bit_size.into(),
+                                    src_base_type == ALUType::INT,
+                                );
+                                b.push_op(OpI2I {
+                                    dst: dst.into(),
+                                    src: self.get_src(&srcs[0]),
+                                    src_type,
+                                    dst_type,
+                                    abs: false,
+                                    neg: false,
+                                    saturate: intrin.saturate(),
+                                });
+                            }
+                            ALUType::FLOAT => {
+                                let src_type =
+                                    FloatType::from_bits(src_bit_size.into());
+                                // F2I doesn't support 8-bit destinations
+                                // pre-Volta
+                                assert!(b.sm() >= 70 || dst_bit_size > 8);
+                                b.push_op(OpF2I {
+                                    dst: dst.into(),
+                                    src: self.get_src(&srcs[0]),
+                                    src_type,
+                                    dst_type,
+                                    rnd_mode,
+                                    ftz: self.float_ctl[src_type].ftz,
+                                });
+                            }
+                            _ => panic!("Unknown src_type"),
+                        }
+                    }
+                    ALUType::FLOAT => {
+                        let dst_type =
+                            FloatType::from_bits(dst_bit_size.into());
+                        match src_base_type {
+                            ALUType::INT | ALUType::UINT => {
+                                let src_type = IntType::from_bits(
+                                    src_bit_size.into(),
+                                    src_base_type == ALUType::INT,
+                                );
+                                b.push_op(OpI2F {
+                                    dst: dst.into(),
+                                    src: self.get_src(&srcs[0]),
+                                    src_type,
+                                    dst_type,
+                                    rnd_mode,
+                                });
+                            }
+                            ALUType::FLOAT => {
+                                let src_type =
+                                    FloatType::from_bits(src_bit_size.into());
+                                b.push_op(OpF2F {
+                                    dst: dst.into(),
+                                    src: self.get_src(&srcs[0]),
+                                    src_type,
+                                    dst_type,
+                                    rnd_mode,
+                                    ftz: self.float_ctl[src_type].ftz,
+                                    high: false,
+                                    integer_rnd: false,
+                                });
+                            }
+                            _ => panic!("Unknown src_type"),
+                        }
+                    }
+                    _ => panic!("Unknown dest_type"),
+                }
+                self.set_dst(&intrin.def, dst);
             }
             nir_intrinsic_ddx
             | nir_intrinsic_ddx_coarse
@@ -2326,41 +2467,52 @@ impl<'a> ShaderFromNir<'a> {
                     atom_op: atom_op,
                     atom_type: atom_type,
                     image_dim: dim,
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_bindless_image_load => {
+            nir_intrinsic_bindless_image_load
+            | nir_intrinsic_bindless_image_load_raw_nv => {
                 let handle = self.get_src(&srcs[0]);
                 let dim = self.get_image_dim(intrin);
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if intrin.intrinsic
-                    == nir_intrinsic_load_global_constant
-                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
-                {
-                    MemOrder::Constant
+                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+                    if self.sm.sm() >= 80 {
+                        MemOrder::Constant
+                    } else {
+                        MemOrder::Weak
+                    }
                 } else {
-                    MemOrder::Strong(MemScope::System)
+                    MemOrder::Strong(MemScope::GPU)
                 };
 
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
-                assert!(comps == 1 || comps == 2 || comps == 4);
+                let image_access = if intrin.intrinsic
+                    == nir_intrinsic_bindless_image_load_raw_nv
+                {
+                    let mem_type = self.get_image_mem_type(intrin);
+                    assert!(mem_type.bits().div_ceil(32) == comps.into());
+                    ImageAccess::Binary(mem_type)
+                } else {
+                    assert!(comps == 1 || comps == 2 || comps == 4);
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps))
+                };
 
                 let dst = b.alloc_ssa(RegFile::GPR, comps);
 
                 b.push_op(OpSuLd {
                     dst: dst.into(),
                     fault: Dst::None,
+                    image_access,
                     image_dim: dim,
                     mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << comps) - 1,
                     handle: handle,
                     coord: coord,
                 });
@@ -2372,18 +2524,21 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if intrin.intrinsic
-                    == nir_intrinsic_load_global_constant
-                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
-                {
-                    MemOrder::Constant
+                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+                    if self.sm.sm() >= 80 {
+                        MemOrder::Constant
+                    } else {
+                        MemOrder::Weak
+                    }
                 } else {
-                    MemOrder::Strong(MemScope::System)
+                    MemOrder::Strong(MemScope::GPU)
                 };
 
                 let comps = intrin.num_components;
                 assert!(intrin.def.bit_size() == 32);
                 assert!(comps == 5);
+                let image_access =
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps - 1));
 
                 let dst = b.alloc_ssa(RegFile::GPR, comps - 1);
                 let fault = b.alloc_ssa(RegFile::Pred, 1);
@@ -2391,11 +2546,11 @@ impl<'a> ShaderFromNir<'a> {
                 b.push_op(OpSuLd {
                     dst: dst.into(),
                     fault: fault.into(),
+                    image_access,
                     image_dim: dim,
                     mem_order,
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << (comps - 1)) - 1,
                     handle: handle,
                     coord: coord,
                 });
@@ -2418,13 +2573,15 @@ impl<'a> ShaderFromNir<'a> {
                 let comps = intrin.num_components;
                 assert!(srcs[3].bit_size() == 32);
                 assert!(comps == 1 || comps == 2 || comps == 4);
+                let image_access =
+                    ImageAccess::Formatted(ChannelMask::for_comps(comps));
 
                 b.push_op(OpSuSt {
+                    image_access,
                     image_dim: dim,
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: self
                         .get_eviction_priority(intrin.access()),
-                    mask: (1 << comps) - 1,
                     handle: handle,
                     coord: coord,
                     data: data,
@@ -2516,7 +2673,7 @@ impl<'a> ShaderFromNir<'a> {
                     atom_type: atom_type,
                     addr_offset: offset,
                     mem_space: MemSpace::Global(MemAddrType::A64),
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: MemEvictionPriority::Normal, // Note: no intrinic access
                 });
                 self.set_dst(&intrin.def, dst);
@@ -2541,7 +2698,7 @@ impl<'a> ShaderFromNir<'a> {
                     atom_type: atom_type,
                     addr_offset: offset,
                     mem_space: MemSpace::Global(MemAddrType::A64),
-                    mem_order: MemOrder::Strong(MemScope::System),
+                    mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: MemEvictionPriority::Normal, // Note: no intrinic access
                 });
                 self.set_dst(&intrin.def, dst);
@@ -2626,7 +2783,7 @@ impl<'a> ShaderFromNir<'a> {
                 {
                     MemOrder::Constant
                 } else {
-                    MemOrder::Strong(MemScope::System)
+                    MemOrder::Strong(MemScope::GPU)
                 };
                 let access = MemAccess {
                     mem_type: MemType::from_size(size_B, false),
@@ -2716,24 +2873,21 @@ impl<'a> ShaderFromNir<'a> {
                     idx: 0,
                 });
 
-                let access = AttrAccess {
-                    addr: NAK_ATTR_TESS_COORD,
-                    comps: 2,
-                    patch: false,
-                    output: true,
-                    phys: false,
-                };
-
                 // This is recorded as a patch output in parse_shader() because
                 // the hardware requires it be in the SPH, whether we use it or
                 // not.
 
-                let dst = b.alloc_ssa(RegFile::GPR, access.comps);
+                let comps = 2;
+                let dst = b.alloc_ssa(RegFile::GPR, comps);
                 b.push_op(OpALd {
                     dst: dst.into(),
                     vtx: vtx.into(),
+                    addr: NAK_ATTR_TESS_COORD,
                     offset: 0.into(),
-                    access: access,
+                    comps,
+                    patch: false,
+                    output: true,
+                    phys: false,
                 });
                 self.set_dst(&intrin.def, dst);
             }
@@ -3070,7 +3224,7 @@ impl<'a> ShaderFromNir<'a> {
                 let access = MemAccess {
                     mem_type: MemType::from_size(size_B, false),
                     space: MemSpace::Global(MemAddrType::A64),
-                    order: MemOrder::Strong(MemScope::System),
+                    order: MemOrder::Strong(MemScope::GPU),
                     eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                 };
@@ -3388,7 +3542,7 @@ impl<'a> ShaderFromNir<'a> {
             }
 
             let uniform = !nb.divergent
-                && self.sm.sm() >= 75
+                && self.sm.num_regs(RegFile::UGPR) > 0
                 && !DEBUG.no_ugpr()
                 && !np.def.divergent;
 
@@ -3412,7 +3566,7 @@ impl<'a> ShaderFromNir<'a> {
             b.push_op(phi);
         }
 
-        if self.sm.sm() < 75 && nb.cf_node.prev().is_none() {
+        if self.sm.sm() < 70 && nb.cf_node.prev().is_none() {
             if let Some(_) = nb.parent().as_loop() {
                 b.push_op(OpPCnt {
                     target: self.get_block_label(nb),
@@ -3437,7 +3591,7 @@ impl<'a> ShaderFromNir<'a> {
             }
 
             let uniform = !nb.divergent
-                && self.sm.sm() >= 75
+                && self.sm.num_regs(RegFile::UGPR) > 0
                 && !DEBUG.no_ugpr()
                 && ni.def().is_some_and(|d| !d.divergent);
             let mut b = UniformBuilder::new(&mut b, uniform);

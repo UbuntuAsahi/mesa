@@ -568,7 +568,17 @@ emit_cs_walker(struct anv_cmd_buffer *cmd_buffer,
                uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ,
                bool is_unaligned_size_x)
 {
+   struct anv_device *device = cmd_buffer->device;
+   struct anv_instance *instance = device->physical->instance;
    bool is_indirect = !anv_address_is_null(indirect_addr);
+
+   struct mi_builder b;
+   if (unlikely(instance->debug & ANV_DEBUG_SHADER_HASH)) {
+      mi_builder_init(&b, device->info, &cmd_buffer->batch);
+      mi_builder_set_mocs(&b, isl_mocs(&device->isl_dev, 0, false));
+      mi_store(&b, mi_mem32(device->workaround_address),
+                   mi_imm(prog_data->base.source_hash));
+   }
 
 #if GFX_VERx10 >= 125
    /* For unaligned dispatch, we need to tweak the dispatch value with
@@ -626,8 +636,7 @@ void genX(CmdDispatchBase)(
                         prog_data->local_size[0] * prog_data->local_size[1] *
                         prog_data->local_size[2]);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute(&cmd_buffer->trace);
+   trace_intel_begin_compute(&cmd_buffer->trace);
 
    cmd_buffer_flush_compute_state(cmd_buffer);
 
@@ -639,11 +648,9 @@ void genX(CmdDispatchBase)(
                   groupCountX, groupCountY, groupCountZ,
                   false);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute(&cmd_buffer->trace,
-                              groupCountX, groupCountY, groupCountZ,
-                              pipeline->source_hash);
-   }
+   trace_intel_end_compute(&cmd_buffer->trace,
+                           groupCountX, groupCountY, groupCountZ,
+                           prog_data->base.source_hash);
 }
 
 static void
@@ -686,8 +693,7 @@ emit_unaligned_cs_walker(
                         prog_data->local_size[0] * prog_data->local_size[1] *
                         prog_data->local_size[2]);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute(&cmd_buffer->trace);
+   trace_intel_begin_compute(&cmd_buffer->trace);
 
    assert(!prog_data->uses_num_work_groups);
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
@@ -700,11 +706,9 @@ emit_unaligned_cs_walker(
                        dispatch, groupCountX, groupCountY, groupCountZ);
 #endif
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute(&cmd_buffer->trace,
-                              groupCountX, groupCountY, groupCountZ,
-                              pipeline->source_hash);
-   }
+   trace_intel_end_compute(&cmd_buffer->trace,
+                           groupCountX, groupCountY, groupCountZ,
+                           prog_data->base.source_hash);
 }
 
 /*
@@ -795,8 +799,7 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
                         "compute indirect",
                         0);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0)
-      trace_intel_begin_compute_indirect(&cmd_buffer->trace);
+   trace_intel_begin_compute_indirect(&cmd_buffer->trace);
 
    cmd_buffer_flush_compute_state(cmd_buffer);
 
@@ -806,11 +809,9 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
    emit_cs_walker(cmd_buffer, pipeline, prog_data, dispatch, indirect_addr, 0,
                   0, 0, is_unaligned_size_x);
 
-   if (cmd_buffer->state.rt.debug_marker_count == 0) {
-      trace_intel_end_compute_indirect(&cmd_buffer->trace,
-                                       anv_address_utrace(indirect_addr),
-                                       pipeline->source_hash);
-   }
+   trace_intel_end_compute_indirect(&cmd_buffer->trace,
+                                    anv_address_utrace(indirect_addr),
+                                    prog_data->base.source_hash);
 }
 
 void genX(CmdDispatchIndirect)(
@@ -1173,6 +1174,9 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
    struct anv_cmd_ray_tracing_state *rt = &cmd_buffer->state.rt;
    struct anv_ray_tracing_pipeline *pipeline =
       anv_pipeline_to_ray_tracing(rt->base.pipeline);
+
+   if (INTEL_DEBUG(DEBUG_RT_NO_TRACE))
+      return;
 
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;

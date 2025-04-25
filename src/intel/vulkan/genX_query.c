@@ -72,6 +72,51 @@ emit_query_mi_flush_availability(struct anv_cmd_buffer *cmd_buffer,
    }
 }
 
+static void
+emit_query_mi_availability(struct mi_builder *b,
+                           struct anv_address addr,
+                           bool available)
+{
+   mi_store(b, mi_mem64(addr), mi_imm(available));
+}
+
+static void
+emit_query_pc_availability(struct anv_cmd_buffer *cmd_buffer,
+                           struct anv_address addr,
+                           bool available)
+{
+   cmd_buffer->state.pending_pipe_bits |= ANV_PIPE_POST_SYNC_BIT;
+   genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+
+   genx_batch_emit_pipe_control_write
+      (&cmd_buffer->batch, cmd_buffer->device->info,
+       cmd_buffer->state.current_pipeline, WriteImmediateData, addr,
+       available, 0);
+}
+
+/* End of pipe availability */
+static void
+emit_query_eop_availability(struct anv_cmd_buffer *cmd_buffer,
+                            struct anv_address addr,
+                            bool available)
+{
+   switch (cmd_buffer->queue_family->engine_class) {
+   case INTEL_ENGINE_CLASS_RENDER:
+   case INTEL_ENGINE_CLASS_COMPUTE:
+      emit_query_pc_availability(cmd_buffer, addr, available);
+      break;
+
+   case INTEL_ENGINE_CLASS_COPY:
+   case INTEL_ENGINE_CLASS_VIDEO:
+   case INTEL_ENGINE_CLASS_VIDEO_ENHANCE:
+      emit_query_mi_flush_availability(cmd_buffer, addr, available);
+      break;
+
+   default:
+      unreachable("Invalid engine class");
+   }
+}
+
 VkResult genX(CreateQueryPool)(
     VkDevice                                    _device,
     const VkQueryPoolCreateInfo*                pCreateInfo,
@@ -202,7 +247,7 @@ VkResult genX(CreateQueryPool)(
       uint64s_per_slot = 1 + 1; /* availability + length of written bitstream data */
       break;
    default:
-      assert(!"Invalid query type");
+      unreachable("Invalid query type");
    }
 
    if (!vk_multialloc_zalloc2(&ma, &device->vk.alloc, pAllocator,
@@ -256,6 +301,7 @@ VkResult genX(CreateQueryPool)(
                                 ANV_BO_ALLOC_CAPTURE,
                                 0 /* explicit_address */,
                                 &pool->bo);
+   ANV_DMR_BO_ALLOC(&pool->vk.base, pool->bo, result);
    if (result != VK_SUCCESS)
       goto fail;
 
@@ -299,7 +345,7 @@ void genX(DestroyQueryPool)(
       return;
 
    ANV_RMV(resource_destroy, device, pool);
-
+   ANV_DMR_BO_FREE(&pool->vk.base, pool->bo);
    anv_device_release_bo(device, pool->bo);
    vk_object_free(&device->vk, pAllocator, pool);
 }
@@ -727,28 +773,6 @@ emit_ps_depth_count(struct anv_cmd_buffer *cmd_buffer,
        ANV_PIPE_DEPTH_STALL_BIT | (cs_stall_needed ? ANV_PIPE_CS_STALL_BIT : 0));
 }
 
-static void
-emit_query_mi_availability(struct mi_builder *b,
-                           struct anv_address addr,
-                           bool available)
-{
-   mi_store(b, mi_mem64(addr), mi_imm(available));
-}
-
-static void
-emit_query_pc_availability(struct anv_cmd_buffer *cmd_buffer,
-                           struct anv_address addr,
-                           bool available)
-{
-   cmd_buffer->state.pending_pipe_bits |= ANV_PIPE_POST_SYNC_BIT;
-   genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
-
-   genx_batch_emit_pipe_control_write
-      (&cmd_buffer->batch, cmd_buffer->device->info,
-       cmd_buffer->state.current_pipeline, WriteImmediateData, addr,
-       available, 0);
-}
-
 /**
  * Goes through a series of consecutive query indices in the given pool
  * setting all element values to 0 and emitting them as available.
@@ -771,11 +795,11 @@ emit_zero_queries(struct anv_cmd_buffer *cmd_buffer,
             anv_query_address(pool, first_index + i);
 
          for (uint32_t qword = 1; qword < (pool->stride / 8); qword++) {
-            emit_query_pc_availability(cmd_buffer,
-                                       anv_address_add(slot_addr, qword * 8),
-                                       false);
+            emit_query_eop_availability(cmd_buffer,
+                                        anv_address_add(slot_addr, qword * 8),
+                                        false);
          }
-         emit_query_pc_availability(cmd_buffer, slot_addr, true);
+         emit_query_eop_availability(cmd_buffer, slot_addr, true);
       }
       break;
 
@@ -840,8 +864,7 @@ void genX(CmdResetQueryPool)(
 
       anv_cmd_buffer_fill_area(cmd_buffer,
                                anv_query_address(pool, firstQuery),
-                               queryCount * pool->stride,
-                               0, false);
+                               queryCount * pool->stride, 0);
 
       /* The pending clearing writes are in compute if we're in gpgpu mode on
        * the render engine or on the compute engine.
@@ -878,9 +901,9 @@ void genX(CmdResetQueryPool)(
 
    case VK_QUERY_TYPE_TIMESTAMP: {
       for (uint32_t i = 0; i < queryCount; i++) {
-         emit_query_pc_availability(cmd_buffer,
-                                    anv_query_address(pool, firstQuery + i),
-                                    false);
+         emit_query_eop_availability(cmd_buffer,
+                                     anv_query_address(pool, firstQuery + i),
+                                     false);
       }
 
       /* Add a CS stall here to make sure the PIPE_CONTROL above has

@@ -232,20 +232,14 @@ radv_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDeviceSi
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, dstBuffer);
-   bool old_predicating;
 
-   /* VK_EXT_conditional_rendering says that copy commands should not be
-    * affected by conditional rendering.
-    */
-   old_predicating = cmd_buffer->state.predicating;
-   cmd_buffer->state.predicating = false;
+   radv_suspend_conditional_rendering(cmd_buffer);
 
    fillSize = vk_buffer_range(&dst_buffer->vk, dstOffset, fillSize) & ~3ull;
 
-   radv_fill_buffer(cmd_buffer, NULL, dst_buffer->bo, dst_buffer->addr + dstOffset, fillSize, data);
+   radv_fill_buffer(cmd_buffer, NULL, dst_buffer->bo, vk_buffer_address(&dst_buffer->vk, dstOffset), fillSize, data);
 
-   /* Restore conditional rendering. */
-   cmd_buffer->state.predicating = old_predicating;
+   radv_resume_conditional_rendering(cmd_buffer);
 }
 
 void
@@ -270,27 +264,21 @@ radv_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCop
    VK_FROM_HANDLE(radv_buffer, src_buffer, pCopyBufferInfo->srcBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, pCopyBufferInfo->dstBuffer);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   bool old_predicating;
 
-   /* VK_EXT_conditional_rendering says that copy commands should not be
-    * affected by conditional rendering.
-    */
-   old_predicating = cmd_buffer->state.predicating;
-   cmd_buffer->state.predicating = false;
+   radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, src_buffer->bo);
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, dst_buffer->bo);
 
    for (unsigned r = 0; r < pCopyBufferInfo->regionCount; r++) {
       const VkBufferCopy2 *region = &pCopyBufferInfo->pRegions[r];
-      const uint64_t src_va = src_buffer->addr + region->srcOffset;
-      const uint64_t dst_va = dst_buffer->addr + region->dstOffset;
+      const uint64_t src_va = vk_buffer_address(&src_buffer->vk, region->srcOffset);
+      const uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, region->dstOffset);
 
       radv_copy_memory(cmd_buffer, src_va, dst_va, region->size);
    }
 
-   /* Restore conditional rendering. */
-   cmd_buffer->state.predicating = old_predicating;
+   radv_resume_conditional_rendering(cmd_buffer);
 }
 
 void
@@ -305,12 +293,13 @@ radv_update_buffer_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const voi
    radv_emit_cache_flush(cmd_buffer);
    radeon_check_space(device->ws, cmd_buffer->cs, words + 4);
 
-   radeon_emit(cmd_buffer->cs, PKT3(PKT3_WRITE_DATA, 2 + words, 0));
-   radeon_emit(cmd_buffer->cs,
-               S_370_DST_SEL(mec ? V_370_MEM : V_370_MEM_GRBM) | S_370_WR_CONFIRM(1) | S_370_ENGINE_SEL(V_370_ME));
-   radeon_emit(cmd_buffer->cs, va);
-   radeon_emit(cmd_buffer->cs, va >> 32);
-   radeon_emit_array(cmd_buffer->cs, data, words);
+   radeon_begin(cmd_buffer->cs);
+   radeon_emit(PKT3(PKT3_WRITE_DATA, 2 + words, 0));
+   radeon_emit(S_370_DST_SEL(mec ? V_370_MEM : V_370_MEM_GRBM) | S_370_WR_CONFIRM(1) | S_370_ENGINE_SEL(V_370_ME));
+   radeon_emit(va);
+   radeon_emit(va >> 32);
+   radeon_emit_array(data, words);
+   radeon_end();
 
    if (radv_device_fault_detection_enabled(device))
       radv_cmd_buffer_trace_emit(cmd_buffer);
@@ -345,19 +334,13 @@ radv_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer, VkDevice
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    VK_FROM_HANDLE(radv_buffer, dst_buffer, dstBuffer);
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   const uint64_t dst_va = dst_buffer->addr + dstOffset;
-   bool old_predicating;
+   const uint64_t dst_va = vk_buffer_address(&dst_buffer->vk, dstOffset);
 
-   /* VK_EXT_conditional_rendering says that copy commands should not be
-    * affected by conditional rendering.
-    */
-   old_predicating = cmd_buffer->state.predicating;
-   cmd_buffer->state.predicating = false;
+   radv_suspend_conditional_rendering(cmd_buffer);
 
    radv_cs_add_buffer(device->ws, cmd_buffer->cs, dst_buffer->bo);
 
    radv_update_memory(cmd_buffer, dst_va, dataSize, pData);
 
-   /* Restore conditional rendering. */
-   cmd_buffer->state.predicating = old_predicating;
+   radv_resume_conditional_rendering(cmd_buffer);
 }

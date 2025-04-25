@@ -61,11 +61,13 @@ static void
 update_framebuffer_size(struct pipe_framebuffer_state *framebuffer,
                         struct pipe_surface *surface)
 {
+   uint16_t width, height;
    assert(surface);
-   assert(surface->width  < USHRT_MAX);
-   assert(surface->height < USHRT_MAX);
-   framebuffer->width  = MIN2(framebuffer->width,  surface->width);
-   framebuffer->height = MIN2(framebuffer->height, surface->height);
+   pipe_surface_size(surface, &width, &height);
+   assert(width  < USHRT_MAX);
+   assert(height < USHRT_MAX);
+   framebuffer->width  = MIN2(framebuffer->width,  width);
+   framebuffer->height = MIN2(framebuffer->height, height);
 }
 
 /**
@@ -147,7 +149,6 @@ st_update_framebuffer_state( struct st_context *st )
    framebuffer.nr_cbufs = fb->_NumColorDrawBuffers;
 
    unsigned num_multiview_layer = 0;
-   unsigned first_multiview_layer = 0;
    for (i = 0; i < fb->_NumColorDrawBuffers; i++) {
       framebuffer.cbufs[i] = NULL;
       rb = fb->_ColorDrawBuffers[i];
@@ -159,10 +160,7 @@ st_update_framebuffer_state( struct st_context *st )
 
             _mesa_update_renderbuffer_surface(ctx, rb);
 
-            if (rb->rtt_numviews) {
-               first_multiview_layer = rb->rtt_slice;
-               num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
-            }
+            num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
          }
 
          if (rb->surface) {
@@ -175,8 +173,6 @@ st_update_framebuffer_state( struct st_context *st )
          rb->defined = GL_TRUE; /* we'll be drawing something */
       }
    }
-   if (num_multiview_layer)
-      framebuffer.viewmask = BITFIELD_RANGE(first_multiview_layer, num_multiview_layer);
 
    for (i = framebuffer.nr_cbufs; i < PIPE_MAX_COLOR_BUFS; i++) {
       framebuffer.cbufs[i] = NULL;
@@ -199,6 +195,7 @@ st_update_framebuffer_state( struct st_context *st )
       if (rb->is_rtt) {
          /* rendering to a GL texture, may have to update surface */
          _mesa_update_renderbuffer_surface(ctx, rb);
+         num_multiview_layer = MAX2(num_multiview_layer, rb->rtt_numviews);
       }
       if (rb->surface && rb->surface->context != ctx->pipe) {
          _mesa_regen_renderbuffer_surface(ctx, rb);
@@ -209,6 +206,8 @@ st_update_framebuffer_state( struct st_context *st )
    }
    else
       framebuffer.zsbuf = NULL;
+
+   framebuffer.viewmask = BITFIELD_MASK(num_multiview_layer);
 
 #ifndef NDEBUG
    /* Make sure the resource binding flags were set properly */

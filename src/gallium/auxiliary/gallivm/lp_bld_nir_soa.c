@@ -191,6 +191,9 @@ struct lp_build_nir_soa_context
    nir_shader *shader;
    nir_instr *instr;
 
+   /* A variable that contains the value of mask_vec so it shows up inside the debugger. */
+   LLVMValueRef debug_exec_mask;
+
    struct lp_build_if_state if_stack[LP_MAX_TGSI_NESTING];
    uint32_t if_stack_size;
 
@@ -240,7 +243,6 @@ struct lp_build_nir_soa_context
     */
    LLVMValueRef inputs_array;
 
-   LLVMValueRef kernel_args_ptr;
    unsigned gs_vertex_streams;
 
    LLVMTypeRef call_context_type;
@@ -2929,6 +2931,46 @@ assign_ssa_dest(struct lp_build_nir_soa_context *bld, const nir_def *ssa,
    struct gallivm_state *gallivm = bld->base.gallivm;
    LLVMBuilderRef builder = gallivm->builder;
 
+   if (gallivm->di_builder && ssa->parent_instr->has_debug_info) {
+      nir_instr_debug_info *debug_info = nir_instr_get_debug_info(ssa->parent_instr);
+
+      /* Use "ssa_%u" because GDB cannot handle "%%%u" */
+      char name[16];
+      snprintf(name, sizeof(name), "ssa_%u", ssa->index);
+
+      LLVMTypeRef type = LLVMTypeOf(vals[0]);
+      if (ssa->num_components > 1)
+         type = LLVMArrayType(type, ssa->num_components);
+
+      LLVMBuilderRef first_builder = lp_create_builder_at_entry(gallivm);
+      LLVMValueRef var = LLVMBuildAlloca(first_builder, type, name);
+      LLVMBuildStore(first_builder, LLVMConstNull(type), var);
+      LLVMDisposeBuilder(first_builder);
+
+      if (ssa->num_components > 1)
+         LLVMBuildStore(builder, lp_nir_array_build_gather_values(builder, vals, ssa->num_components), var);
+      else
+         LLVMBuildStore(builder, vals[0], var);
+
+      LLVMMetadataRef di_type = lp_bld_debug_info_type(gallivm, type);
+      LLVMMetadataRef di_var = LLVMDIBuilderCreateAutoVariable(
+         gallivm->di_builder, gallivm->di_function, name, strlen(name),
+         gallivm->file, debug_info->line, di_type, true, LLVMDIFlagZero, 0);
+
+      LLVMMetadataRef di_expr = LLVMDIBuilderCreateExpression(gallivm->di_builder, NULL, 0);
+
+      LLVMMetadataRef di_loc = LLVMDIBuilderCreateDebugLocation(
+         gallivm->context, debug_info->line, debug_info->column, gallivm->di_function, NULL);
+
+#if LLVM_VERSION_MAJOR >= 19
+      LLVMDIBuilderInsertDeclareRecordAtEnd(gallivm->di_builder, var, di_var, di_expr, di_loc,
+                                            LLVMGetInsertBlock(builder));
+#else
+      LLVMDIBuilderInsertDeclareAtEnd(gallivm->di_builder, var, di_var, di_expr, di_loc,
+                                      LLVMGetInsertBlock(builder));
+#endif
+   }
+
    bool used_by_uniform = false;
    bool used_by_divergent = false;
    nir_foreach_use_including_if(use, ssa) {
@@ -4495,42 +4537,6 @@ visit_discard(struct lp_build_nir_soa_context *bld,
 }
 
 static void
-visit_load_kernel_input(struct lp_build_nir_soa_context *bld,
-                        nir_intrinsic_instr *instr,
-                        LLVMValueRef result[NIR_MAX_VEC_COMPONENTS])
-{
-   struct gallivm_state *gallivm = bld->base.gallivm;
-   LLVMBuilderRef builder = gallivm->builder;
-
-   LLVMValueRef offset = get_src(bld, &instr->src[0], 0);
-   bool offset_is_uniform = !lp_nir_instr_src_divergent(&instr->instr, 0);
-
-   struct lp_build_context *bld_broad = get_int_bld(bld, true, instr->def.bit_size, !offset_is_uniform);
-   LLVMValueRef kernel_args_ptr = bld->kernel_args_ptr;
-   unsigned size_shift = bit_size_to_shift_size(instr->def.bit_size);
-   struct lp_build_context *bld_offset = get_int_bld(bld, true, nir_src_bit_size(instr->src[0]), !offset_is_uniform);
-   if (size_shift)
-      offset = lp_build_shr(bld_offset, offset, lp_build_const_int_vec(gallivm, bld_offset->type, size_shift));
-
-   LLVMTypeRef ptr_type = LLVMPointerType(bld_broad->elem_type, 0);
-   kernel_args_ptr = LLVMBuildBitCast(builder, kernel_args_ptr, ptr_type, "");
-
-   if (offset_is_uniform) {
-      offset = LLVMBuildExtractElement(builder, offset, first_active_invocation(bld), "");
-
-      for (unsigned c = 0; c < instr->def.num_components; c++) {
-         LLVMValueRef this_offset = LLVMBuildAdd(builder, offset, nir_src_bit_size(instr->src[0]) == 64 ?
-                                                 lp_build_const_int64(gallivm, c) :
-                                                 lp_build_const_int32(gallivm, c), "");
-
-         result[c] = lp_build_pointer_get2(builder, bld_broad->elem_type, kernel_args_ptr, this_offset);
-      }
-   } else {
-      unreachable("load_kernel_arg must have a uniform offset.");
-   }
-}
-
-static void
 visit_load_global(struct lp_build_nir_soa_context *bld,
                   nir_intrinsic_instr *instr,
                   LLVMValueRef result[NIR_MAX_VEC_COMPONENTS])
@@ -5003,9 +5009,6 @@ visit_intrinsic(struct lp_build_nir_soa_context *bld,
    case nir_intrinsic_barrier:
       visit_barrier(bld, instr);
       break;
-   case nir_intrinsic_load_kernel_input:
-      visit_load_kernel_input(bld, instr, result);
-     break;
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant:
       visit_load_global(bld, instr, result);
@@ -5547,9 +5550,20 @@ visit_call(struct lp_build_nir_soa_context *bld,
 static void
 visit_block(struct lp_build_nir_soa_context *bld, nir_block *block)
 {
+   struct gallivm_state *gallivm = bld->base.gallivm;
+
    nir_foreach_instr(instr, block)
    {
       bld->instr = instr;
+
+      if (gallivm->di_builder && gallivm->file_name && instr->has_debug_info) {
+         nir_instr_debug_info *debug_info = nir_instr_get_debug_info(instr);
+         LLVMMetadataRef di_loc = LLVMDIBuilderCreateDebugLocation(
+            gallivm->context, debug_info->nir_line, 1, gallivm->di_function, NULL);
+         LLVMSetCurrentDebugLocation2(gallivm->builder, di_loc);
+
+         LLVMBuildStore(gallivm->builder, mask_vec(bld), bld->debug_exec_mask);
+      }
 
       switch (instr->type) {
       case nir_instr_type_alu:
@@ -5856,7 +5870,6 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    bld.shared_ptr = params->shared_ptr;
    bld.payload_ptr = params->payload_ptr;
    bld.coro = params->coro;
-   bld.kernel_args_ptr = params->kernel_args;
    bld.num_inputs = params->num_inputs;
    bld.indirects = 0;
    if (shader->info.inputs_read_indirectly)
@@ -5936,6 +5949,41 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
                                       _mesa_key_pointer_equal);
    bld.range_ht = _mesa_pointer_hash_table_create(NULL);
 
+   nir_index_ssa_defs(impl);
+
+   if (bld.base.gallivm->di_builder && bld.base.gallivm->file_name && shader->has_debug_info) {
+      char *shader_src = nir_shader_gather_debug_info(shader, bld.base.gallivm->file_name, 1);
+      if (shader_src) {
+         FILE *f = fopen(bld.base.gallivm->file_name, "w");
+         fprintf(f, "%s\n", shader_src);
+         fclose(f);
+
+         ralloc_free(shader_src);
+      }
+
+      LLVMValueRef exec_mask = mask_vec(&bld);
+      bld.debug_exec_mask = lp_build_alloca_undef(gallivm, LLVMTypeOf(exec_mask), "exec_mask");
+      LLVMBuildStore(gallivm->builder, exec_mask, bld.debug_exec_mask);
+
+      LLVMMetadataRef di_type = lp_bld_debug_info_type(gallivm, LLVMTypeOf(exec_mask));
+      LLVMMetadataRef di_var = LLVMDIBuilderCreateAutoVariable(
+         gallivm->di_builder, gallivm->di_function, "exec_mask", strlen("exec_mask"),
+         gallivm->file, 0, di_type, true, LLVMDIFlagZero, 0);
+
+      LLVMMetadataRef di_expr = LLVMDIBuilderCreateExpression(gallivm->di_builder, NULL, 0);
+
+      LLVMMetadataRef di_loc = LLVMDIBuilderCreateDebugLocation(
+         gallivm->context, 0, 0, gallivm->di_function, NULL);
+
+#if LLVM_VERSION_MAJOR >= 19
+      LLVMDIBuilderInsertDeclareRecordAtEnd(gallivm->di_builder, bld.debug_exec_mask, di_var, di_expr, di_loc,
+                                            LLVMGetInsertBlock(gallivm->builder));
+#else
+      LLVMDIBuilderInsertDeclareAtEnd(gallivm->di_builder, bld.debug_exec_mask, di_var, di_expr, di_loc,
+                                      LLVMGetInsertBlock(gallivm->builder));
+#endif
+   }
+
    nir_foreach_reg_decl(reg, impl) {
       LLVMTypeRef type = get_register_type(&bld, reg);
       LLVMValueRef reg_alloc = lp_build_alloca(bld.base.gallivm,
@@ -5943,7 +5991,6 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
       _mesa_hash_table_insert(bld.regs, reg, reg_alloc);
    }
 
-   nir_index_ssa_defs(impl);
    nir_divergence_analysis_impl(impl, impl->function->shader->options->divergence_analysis_options);
    bld.ssa_defs = calloc(impl->ssa_alloc * NIR_MAX_VEC_COMPONENTS * 2, sizeof(LLVMValueRef));
    visit_cf_list(&bld, &impl->body);
@@ -5980,6 +6027,9 @@ lp_build_nir_soa_prepasses(struct nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, nir, nir_remove_dead_derefs);
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+
+   NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+
    NIR_PASS(_, nir, nir_convert_to_lcssa, false, false);
    NIR_PASS(_, nir, nir_lower_phis_to_scalar, true);
 

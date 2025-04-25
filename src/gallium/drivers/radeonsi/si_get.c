@@ -14,7 +14,6 @@
 #include "util/u_cpu_detect.h"
 #include "util/u_screen.h"
 #include "util/u_video.h"
-#include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include <sys/utsname.h>
 
@@ -84,33 +83,6 @@ static const char *si_get_name(struct pipe_screen *pscreen)
    return sscreen->renderer_string;
 }
 
-static int si_get_video_param_no_video_hw(struct pipe_screen *screen, enum pipe_video_profile profile,
-                                          enum pipe_video_entrypoint entrypoint,
-                                          enum pipe_video_cap param)
-{
-   switch (param) {
-   case PIPE_VIDEO_CAP_SUPPORTED:
-      return vl_profile_supported(screen, profile, entrypoint);
-   case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-      return 1;
-   case PIPE_VIDEO_CAP_MAX_WIDTH:
-   case PIPE_VIDEO_CAP_MAX_HEIGHT:
-      return vl_video_buffer_max_size(screen);
-   case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
-      return PIPE_FORMAT_NV12;
-   case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
-      return false;
-   case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
-      return false;
-   case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
-      return true;
-   case PIPE_VIDEO_CAP_MAX_LEVEL:
-      return vl_level_supported(screen, profile);
-   default:
-      return 0;
-   }
-}
-
 static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profile profile,
                               enum pipe_video_entrypoint entrypoint, enum pipe_video_cap param)
 {
@@ -173,6 +145,10 @@ static int si_get_video_param(struct pipe_screen *screen, enum pipe_video_profil
          return false;
       case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
          /* for VPE we prefer non-interlaced buffer */
+         return false;
+      case PIPE_VIDEO_CAP_VPP_SUPPORT_HDR_INPUT:
+         if (debug_get_bool_option("AMDGPU_SIVPE_SUPPORT_HDR_INPUT", false))
+            return true;
          return false;
       default:
          return 0;
@@ -872,9 +848,6 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       sscreen->b.get_video_param = si_get_video_param;
       sscreen->b.is_video_format_supported = si_vid_is_format_supported;
       sscreen->b.is_video_target_buffer_supported = si_vid_is_target_buffer_supported;
-   } else {
-      sscreen->b.get_video_param = si_get_video_param_no_video_hw;
-      sscreen->b.is_video_format_supported = vl_video_buffer_is_format_supported;
    }
 
    si_init_renderer_string(sscreen);
@@ -903,7 +876,7 @@ void si_init_screen_get_functions(struct si_screen *sscreen)
       (sscreen->info.family >= CHIP_GFX940 && !sscreen->info.has_graphics) ||
       /* fma32 is too slow for gpu < gfx9, so apply the option only for gpu >= gfx9 */
       (sscreen->info.gfx_level >= GFX9 && sscreen->options.force_use_fma32);
-   bool has_mediump = sscreen->info.gfx_level >= GFX8 && sscreen->options.fp16;
+   bool has_mediump = sscreen->info.gfx_level >= GFX9 && sscreen->options.mediump;
 
    nir_shader_compiler_options *options = sscreen->nir_options;
    ac_nir_set_options(&sscreen->info, !sscreen->use_aco, options);
@@ -969,8 +942,6 @@ void si_init_shader_caps(struct si_screen *sscreen)
       caps->max_shader_images = SI_NUM_IMAGES;
 
       caps->supported_irs = (1 << PIPE_SHADER_IR_TGSI) | (1 << PIPE_SHADER_IR_NIR);
-      if (i == PIPE_SHADER_COMPUTE)
-         caps->supported_irs |= 1 << PIPE_SHADER_IR_NATIVE;
 
       /* Supported boolean features. */
       caps->cont_supported = true;
@@ -981,14 +952,16 @@ void si_init_shader_caps(struct si_screen *sscreen)
       caps->int64_atomics = true;
       caps->tgsi_any_inout_decl_range = true;
 
-      /* We need f16c for fast FP16 conversions in glUniform. */
-      caps->fp16_const_buffers =
-         util_get_cpu_caps()->has_f16c && sscreen->nir_options->lower_mediump_io;
+      /* We need F16C for fast FP16 conversions in glUniform.
+       * It's supported since Intel Ivy Bridge and AMD Bulldozer.
+       */
+      bool has_16bit_alu = sscreen->info.gfx_level >= GFX9 && util_get_cpu_caps()->has_f16c;
 
-      caps->fp16 =
-      caps->fp16_derivatives =
-      caps->glsl_16bit_consts =
-      caps->int16 = sscreen->nir_options->lower_mediump_io != NULL;
+      caps->fp16 = has_16bit_alu;
+      caps->fp16_derivatives = has_16bit_alu;
+      caps->fp16_const_buffers = has_16bit_alu;
+      caps->int16 = has_16bit_alu;
+      caps->glsl_16bit_consts = has_16bit_alu;
    }
 }
 
@@ -1011,12 +984,7 @@ void si_init_compute_caps(struct si_screen *sscreen)
    caps->max_block_size[1] =
    caps->max_block_size[2] = 1024;
 
-   caps->max_block_size_clover[0] =
-   caps->max_block_size_clover[1] =
-   caps->max_block_size_clover[2] = 256;
-
    caps->max_threads_per_block = 1024;
-   caps->max_threads_per_block_clover = 256;
    caps->address_bits = 64;
 
    /* Return 1/4 of the heap size as the maximum because the max size is not practically

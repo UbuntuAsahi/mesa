@@ -6,6 +6,7 @@
 #pragma once
 
 #include "compiler/nir/nir.h"
+#include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
 #include "shader_enums.h"
@@ -154,6 +155,8 @@ struct agx_shader_info {
     * registers as specified hre.
     */
    struct agx_rodata rodata;
+
+   struct agx2_stats stats;
 };
 
 struct agx_precompiled_kernel_info {
@@ -305,7 +308,6 @@ bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
                           nir_intrinsic_instr *high, void *data);
 
 void agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
-                            struct util_debug_callback *debug,
                             struct agx_shader_part *out);
 
 struct agx_occupancy {
@@ -315,16 +317,6 @@ struct agx_occupancy {
 
 struct agx_occupancy agx_occupancy_for_register_count(unsigned halfregs);
 unsigned agx_max_registers_for_occupancy(unsigned occupancy);
-
-static inline void
-agx_disassemble_stdout(void *data, size_t size)
-{
-   FILE *tmp = fopen("/tmp/shader.bin", "wb");
-   fwrite(data, 1, size, tmp);
-   fclose(tmp);
-
-   system("python3 ~/applegpu/disassemble.py /tmp/shader.bin");
-}
 
 static const nir_shader_compiler_options agx_nir_options = {
    .lower_fdiv = true,

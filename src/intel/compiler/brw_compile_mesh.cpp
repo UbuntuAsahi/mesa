@@ -279,7 +279,7 @@ brw_nir_lower_mesh_primitive_count(nir_shader *nir)
    }
    nir_pop_if(b, NULL);
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   nir_progress(true, impl, nir_metadata_none);
 
    nir->info.outputs_written |= VARYING_BIT_PRIMITIVE_COUNT;
 
@@ -289,7 +289,7 @@ brw_nir_lower_mesh_primitive_count(nir_shader *nir)
 static void
 brw_emit_urb_fence(brw_shader &s)
 {
-   const brw_builder bld1 = brw_builder(&s).at_end().exec_all().group(1, 0);
+   const brw_builder bld1 = brw_builder(&s).uniform();
    brw_reg dst = bld1.vgrf(BRW_TYPE_UD);
    brw_inst *fence = bld1.emit(SHADER_OPCODE_MEMORY_FENCE, dst,
                               brw_vec8_grf(0, 0),
@@ -337,7 +337,6 @@ run_task_mesh(brw_shader &s, bool allow_spilling)
    s.assign_curb_setup();
 
    brw_lower_3src_null_dest(s);
-   brw_workaround_memory_fence_before_eot(s);
    brw_workaround_emit_dummy_mov_instruction(s);
 
    brw_allocate_registers(s, allow_spilling);
@@ -373,9 +372,7 @@ brw_compile_task(const struct brw_compiler *compiler,
 
    NIR_PASS(_, nir, brw_nir_lower_launch_mesh_workgroups);
 
-   prog_data->base.base.stage = MESA_SHADER_TASK;
-   prog_data->base.base.total_shared = nir->info.shared_size;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];
@@ -1340,9 +1337,9 @@ brw_nir_initialize_mue(nir_shader *nir,
    }
 
    if (remaining) {
-      nir_metadata_preserve(entrypoint, nir_metadata_none);
+      nir_progress(true, entrypoint, nir_metadata_none);
    } else {
-      nir_metadata_preserve(entrypoint, nir_metadata_control_flow);
+      nir_progress(true, entrypoint, nir_metadata_control_flow);
    }
 }
 
@@ -1657,9 +1654,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    struct brw_mesh_prog_data *prog_data = params->prog_data;
    const bool debug_enabled = brw_should_print_shader(nir, DEBUG_MESH);
 
-   prog_data->base.base.stage = MESA_SHADER_MESH;
-   prog_data->base.base.total_shared = nir->info.shared_size;
-   prog_data->base.base.total_scratch = 0;
+   brw_prog_data_init(&prog_data->base.base, &params->base);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
    prog_data->base.local_size[1] = nir->info.workgroup_size[1];

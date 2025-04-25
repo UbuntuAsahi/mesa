@@ -58,6 +58,12 @@
          .end = { ._int = max },                \
       }                                         \
 
+#define DRI_CONF_RANGE_U64(min, max)            \
+      .range = {                                \
+         .start = { ._uint64 = min },           \
+         .end = { ._uint64 = max },             \
+      }
+
 #define DRI_CONF_RANGE_F(min, max)              \
       .range = {                                \
          .start = { ._float = min },            \
@@ -86,6 +92,16 @@
          DRI_CONF_RANGE_I(min, max),                            \
       },                                                        \
       .value = { ._int = def },                                 \
+   },
+
+#define DRI_CONF_OPT_U64(_name, def, min, max, _desc) {         \
+      .desc = _desc,                                            \
+      .info = {                                                 \
+         .name = #_name,                                        \
+         .type = DRI_UINT64,                                    \
+         DRI_CONF_RANGE_U64(min, max),                          \
+      },                                                        \
+      .value = { ._uint64 = def },                                 \
    },
 
 #define DRI_CONF_OPT_F(_name, def, min, max, _desc) {           \
@@ -326,6 +342,18 @@
 #define DRI_CONF_FAKE_SPARSE(def) \
    DRI_CONF_OPT_B(fake_sparse, def, \
                   "Advertise support for sparse binding of textures regardless of real support")
+
+#define DRI_CONFIG_INTEL_TBIMR(def) \
+   DRI_CONF_OPT_B(intel_tbimr, def, "Enable TBIMR tiled rendering")
+
+#define DRI_CONFIG_INTEL_VF_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_vf_distribution, def, "Enable geometry distribution")
+
+#define DRI_CONFIG_INTEL_TE_DISTRIBUTION(def) \
+   DRI_CONF_OPT_B(intel_te_distribution, def, "Enable tesselation distribution")
+
+#define DRI_CONFIG_INTEL_STORAGE_CACHE_POLICY_WT(def) \
+   DRI_CONF_OPT_B(intel_storage_cache_policy_wt, def, "Enable write-through cache policy for storage buffers/images.")
 
 #define DRI_CONF_INTEL_ENABLE_WA_14018912822(def) \
    DRI_CONF_OPT_B(intel_enable_wa_14018912822, def, \
@@ -614,6 +642,18 @@
                   "Disable conservative LRZ")
 
 /**
+ * \brief panfrost specific configuration options
+ */
+
+#define DRI_CONF_PAN_COMPUTE_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_compute_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for compute jobs. If unset, defaults to scheduling across all available cores.")
+
+#define DRI_CONF_PAN_FRAGMENT_CORE_MASK(def) \
+   DRI_CONF_OPT_U64(pan_fragment_core_mask, def, 0, UINT64_MAX, \
+                    "Bitmask of shader cores that may be used for fragment jobs. If unset, defaults to scheduling across all available cores.")
+
+/**
  * \brief Turnip specific configuration options
  */
 
@@ -628,6 +668,10 @@
 #define DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(def) \
    DRI_CONF_OPT_B(tu_disable_d24s8_border_color_workaround, def, \
                   "Use UBWC for D24S8 images with VK_IMAGE_USAGE_SAMPLED_BIT when customBorderColorWithoutFormat is enabled")
+
+#define DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(def) \
+   DRI_CONF_OPT_B(tu_use_tex_coord_round_nearest_even_mode, def, \
+                  "Use D3D-compliant round-to-nearest-even mode for texture coordinates")
 
 /**
  * \brief Honeykrisp specific configuration options
@@ -757,10 +801,6 @@
    DRI_CONF_OPT_B(radv_disable_dedicated_sparse_queue, def, \
                   "Disables the dedicated sparse queue. This replaces radv_legacy_sparse_binding as a compatible drirc workaround for games that might not expect a separate SPARSE queue")
 
-#define DRI_CONF_RADV_FORCE_PSTATE_PEAK_GFX11_DGPU(def) \
-   DRI_CONF_OPT_B(radv_force_pstate_peak_gfx11_dgpu, def, \
-                  "Force the performance level to profile_peak (all clocks to the highest levels) for RDNA3 dGPUs")
-
 /**
  * Overrides for forcing re-compilation of pipelines when RADV_BUILD_ID_OVERRIDE is enabled.
  * These need to be bumped every time a compiler bugfix is backported (up to 8 shader
@@ -786,6 +826,14 @@
 #define DRI_CONF_RADV_DISABLE_NGG_GS(def) \
    DRI_CONF_OPT_B(radv_disable_ngg_gs, def, "Disable NGG GS on GFX10/GFX10.3.")
 
+#define DRI_CONF_RADV_EMULATE_RT(def) \
+   DRI_CONF_OPT_B(radv_emulate_rt, def, \
+                  "Expose RT extensions on GFX10 and below through software emulation.")
+
+#define DRI_CONF_RADV_ENABLE_FLOAT16_GFX8(def) \
+   DRI_CONF_OPT_B(radv_enable_float16_gfx8, def, \
+                  "Expose float16 on GFX8, where it's supported but usually not beneficial.")
+
 /**
  * \brief ANV specific configuration options
  */
@@ -797,6 +845,10 @@
 #define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_BARRIER(def) \
    DRI_CONF_OPT_B(anv_assume_full_subgroups_with_barrier, def, \
                   "Assume full subgroups requirement for compute shaders that use control barriers")
+
+#define DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS_WITH_SHARED_MEMORY(def) \
+   DRI_CONF_OPT_B(anv_assume_full_subgroups_with_shared_memory, def, \
+                  "Allow assuming full subgroups requirement for shaders using shared memory even when it's not specified explicitly")
 
 #define DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
    DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \

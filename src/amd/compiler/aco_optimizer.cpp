@@ -1651,7 +1651,7 @@ label_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
       return;
    }
 
-   if (instr->isVALU() || instr->isVINTRP()) {
+   if (instr->isVALU() || (instr->isVINTRP() && instr->opcode != aco_opcode::v_interp_mov_f32)) {
       if (instr_info.can_use_output_modifiers[(int)instr->opcode] || instr->isVINTRP() ||
           instr->opcode == aco_opcode::v_cndmask_b32) {
          bool canonicalized = true;
@@ -3096,6 +3096,9 @@ apply_omod_clamp(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    if (needs_vop3 && !can_vop3)
       return false;
 
+   if (instr_info.classes[(int)instr->opcode] == instr_class::valu_pseudo_scalar_trans)
+      return false;
+
    /* SDWA omod is GFX9+. */
    bool can_use_omod = (can_vop3 || ctx.program->gfx_level >= GFX9) && !instr->isVOP3P() &&
                        (!instr->isVINTERP_INREG() || interp_can_become_fma(ctx, instr));
@@ -3228,46 +3231,6 @@ apply_ds_extract(opt_ctx& ctx, aco_ptr<Instruction>& extract)
    ctx.uses[extract->definitions[0].tempId()] = 0;
    ctx.info[ds->definitions[0].tempId()].label = 0;
    return true;
-}
-
-/* v_and(a, v_subbrev_co(0, 0, vcc)) -> v_cndmask(0, a, vcc) */
-bool
-combine_and_subbrev(opt_ctx& ctx, aco_ptr<Instruction>& instr)
-{
-   if (instr->usesModifiers())
-      return false;
-
-   for (unsigned i = 0; i < 2; i++) {
-      Instruction* op_instr = follow_operand(ctx, instr->operands[i], true);
-      if (op_instr && op_instr->opcode == aco_opcode::v_subbrev_co_u32 &&
-          op_instr->operands[0].constantEquals(0) && op_instr->operands[1].constantEquals(0) &&
-          !op_instr->usesModifiers()) {
-
-         aco_ptr<Instruction> new_instr;
-         if (instr->operands[!i].isTemp() &&
-             instr->operands[!i].getTemp().type() == RegType::vgpr) {
-            new_instr.reset(create_instruction(aco_opcode::v_cndmask_b32, Format::VOP2, 3, 1));
-         } else if (ctx.program->gfx_level >= GFX10 ||
-                    (instr->operands[!i].isConstant() && !instr->operands[!i].isLiteral())) {
-            new_instr.reset(
-               create_instruction(aco_opcode::v_cndmask_b32, asVOP3(Format::VOP2), 3, 1));
-         } else {
-            return false;
-         }
-
-         new_instr->operands[0] = Operand::zero();
-         new_instr->operands[1] = instr->operands[!i];
-         new_instr->operands[2] = copy_operand(ctx, op_instr->operands[2]);
-         new_instr->definitions[0] = instr->definitions[0];
-         new_instr->pass_flags = instr->pass_flags;
-         instr = std::move(new_instr);
-         decrease_uses(ctx, op_instr);
-         ctx.info[instr->definitions[0].tempId()].label = 0;
-         return true;
-      }
-   }
-
-   return false;
 }
 
 /* v_and(a, not(b)) -> v_bfi_b32(b, 0, a)
@@ -4197,9 +4160,7 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    } else if (instr->opcode == aco_opcode::s_abs_i32) {
       combine_sabsdiff(ctx, instr);
    } else if (instr->opcode == aco_opcode::v_and_b32) {
-      if (combine_and_subbrev(ctx, instr)) {
-      } else if (combine_v_andor_not(ctx, instr)) {
-      }
+      combine_v_andor_not(ctx, instr);
    } else if (instr->opcode == aco_opcode::v_fma_f32 || instr->opcode == aco_opcode::v_fma_f16) {
       /* set existing v_fma_f32 with label_mad so we can create v_fmamk_f32/v_fmaak_f32.
        * since ctx.uses[mad_info::mul_temp_id] is always 0, we don't have to worry about

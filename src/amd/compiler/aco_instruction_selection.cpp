@@ -967,13 +967,21 @@ emit_bcsel(isel_context* ctx, nir_alu_instr* instr, Temp dst)
    }
 
    if (!nir_src_is_divergent(&instr->src[0].src)) { /* uniform condition and values in sgpr */
-      if (dst.regClass() == s1 || dst.regClass() == s2) {
+      cond = bool_to_scalar_condition(ctx, cond);
+
+      bool els_zero =
+         nir_src_is_const(instr->src[2].src) && nir_src_as_uint(instr->src[2].src) == 0;
+
+      if (dst.regClass() == s1 && els_zero) {
+         /* Use s_mul_i32 because it doesn't require scc. */
+         bld.sop2(aco_opcode::s_mul_i32, Definition(dst), then, cond);
+      } else if (dst.regClass() == s1 || dst.regClass() == s2) {
          assert((then.regClass() == s1 || then.regClass() == s2) &&
                 els.regClass() == then.regClass());
          assert(dst.size() == then.size());
          aco_opcode op =
             dst.regClass() == s1 ? aco_opcode::s_cselect_b32 : aco_opcode::s_cselect_b64;
-         bld.sop2(op, Definition(dst), then, els, bld.scc(bool_to_scalar_condition(ctx, cond)));
+         bld.sop2(op, Definition(dst), then, els, bld.scc(cond));
       } else {
          isel_err(&instr->instr, "Unimplemented uniform bcsel bit size");
       }
@@ -2145,6 +2153,31 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          }
       } else if (dst.regClass() == s1) {
          emit_sop2_instruction(ctx, instr, aco_opcode::s_mul_i32, dst, false);
+      } else {
+         isel_err(&instr->instr, "Unimplemented NIR instr bit size");
+      }
+      break;
+   }
+   case nir_op_imul24_relaxed: {
+      if (dst.regClass() == s1) {
+         emit_sop2_instruction(ctx, instr, aco_opcode::s_mul_i32, dst, false);
+      } else if (dst.regClass() == v1) {
+         emit_vop2_instruction(ctx, instr, aco_opcode::v_mul_i32_i24, dst, true);
+      } else {
+         isel_err(&instr->instr, "Unimplemented NIR instr bit size");
+      }
+      break;
+   }
+   case nir_op_umul24_relaxed: {
+      if (dst.regClass() == s1) {
+         Operand op1(get_alu_src(ctx, instr->src[0]));
+         Operand op2(get_alu_src(ctx, instr->src[1]));
+         op1.set24bit(true);
+         op2.set24bit(true);
+         bld.sop2(aco_opcode::s_mul_i32, Definition(dst), op1, op2);
+      } else if (dst.regClass() == v1) {
+         emit_vop2_instruction(ctx, instr, aco_opcode::v_mul_u32_u24, dst, true /* commutative */,
+                               false, false, false, 0x3);
       } else {
          isel_err(&instr->instr, "Unimplemented NIR instr bit size");
       }
@@ -4554,10 +4587,12 @@ mubuf_load_callback(Builder& bld, const LoadEmitInfo& info, Temp offset, unsigne
    aco_opcode op;
    if (bytes_needed == 1 || align_ % 2) {
       bytes_size = 1;
-      op = aco_opcode::buffer_load_ubyte;
+      op = bld.program->gfx_level >= GFX9 ? aco_opcode::buffer_load_ubyte_d16
+                                          : aco_opcode::buffer_load_ubyte;
    } else if (bytes_needed == 2 || align_ % 4) {
       bytes_size = 2;
-      op = aco_opcode::buffer_load_ushort;
+      op = bld.program->gfx_level >= GFX9 ? aco_opcode::buffer_load_short_d16
+                                          : aco_opcode::buffer_load_ushort;
    } else if (bytes_needed <= 4) {
       bytes_size = 4;
       op = aco_opcode::buffer_load_dword;
@@ -4662,10 +4697,10 @@ scratch_load_callback(Builder& bld, const LoadEmitInfo& info, Temp offset, unsig
    aco_opcode op;
    if (bytes_needed == 1 || align_ % 2u) {
       bytes_size = 1;
-      op = aco_opcode::scratch_load_ubyte;
+      op = aco_opcode::scratch_load_ubyte_d16;
    } else if (bytes_needed == 2 || align_ % 4u) {
       bytes_size = 2;
-      op = aco_opcode::scratch_load_ushort;
+      op = aco_opcode::scratch_load_short_d16;
    } else if (bytes_needed <= 4) {
       bytes_size = 4;
       op = aco_opcode::scratch_load_dword;
@@ -4816,12 +4851,12 @@ global_load_callback(Builder& bld, const LoadEmitInfo& info, Temp offset, unsign
    if (bytes_needed == 1 || align_ % 2u) {
       bytes_size = 1;
       op = use_mubuf ? aco_opcode::buffer_load_ubyte
-           : global  ? aco_opcode::global_load_ubyte
+           : global  ? aco_opcode::global_load_ubyte_d16
                      : aco_opcode::flat_load_ubyte;
    } else if (bytes_needed == 2 || align_ % 4u) {
       bytes_size = 2;
       op = use_mubuf ? aco_opcode::buffer_load_ushort
-           : global  ? aco_opcode::global_load_ushort
+           : global  ? aco_opcode::global_load_short_d16
                      : aco_opcode::flat_load_ushort;
    } else if (bytes_needed <= 4) {
       bytes_size = 4;
@@ -5910,7 +5945,7 @@ visit_bvh64_intersect_ray_amd(isel_context* ctx, nir_intrinsic_instr* instr)
       node, tmax, origin, dir, inv_dir,
    };
 
-   if (bld.program->gfx_level == GFX10_3) {
+   if (bld.program->gfx_level == GFX10_3 || bld.program->family == CHIP_GFX1013) {
       std::vector<Temp> scalar_args;
       for (Temp tmp : args) {
          for (unsigned i = 0; i < tmp.size(); i++)
@@ -7381,7 +7416,9 @@ Temp
 get_scratch_resource(isel_context* ctx)
 {
    Builder bld(ctx->program, ctx->block);
-   Temp scratch_addr = ctx->program->private_segment_buffer;
+   Temp scratch_addr;
+   if (!ctx->program->private_segment_buffers.empty())
+      scratch_addr = ctx->program->private_segment_buffers.back();
    if (!scratch_addr.bytes()) {
       Temp addr_lo =
          bld.sop1(aco_opcode::p_load_symbol, bld.def(s1), Operand::c32(aco_symbol_scratch_addr_lo));
@@ -7439,7 +7476,7 @@ visit_load_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
    } else {
       info.resource = get_scratch_resource(ctx);
       info.offset = Operand(as_vgpr(ctx, get_ssa_temp(ctx, instr->src[0].ssa)));
-      info.soffset = ctx->program->scratch_offset;
+      info.soffset = ctx->program->scratch_offsets.back();
       emit_load(ctx, bld, info, scratch_mubuf_load_params);
    }
 }
@@ -7495,7 +7532,7 @@ visit_store_scratch(isel_context* ctx, nir_intrinsic_instr* instr)
       offset = as_vgpr(ctx, offset);
       for (unsigned i = 0; i < write_count; i++) {
          aco_opcode op = get_buffer_store_op(write_datas[i].bytes());
-         Instruction* mubuf = bld.mubuf(op, rsrc, offset, ctx->program->scratch_offset,
+         Instruction* mubuf = bld.mubuf(op, rsrc, offset, ctx->program->scratch_offsets.back(),
                                         write_datas[i], offsets[i], true);
          mubuf->mubuf().sync = memory_sync_info(storage_scratch, semantic_private);
          unsigned access = ACCESS_TYPE_STORE | ACCESS_IS_SWIZZLED_AMD |
@@ -7922,7 +7959,7 @@ visit_cmat_muladd(isel_context* ctx, nir_intrinsic_instr* instr)
    Operand B(as_vgpr(ctx, get_ssa_temp(ctx, instr->src[1].ssa)));
    Operand C(as_vgpr(ctx, get_ssa_temp(ctx, instr->src[2].ssa)));
 
-   VALU_instruction& vop3p = bld.vop3p(opcode, Definition(dst), A, B, C, 0, 0)->valu();
+   VALU_instruction& vop3p = bld.vop3p(opcode, Definition(dst), A, B, C, 0, 0x7)->valu();
    vop3p.neg_lo[0] = (signed_mask & 0x1) != 0;
    vop3p.neg_lo[1] = (signed_mask & 0x2) != 0;
    vop3p.clamp = clamp;
@@ -8072,24 +8109,8 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
          aco_opcode subrev =
             instr->def.bit_size == 16 ? aco_opcode::v_subrev_f16 : aco_opcode::v_subrev_f32;
 
-         /* v_interp with constant sources only works on GFX11/11.5,
-          * and it's only faster on GFX11.5.
-          */
-         bool use_interp = dpp_ctrl1 == dpp_quad_perm(0, 0, 0, 0) && instr->def.bit_size == 32 &&
-                           ctx->program->gfx_level == GFX11_5;
          if (!nir_src_is_divergent(&instr->src[0])) {
             bld.vop2(subrev, Definition(dst), src, src);
-         } else if (use_interp && dpp_ctrl2 == dpp_quad_perm(1, 1, 1, 1)) {
-            bld.vinterp_inreg(aco_opcode::v_interp_p10_f32_inreg, Definition(dst), src,
-                              Operand::c32(0x3f800000), src)
-               ->valu()
-               .neg[2] = true;
-         } else if (use_interp && dpp_ctrl2 == dpp_quad_perm(2, 2, 2, 2)) {
-            Builder::Result tmp = bld.vinterp_inreg(aco_opcode::v_interp_p10_f32_inreg, bld.def(v1),
-                                                    Operand::c32(0), Operand::c32(0), src);
-            tmp->valu().neg = 0x6;
-            bld.vinterp_inreg(aco_opcode::v_interp_p2_f32_inreg, Definition(dst), src,
-                              Operand::c32(0x3f800000), tmp);
          } else if (ctx->program->gfx_level >= GFX8 && dpp_ctrl2 == dpp_quad_perm(0, 1, 2, 3)) {
             bld.vop2_dpp(subrev, Definition(dst), src, src, dpp_ctrl1);
          } else if (ctx->program->gfx_level >= GFX8) {
@@ -8639,11 +8660,11 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
 
       bld.pseudo(aco_opcode::p_demote_to_helper, cond);
 
-      /* Perform the demote in WQM so that it doesn't make exec empty. WQM should last until at
-       * least the next top-level block.
+      /* Perform the demote in WQM so that it doesn't make exec empty.
+       * WQM should last until at least the next top-level block.
        */
       if (ctx->cf_info.in_divergent_cf)
-         set_wqm(ctx);
+         set_wqm(ctx, true);
 
       ctx->block->kind |= block_kind_uses_discard;
       ctx->program->needs_exact = true;
@@ -10891,9 +10912,9 @@ add_startpgm(struct isel_context* ctx)
           * handling spilling.
           */
          if (ctx->args->ring_offsets.used)
-            ctx->program->private_segment_buffer = get_arg(ctx, ctx->args->ring_offsets);
+            ctx->program->private_segment_buffers.push_back(get_arg(ctx, ctx->args->ring_offsets));
 
-         ctx->program->scratch_offset = get_arg(ctx, ctx->args->scratch_offset);
+         ctx->program->scratch_offsets.push_back(get_arg(ctx, ctx->args->scratch_offset));
       } else if (ctx->program->gfx_level <= GFX10_3 && ctx->program->stage != raytracing_cs) {
          /* Manually initialize scratch. For RT stages scratch initialization is done in the prolog.
           */
@@ -12269,7 +12290,7 @@ get_arg_fixed(const struct ac_shader_args* args, struct ac_arg arg)
 unsigned
 load_vb_descs(Builder& bld, PhysReg dest, Operand base, unsigned start, unsigned max)
 {
-   unsigned sgpr_limit = get_addr_sgpr_from_waves(bld.program, bld.program->min_waves);
+   unsigned sgpr_limit = get_addr_regs_from_waves(bld.program, bld.program->min_waves).sgpr;
    unsigned count = MIN2((sgpr_limit - dest.reg()) / 4u, max);
    for (unsigned i = 0; i < count;) {
       unsigned size = 1u << util_logbase2(MIN2(count - i, 4));

@@ -448,16 +448,16 @@ destroy_window_callback(void *data)
 }
 
 static struct wl_surface *
-get_wl_surface_proxy(struct wl_egl_window *window)
+get_wl_surface(struct wl_egl_window *window)
 {
    /* Version 3 of wl_egl_window introduced a version field at the same
     * location where a pointer to wl_surface was stored. Thus, if
     * window->version is dereferenceable, we've been given an older version of
     * wl_egl_window, and window->version points to wl_surface */
    if (_eglPointerIsDereferenceable((void *)(window->version))) {
-      return wl_proxy_create_wrapper((void *)(window->version));
+      return (void *)(window->version);
    }
-   return wl_proxy_create_wrapper(window->surface);
+   return window->surface;
 }
 
 static void
@@ -750,7 +750,8 @@ dri2_wl_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    wl_proxy_set_queue((struct wl_proxy *)dri2_surf->wl_dpy_wrapper,
                       dri2_surf->wl_queue);
 
-   dri2_surf->wl_surface_wrapper = get_wl_surface_proxy(window);
+   dri2_surf->wl_surface_wrapper =
+      wl_proxy_create_wrapper(get_wl_surface(window));
    if (!dri2_surf->wl_surface_wrapper) {
       _eglError(EGL_BAD_ALLOC, "dri2_create_surface");
       goto cleanup_dpy_wrapper;
@@ -1637,13 +1638,19 @@ try_damage_buffer(struct dri2_egl_surface *dri2_surf, const EGLint *rects,
        WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION)
       return EGL_FALSE;
 
-   for (int i = 0; i < n_rects; i++) {
-      const int *rect = &rects[i * 4];
+   if (n_rects == 0) {
+      wl_surface_damage_buffer(dri2_surf->wl_surface_wrapper, 0, 0,
+                               INT32_MAX, INT32_MAX);
+   } else {
+      for (int i = 0; i < n_rects; i++) {
+         const int *rect = &rects[i * 4];
 
-      wl_surface_damage_buffer(dri2_surf->wl_surface_wrapper, rect[0],
-                               dri2_surf->base.Height - rect[1] - rect[3],
-                               rect[2], rect[3]);
+         wl_surface_damage_buffer(dri2_surf->wl_surface_wrapper, rect[0],
+                                  dri2_surf->base.Height - rect[1] - rect[3],
+                                  rect[2], rect[3]);
+      }
    }
+
    return EGL_TRUE;
 }
 
@@ -1731,7 +1738,7 @@ dri2_wl_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
    /* If the compositor doesn't support damage_buffer, we deliberately
     * ignore the damage region and post maximum damage, due to
     * https://bugs.freedesktop.org/78190 */
-   if (!n_rects || !try_damage_buffer(dri2_surf, rects, n_rects))
+   if (!try_damage_buffer(dri2_surf, rects, n_rects))
       wl_surface_damage(dri2_surf->wl_surface_wrapper, 0, 0, INT32_MAX,
                         INT32_MAX);
 
@@ -2138,7 +2145,6 @@ static const struct dri2_egl_display_vtbl dri2_wl_display_vtbl = {
 static const __DRIextension *dri2_loader_extensions[] = {
    &image_loader_extension.base,
    &image_lookup_extension.base,
-   &use_invalidate.base,
    NULL,
 };
 
@@ -2242,11 +2248,7 @@ dri2_initialize_wayland_drm_extensions(struct dri2_egl_display *dri2_dpy)
 static EGLBoolean
 dri2_initialize_wayland_drm(_EGLDisplay *disp)
 {
-   struct dri2_egl_display *dri2_dpy = dri2_display_create();
-   if (!dri2_dpy)
-      return EGL_FALSE;
-
-   disp->DriverData = (void *)dri2_dpy;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
    if (dri2_wl_formats_init(&dri2_dpy->formats) < 0)
       goto cleanup;
@@ -2364,7 +2366,6 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
    return EGL_TRUE;
 
 cleanup:
-   dri2_display_destroy(disp);
    return EGL_FALSE;
 }
 
@@ -2752,7 +2753,7 @@ dri2_wl_swrast_swap_buffers_with_damage(_EGLDisplay *disp, _EGLSurface *draw,
    /* If the compositor doesn't support damage_buffer, we deliberately
     * ignore the damage region and post maximum damage, due to
     * https://bugs.freedesktop.org/78190 */
-   if (!n_rects || !try_damage_buffer(dri2_surf, rects, n_rects))
+   if (!try_damage_buffer(dri2_surf, rects, n_rects))
       wl_surface_damage(dri2_surf->wl_surface_wrapper, 0, 0, INT32_MAX,
                         INT32_MAX);
 
@@ -2935,7 +2936,13 @@ kopperSetSurfaceCreateInfo(void *_draw, struct kopper_loader_info *out)
    wlsci->pNext = NULL;
    wlsci->flags = 0;
    wlsci->display = dri2_dpy->wl_dpy;
-   wlsci->surface = dri2_surf->wl_surface_wrapper;
+   /* Pass the original wl_surface through to Vulkan WSI.  If we pass the
+    * proxy wrapper, kopper won't be able to properly de-duplicate surfaces
+    * and we may end up creating two VkSurfaceKHRs for the same underlying
+    * wl_surface.  Vulkan WSI (which kopper calls into) will make its own
+    * queues and proxy wrappers.
+    */
+   wlsci->surface = get_wl_surface(dri2_surf->base.NativeSurface);
    out->present_opaque = dri2_surf->base.PresentOpaque;
    /* convert to vulkan constants */
    switch (dri2_surf->base.CompressionRate) {
@@ -2981,18 +2988,13 @@ static const __DRIextension *kopper_swrast_loader_extensions[] = {
    &kopper_swrast_loader_extension.base,
    &image_lookup_extension.base,
    &kopper_loader_extension.base,
-   &use_invalidate.base,
    NULL,
 };
 
 static EGLBoolean
 dri2_initialize_wayland_swrast(_EGLDisplay *disp)
 {
-   struct dri2_egl_display *dri2_dpy = dri2_display_create();
-   if (!dri2_dpy)
-      return EGL_FALSE;
-
-   disp->DriverData = (void *)dri2_dpy;
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
    if (dri2_wl_formats_init(&dri2_dpy->formats) < 0)
       goto cleanup;
@@ -3098,7 +3100,6 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
    return EGL_TRUE;
 
 cleanup:
-   dri2_display_destroy(disp);
    return EGL_FALSE;
 }
 

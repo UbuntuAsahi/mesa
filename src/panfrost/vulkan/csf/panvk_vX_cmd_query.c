@@ -118,8 +118,8 @@ panvk_cmd_reset_occlusion_queries(struct panvk_cmd_buffer *cmd,
    /* We flush the caches to make the new value visible to the CPU. */
    struct cs_index flush_id = cs_scratch_reg32(b, 0);
 
-   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN, false,
-                   flush_id,
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN,
+                   MALI_CS_OTHER_FLUSH_MODE_NONE, flush_id,
                    cs_defer(SB_IMM_MASK, SB_ID(IMM_FLUSH)));
    cs_wait_slot(b, SB_ID(IMM_FLUSH), false);
 }
@@ -179,8 +179,9 @@ panvk_cmd_end_occlusion_query(struct panvk_cmd_buffer *cmd,
     * Wait for the accumulation and flush the caches.
     */
    cs_move32_to(b, val, 0);
-   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN, false,
-                   val, cs_defer(SB_ALL_ITERS_MASK, SB_ID(DEFERRED_FLUSH)));
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_CLEAN,
+                   MALI_CS_OTHER_FLUSH_MODE_NONE, val,
+                   cs_defer(SB_ALL_ITERS_MASK, SB_ID(DEFERRED_FLUSH)));
 
    /* Signal the query syncobj after the flush is effective. */
    cs_move32_to(b, val, 1);
@@ -257,9 +258,11 @@ panvk_copy_occlusion_query_results(struct panvk_cmd_buffer *cmd,
    struct cs_index scratch_regs = cs_scratch_reg_tuple(b, 0, 11);
    uint32_t queries_per_batch = scratch_regs.size / regs_per_copy;
 
-   /* Store offset is a 16-bit signed integer, so we might be limited by the
-    * stride here. */
-   queries_per_batch = MIN2(((1u << 15) / stride) + 1, queries_per_batch);
+   if (stride > 0) {
+      /* Store offset is a 16-bit signed integer, so we might be limited by the
+       * stride here. */
+      queries_per_batch = MIN2(((1u << 15) / stride) + 1, queries_per_batch);
+   }
 
    /* Stop unrolling the loop when it takes more than 2 steps to copy the
     * queries. */

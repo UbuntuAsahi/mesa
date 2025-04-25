@@ -213,7 +213,7 @@ emit_ves_vf_instancing(struct anv_batch *batch,
    }
 
    u_foreach_bit(a, vi->attributes_valid) {
-      enum isl_format format = anv_get_isl_format(device->physical,
+      enum isl_format format = anv_get_vbo_format(device->physical,
                                                   vi->attributes[a].format,
                                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                                   VK_IMAGE_TILING_LINEAR);
@@ -463,30 +463,29 @@ genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
                         &constrained);
 
 #if INTEL_NEEDS_WA_16014912113
-      if (intel_urb_setup_changed(urb_cfg_in, urb_cfg_out,
-          MESA_SHADER_TESS_EVAL) && urb_cfg_in->size[0] != 0) {
-         for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
+   if (genX(need_wa_16014912113)(urb_cfg_in, urb_cfg_out)) {
+      for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
 #if GFX_VER >= 12
-            anv_batch_emit(batch, GENX(3DSTATE_URB_ALLOC_VS), urb) {
-               urb._3DCommandSubOpcode             += i;
-               urb.VSURBEntryAllocationSize        = urb_cfg_in->size[i] - 1;
-               urb.VSURBStartingAddressSlice0      = urb_cfg_in->start[i];
-               urb.VSURBStartingAddressSliceN      = urb_cfg_in->start[i];
-               urb.VSNumberofURBEntriesSlice0      = i == 0 ? 256 : 0;
-               urb.VSNumberofURBEntriesSliceN      = i == 0 ? 256 : 0;
-            }
-#else
-            anv_batch_emit(batch, GENX(3DSTATE_URB_VS), urb) {
-               urb._3DCommandSubOpcode      += i;
-               urb.VSURBStartingAddress      = urb_cfg_in->start[i];
-               urb.VSURBEntryAllocationSize  = urb_cfg_in->size[i] - 1;
-               urb.VSNumberofURBEntries      = i == 0 ? 256 : 0;
-            }
-#endif
+         anv_batch_emit(batch, GENX(3DSTATE_URB_ALLOC_VS), urb) {
+            urb._3DCommandSubOpcode             += i;
+            urb.VSURBEntryAllocationSize        = urb_cfg_in->size[i] - 1;
+            urb.VSURBStartingAddressSlice0      = urb_cfg_in->start[i];
+            urb.VSURBStartingAddressSliceN      = urb_cfg_in->start[i];
+            urb.VSNumberofURBEntriesSlice0      = i == 0 ? 256 : 0;
+            urb.VSNumberofURBEntriesSliceN      = i == 0 ? 256 : 0;
          }
-         genx_batch_emit_pipe_control(batch, device->info, _3D,
-                                      ANV_PIPE_HDC_PIPELINE_FLUSH_BIT);
+#else
+         anv_batch_emit(batch, GENX(3DSTATE_URB_VS), urb) {
+            urb._3DCommandSubOpcode      += i;
+            urb.VSURBStartingAddress      = urb_cfg_in->start[i];
+            urb.VSURBEntryAllocationSize  = urb_cfg_in->size[i] - 1;
+            urb.VSNumberofURBEntries      = i == 0 ? 256 : 0;
+         }
+#endif
       }
+      genx_batch_emit_pipe_control(batch, device->info, _3D,
+                                   ANV_PIPE_HDC_PIPELINE_FLUSH_BIT);
+   }
 #endif
 
    for (int i = 0; i <= MESA_SHADER_GEOMETRY; i++) {
@@ -1423,8 +1422,14 @@ emit_3dstate_te(struct anv_graphics_pipeline *pipeline)
                te.TessellationDistributionMode = TEDMODE_OFF;
          }
 
+         if (!device->physical->instance->enable_te_distribution)
+            te.TessellationDistributionMode = TEDMODE_OFF;
+
 #if GFX_VER >= 20
-         te.TessellationDistributionLevel = TEDLEVEL_REGION;
+         if (intel_needs_workaround(device->info, 16025857284))
+            te.TessellationDistributionLevel = TEDLEVEL_PATCH;
+         else
+            te.TessellationDistributionLevel = TEDLEVEL_REGION;
 #else
          te.TessellationDistributionLevel = TEDLEVEL_PATCH;
 #endif
@@ -1706,11 +1711,7 @@ compute_kill_pixel(struct anv_graphics_pipeline *pipeline,
     * 3DSTATE_PS_BLEND::AlphaTestEnable since Vulkan doesn't have a concept
     * of an alpha test.
     */
-   pipeline->rp_has_ds_self_dep =
-      (state->pipeline_flags &
-       VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) != 0;
    pipeline->kill_pixel =
-      pipeline->rp_has_ds_self_dep ||
       wm_prog_data->uses_kill ||
       wm_prog_data->uses_omask ||
       (ms && ms->alpha_to_coverage_enable);

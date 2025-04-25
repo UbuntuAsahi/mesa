@@ -66,7 +66,7 @@ public:
 
    bool is_send_from_grf() const;
    bool is_payload(unsigned arg) const;
-   bool is_partial_write() const;
+   bool is_partial_write(unsigned grf_size = REG_SIZE) const;
    unsigned components_read(unsigned i) const;
    unsigned size_read(const struct intel_device_info *devinfo, int arg) const;
    bool can_do_source_mods(const struct intel_device_info *devinfo) const;
@@ -91,8 +91,7 @@ public:
     */
    bool uses_indirect_addressing() const;
 
-   void remove(bblock_t *block, bool defer_later_block_ip_updates = false);
-   void insert_after(bblock_t *block, brw_inst *inst);
+   void remove();
    void insert_before(bblock_t *block, brw_inst *inst);
 
    /**
@@ -235,6 +234,8 @@ public:
    const char *annotation;
    /** @} */
 #endif
+
+   bblock_t *block;
 };
 
 /**

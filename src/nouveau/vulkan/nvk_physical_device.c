@@ -85,6 +85,10 @@ nvk_get_vk_version(const struct nv_device_info *info)
    return VK_MAKE_VERSION(1, 1, VK_HEADER_VERSION);
 #endif
 
+   /* Vulkan 1.3 requires vulkanMemoryModel which isn't supported by Kepler */
+   if (info->cls_eng3d < MAXWELL_A)
+      return VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION);
+
    /* Vulkan 1.4 requires hostImageCopy which is currently only supported on
     * Turing+.
     */
@@ -106,7 +110,8 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
-      .KHR_compute_shader_derivatives = nvk_use_nak(info),
+      .KHR_compute_shader_derivatives = nvk_use_nak(info) &&
+                                        info->cls_eng3d >= TURING_A,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
@@ -195,7 +200,8 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_variable_pointers = true,
       .KHR_vertex_attribute_divisor = true,
-      .KHR_vulkan_memory_model = nvk_use_nak(info),
+      .KHR_vulkan_memory_model =
+         nvk_use_nak(info) && info->cls_eng3d >= MAXWELL_A,
       .KHR_workgroup_memory_explicit_layout = true,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
@@ -213,9 +219,9 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = info->cls_eng3d >= VOLTA_A,
-      .EXT_descriptor_buffer = true,
+      .EXT_descriptor_buffer = info->cls_eng3d >= MAXWELL_A,
       .EXT_descriptor_indexing = true,
-      .EXT_device_generated_commands = true,
+      .EXT_device_generated_commands = info->cls_eng3d >= MAXWELL_B,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control = true,
 #endif
@@ -228,6 +234,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_hdr_metadata = true,
       .EXT_host_query_reset = true,
       .EXT_host_image_copy = info->cls_eng3d >= TURING_A,
       .EXT_image_2d_view_of_3d = true,
@@ -250,7 +257,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .EXT_pipeline_creation_feedback = true,
       .EXT_pipeline_robustness = true,
       .EXT_physical_device_drm = true,
-      .EXT_post_depth_coverage = true,
+      .EXT_post_depth_coverage = info->cls_eng3d >= MAXWELL_B,
       .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_primitives_generated_query = true,
@@ -288,7 +295,8 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
       .GOOGLE_hlsl_functionality1 = true,
       .GOOGLE_user_type = true,
       .MESA_image_alignment_control = true,
-      .NV_compute_shader_derivatives = nvk_use_nak(info),
+      .NV_compute_shader_derivatives = nvk_use_nak(info) &&
+                                       info->cls_eng3d >= TURING_A,
       .NV_shader_sm_builtins = true,
       .VALVE_mutable_descriptor_type = true,
    };
@@ -345,7 +353,7 @@ nvk_get_device_features(const struct nv_device_info *info,
       .shaderInt16 = true,
       .shaderResourceResidency = info->cls_eng3d >= VOLTA_A,
       .shaderResourceMinLod = info->cls_eng3d >= VOLTA_A,
-      .sparseBinding = true,
+      .sparseBinding = info->cls_eng3d >= MAXWELL_B,
       .sparseResidency2Samples = info->cls_eng3d >= MAXWELL_B,
       .sparseResidency4Samples = info->cls_eng3d >= MAXWELL_B,
       .sparseResidency8Samples = info->cls_eng3d >= MAXWELL_B,
@@ -376,11 +384,9 @@ nvk_get_device_features(const struct nv_device_info *info,
       .storagePushConstant8 = true,
       .shaderBufferInt64Atomics = info->cls_eng3d >= MAXWELL_A &&
                                   nvk_use_nak(info),
-      .shaderSharedInt64Atomics = false, /* TODO */
-      /* TODO: Fp16 is currently busted on Turing and Volta due to instruction
-       * scheduling issues.  Re-enable it once those are sorted.
-       */
-      .shaderFloat16 = info->sm >= 80 && nvk_use_nak(info),
+      .shaderSharedInt64Atomics = info->cls_eng3d >= MAXWELL_A &&
+                                  nvk_use_nak(info),
+      .shaderFloat16 = info->sm >= 70 && nvk_use_nak(info),
       .shaderInt8 = true,
       .descriptorIndexing = true,
       .shaderInputAttachmentArrayDynamicIndexing = true,
@@ -414,9 +420,11 @@ nvk_get_device_features(const struct nv_device_info *info,
       .bufferDeviceAddress = true,
       .bufferDeviceAddressCaptureReplay = true,
       .bufferDeviceAddressMultiDevice = false,
-      .vulkanMemoryModel = nvk_use_nak(info),
-      .vulkanMemoryModelDeviceScope = nvk_use_nak(info),
-      .vulkanMemoryModelAvailabilityVisibilityChains = nvk_use_nak(info),
+      .vulkanMemoryModel = nvk_use_nak(info) && info->cls_eng3d >= MAXWELL_A,
+      .vulkanMemoryModelDeviceScope =
+         nvk_use_nak(info) && info->cls_eng3d >= MAXWELL_A,
+      .vulkanMemoryModelAvailabilityVisibilityChains =
+         nvk_use_nak(info) && info->cls_eng3d >= MAXWELL_A,
       .shaderOutputViewportIndex = info->cls_eng3d >= MAXWELL_B,
       .shaderOutputLayer = info->cls_eng3d >= MAXWELL_B,
       .subgroupBroadcastDynamicId = nvk_use_nak(info),
@@ -460,8 +468,8 @@ nvk_get_device_features(const struct nv_device_info *info,
       .pushDescriptor = true,
 
       /* VK_KHR_compute_shader_derivatives */
-      .computeDerivativeGroupQuads = true,
-      .computeDerivativeGroupLinear = true,
+      .computeDerivativeGroupQuads = info->cls_eng3d >= TURING_A,
+      .computeDerivativeGroupLinear = info->cls_eng3d >= TURING_A,
 
       /* VK_KHR_fragment_shader_barycentric */
       .fragmentShaderBarycentric = info->cls_eng3d >= TURING_A &&
@@ -550,14 +558,21 @@ nvk_get_device_features(const struct nv_device_info *info,
       .depthClipEnable = true,
 
       /* VK_EXT_descriptor_buffer */
-      .descriptorBuffer = true,
-      .descriptorBufferCaptureReplay = true,
-      .descriptorBufferImageLayoutIgnored = true,
-      .descriptorBufferPushDescriptors = true,
+      .descriptorBuffer = info->cls_eng3d >= MAXWELL_A,
+      .descriptorBufferCaptureReplay = info->cls_eng3d >= MAXWELL_A,
+      .descriptorBufferImageLayoutIgnored = info->cls_eng3d >= MAXWELL_A,
+      .descriptorBufferPushDescriptors = info->cls_eng3d >= MAXWELL_A,
 
-      /* VK_EXT_device_generated_commands */
-      .deviceGeneratedCommands = true,
-      .dynamicGeneratedPipelineLayout = true,
+      /* VK_EXT_device_generated_commands
+       *
+       * We don't enable VK_EXT_device_generated_commands or the corresponding
+       * features on Maxwell A and newer because we need to allocate QMDs from
+       * the QMD heap and not from arbitrary client memory.
+       *
+       * See also nvk_cmd_buffer_alloc_qmd().
+       */
+      .deviceGeneratedCommands = info->cls_eng3d >= MAXWELL_B,
+      .dynamicGeneratedPipelineLayout = info->cls_eng3d >= MAXWELL_B,
 
       /* VK_EXT_dynamic_rendering_unused_attachments */
       .dynamicRenderingUnusedAttachments = true,
@@ -804,8 +819,8 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       .minInterpolationOffset = -0.5,
       .maxInterpolationOffset = 0.4375,
       .subPixelInterpolationOffsetBits = 4,
-      .maxFramebufferHeight = info->cls_eng3d >= PASCAL_A ? 0x8000 : 0x4000,
-      .maxFramebufferWidth = info->cls_eng3d >= PASCAL_A ? 0x8000 : 0x4000,
+      .maxFramebufferHeight = nvk_image_max_dimension(info, VK_IMAGE_TYPE_2D),
+      .maxFramebufferWidth = nvk_image_max_dimension(info, VK_IMAGE_TYPE_2D),
       .maxFramebufferLayers = 2048,
       .framebufferColorSampleCounts = sample_counts,
       .framebufferDepthSampleCounts = sample_counts,
@@ -874,7 +889,7 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_NVK,
       .conformanceVersion =
-         conformant ? (VkConformanceVersion) { 1, 4, 0, 0 }
+         conformant ? (VkConformanceVersion) { 1, 4, 1, 3 }
                     : (VkConformanceVersion) { 0, 0, 0, 0 },
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
@@ -916,8 +931,8 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       .maxDescriptorSetUpdateAfterBindSampledImages = NVK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindStorageImages = NVK_MAX_DESCRIPTORS,
       .maxDescriptorSetUpdateAfterBindInputAttachments = NVK_MAX_DESCRIPTORS,
-      .filterMinmaxSingleComponentFormats = true,
-      .filterMinmaxImageComponentMapping = true,
+      .filterMinmaxSingleComponentFormats = info->cls_eng3d >= MAXWELL_B,
+      .filterMinmaxImageComponentMapping = info->cls_eng3d >= MAXWELL_B,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
 
@@ -981,7 +996,7 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       .degenerateLinesRasterized = info->cls_eng3d >= VOLTA_A,
       .degenerateTrianglesRasterized = info->cls_eng3d >= PASCAL_A,
       .fullyCoveredFragmentShaderInputVariable = false,
-      .conservativeRasterizationPostDepthCoverage = true,
+      .conservativeRasterizationPostDepthCoverage = info->cls_eng3d >= MAXWELL_B,
 
       /* VK_EXT_custom_border_color */
       .maxCustomBorderColorSamplers = 4000,
@@ -1040,7 +1055,7 @@ nvk_get_device_properties(const struct nvk_instance *instance,
       .supportedIndirectCommandsShaderStagesShaderBinding =
          NVK_SHADER_STAGE_GRAPHICS_BITS | VK_SHADER_STAGE_COMPUTE_BIT,
       .deviceGeneratedCommandsTransformFeedback = true,
-      .deviceGeneratedCommandsMultiDrawIndirectCount = true,
+      .deviceGeneratedCommandsMultiDrawIndirectCount = info->cls_eng3d >= TURING_A,
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = true,
@@ -1306,7 +1321,7 @@ nvk_create_drm_physical_device(struct vk_instance *_instance,
 
    bool conformant =
       nvkmd->dev_info.type == NV_DEVICE_TYPE_DIS &&
-      nvkmd->dev_info.cls_eng3d >= TURING_A &&
+      nvkmd->dev_info.cls_eng3d >= MAXWELL_A &&
       nvkmd->dev_info.cls_eng3d <= ADA_A;
 
    if (!conformant &&

@@ -916,9 +916,9 @@ print_var_decl(nir_variable *var, print_state *state)
          fprintf(fp, " (%s%s)", loc, components);
       } else {
          fprintf(fp, " (%s%s, %u, %u)%s", loc,
-               components,
-               var->data.driver_location, var->data.binding,
-               var->data.compact ? " compact" : "");
+                 components,
+                 var->data.driver_location, var->data.binding,
+                 var->data.compact ? " compact" : "");
       }
    }
 
@@ -1383,6 +1383,8 @@ print_intrinsic_instr(nir_intrinsic_instr *instr, print_state *state)
             break;
 
          case nir_intrinsic_load_output:
+         case nir_intrinsic_load_per_vertex_output:
+         case nir_intrinsic_load_per_primitive_output:
          case nir_intrinsic_store_output:
          case nir_intrinsic_store_per_primitive_output:
          case nir_intrinsic_store_per_vertex_output:
@@ -1757,6 +1759,9 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
    case nir_texop_tex_prefetch:
       fprintf(fp, "tex (pre-dispatchable) ");
       break;
+   case nir_texop_lod_bias:
+      fprintf(fp, "lod_bias ");
+      break;
    case nir_texop_fragment_fetch_amd:
       fprintf(fp, "fragment_fetch_amd ");
       break;
@@ -1768,9 +1773,6 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       break;
    case nir_texop_sampler_descriptor_amd:
       fprintf(fp, "sampler_descriptor_amd ");
-      break;
-   case nir_texop_lod_bias_agx:
-      fprintf(fp, "lod_bias_agx ");
       break;
    case nir_texop_image_min_lod_agx:
       fprintf(fp, "image_min_lod_agx ");
@@ -2046,7 +2048,7 @@ print_instr(const nir_instr *instr, print_state *state, unsigned tabs)
       debug_info->nir_line = (uint32_t)ftell(fp);
    }
 
-   if (state->shader->has_debug_info) {
+   if (state->shader->has_debug_info && !state->gather_debug_info) {
       nir_instr_debug_info *debug_info = nir_instr_get_debug_info((nir_instr *)instr);
 
       bool changed = state->last_debug_info.spirv_offset != debug_info->spirv_offset;
@@ -2552,7 +2554,7 @@ print_shader_info(const struct shader_info *info, FILE *fp)
 {
    fprintf(fp, "shader: %s\n", gl_shader_stage_name(info->stage));
 
-   if (memcmp(info->source_blake3, &(blake3_hash){0}, sizeof(info->source_blake3))) {
+   if (memcmp(info->source_blake3, &(blake3_hash){ 0 }, sizeof(info->source_blake3))) {
       fprintf(fp, "source_blake3: {");
       _mesa_blake3_print(fp, info->source_blake3);
       fprintf(fp, "}\n");
@@ -2702,7 +2704,8 @@ print_shader_info(const struct shader_info *info, FILE *fp)
       print_nz_bool(fp, "color_is_dual_source", info->fs.color_is_dual_source);
 
       print_nz_bool(fp, "require_full_quads", info->fs.require_full_quads);
-      print_nz_bool(fp, "needs_quad_helper_invocations", info->fs.needs_quad_helper_invocations);
+      print_nz_bool(fp, "needs_coarse_quad_helper_invocations", info->fs.needs_coarse_quad_helper_invocations);
+      print_nz_bool(fp, "needs_full_quad_helper_invocations", info->fs.needs_full_quad_helper_invocations);
       print_nz_bool(fp, "uses_sample_qualifier", info->fs.uses_sample_qualifier);
       print_nz_bool(fp, "uses_sample_shading", info->fs.uses_sample_shading);
       print_nz_bool(fp, "early_fragment_tests", info->fs.early_fragment_tests);
@@ -2797,7 +2800,7 @@ _nir_print_shader_annotated(nir_shader *shader, FILE *fp,
 
       if (mode == nir_var_shader_in || mode == nir_var_shader_out) {
          for (unsigned j = 0; j < 128; j++) {
-            nir_variable *vars[NIR_MAX_VEC_COMPONENTS] = {0};
+            nir_variable *vars[NIR_MAX_VEC_COMPONENTS] = { 0 };
             nir_foreach_variable_with_modes(var, shader, mode) {
                if (var->data.location == j)
                   vars[var->data.location_frac] = var;

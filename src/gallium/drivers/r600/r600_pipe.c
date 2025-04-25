@@ -218,6 +218,9 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen,
 						     TGSI_INTERPOLATE_CONSTANT);
 	rctx->b.b.bind_fs_state(&rctx->b.b, rctx->dummy_pixel_shader);
 
+	rctx->lds_constbuf_pipe.user_buffer = &rctx->lds_constant_buffer;
+	rctx->lds_constbuf_pipe.buffer_size = sizeof(struct r600_lds_constant_buffer);
+
 	return &rctx->b.b;
 
 fail:
@@ -333,6 +336,8 @@ static void r600_init_compute_caps(struct r600_screen *screen)
 	caps->max_clock_frequency = rscreen->info.max_gpu_freq_mhz;
 	caps->max_compute_units = rscreen->info.num_cu;
 	caps->subgroup_sizes = r600_wavefront_size(rscreen->family);
+
+	caps->max_variable_threads_per_block = R600_MAX_VARIABLE_THREADS_PER_BLOCK;
 }
 
 static void r600_init_screen_caps(struct r600_screen *rscreen)
@@ -472,6 +477,7 @@ static void r600_init_screen_caps(struct r600_screen *rscreen)
 	caps->two_sided_color = false;
 	caps->cull_distance = true;
 
+	caps->max_window_rectangles = R600_MAX_WINDOW_RECTANGLES;
 	caps->shader_buffer_offset_alignment = family >= CHIP_CEDAR ?  256 : 0;
 
 	caps->max_shader_patch_varyings = family >= CHIP_CEDAR ? 30 : 0;

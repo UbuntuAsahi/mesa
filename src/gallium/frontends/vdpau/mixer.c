@@ -356,8 +356,8 @@ VdpStatus vlVdpVideoMixerRender(VdpVideoMixer mixer,
       res_tmpl.usage = PIPE_USAGE_DEFAULT;
 
       if (!vmixer->bicubic.filter) {
-         res_tmpl.width0 = dst->surface->width;
-         res_tmpl.height0 = dst->surface->height;
+         res_tmpl.width0 = pipe_surface_width(dst->surface);
+         res_tmpl.height0 = pipe_surface_height(dst->surface);
       } else {
          res_tmpl.width0 = surf->templat.width;
          res_tmpl.height0 = surf->templat.height;
@@ -416,7 +416,7 @@ VdpStatus vlVdpVideoMixerRender(VdpVideoMixer mixer,
          vl_median_filter_render(vmixer->noise_reduction.filter,
                                  sampler_view, surface_temp);
 
-         pipe_sampler_view_reference(&sampler_view, NULL);
+         pipe->sampler_view_release(pipe, sampler_view);
          pipe_surface_reference(&surface, NULL);
 
          sampler_view = sampler_view_temp;
@@ -437,7 +437,7 @@ VdpStatus vlVdpVideoMixerRender(VdpVideoMixer mixer,
          vl_matrix_filter_render(vmixer->sharpness.filter,
                                  sampler_view, surface_temp);
 
-         pipe_sampler_view_reference(&sampler_view, NULL);
+         pipe->sampler_view_release(pipe, sampler_view);
          pipe_surface_reference(&surface, NULL);
 
          sampler_view = sampler_view_temp;
@@ -452,7 +452,7 @@ VdpStatus vlVdpVideoMixerRender(VdpVideoMixer mixer,
                                RectToPipe(destination_rect, &clip));
 
    if(surface != dst->surface) {
-      pipe_sampler_view_reference(&sampler_view, NULL);
+      pipe->sampler_view_release(pipe, sampler_view);
       pipe_surface_reference(&surface, NULL);
    }
    mtx_unlock(&vmixer->device->mutex);
@@ -475,12 +475,17 @@ vlVdpVideoMixerUpdateDeinterlaceFilter(vlVdpVideoMixer *vmixer)
 
    /* create a new filter if requested */
    if (vmixer->deint.enabled && vmixer->chroma_format == PIPE_VIDEO_CHROMA_FORMAT_420) {
+      bool interlaced = pipe->screen->get_video_param(pipe->screen,
+                                                      PIPE_VIDEO_PROFILE_UNKNOWN,
+                                                      PIPE_VIDEO_ENTRYPOINT_BITSTREAM,
+                                                      PIPE_VIDEO_CAP_PREFERS_INTERLACED);
       vmixer->deint.filter = MALLOC(sizeof(struct vl_deint_filter));
       vmixer->deint.enabled = vl_deint_filter_init(vmixer->deint.filter, pipe,
             vmixer->video_width, vmixer->video_height,
-            vmixer->skip_chroma_deint, vmixer->deint.spatial, false);
+            vmixer->skip_chroma_deint, vmixer->deint.spatial, !interlaced);
       if (!vmixer->deint.enabled) {
          FREE(vmixer->deint.filter);
+         vmixer->deint.filter = NULL;
       }
    }
 }

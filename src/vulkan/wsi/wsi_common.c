@@ -1535,7 +1535,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             has_signal_dma_buf = false;
             mem_signal = (struct wsi_memory_signal_submit_info) {
                .sType = VK_STRUCTURE_TYPE_WSI_MEMORY_SIGNAL_SUBMIT_INFO_MESA,
-               .memory = image->memory,
+               .memory = swapchain->blit.type == WSI_SWAPCHAIN_NO_BLIT ?
+                         image->memory : image->blit.memory,
             };
             __vk_append_struct(&submit_info, &mem_signal);
          }
@@ -1644,14 +1645,15 @@ wsi_GetDeviceGroupSurfacePresentModesKHR(VkDevice device,
 bool
 wsi_common_vk_instance_supports_present_wait(const struct vk_instance *instance)
 {
+#if DETECT_OS_ANDROID
+   /* Android's Vulkan loader does not provide KHR_present_wait or
+    * KHR_present_id for KHR_android_surface. */
+   return false;
+#else
    /* We can only expose KHR_present_wait and KHR_present_id
     * if we are guaranteed support on all potential VkSurfaceKHR objects. */
-   if (instance->enabled_extensions.KHR_win32_surface ||
-       instance->enabled_extensions.KHR_android_surface) {
-      return false;
-   }
-
-   return true;
+   return !instance->enabled_extensions.KHR_win32_surface;
+#endif
 }
 
 VkResult
@@ -2264,4 +2266,16 @@ wsi_device_supports_explicit_sync(struct wsi_device *device)
    return !device->sw && device->has_timeline_semaphore &&
       (device->timeline_semaphore_export_handle_types &
        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+wsi_SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
+                      const VkSwapchainKHR* pSwapchains,
+                      const VkHdrMetadataEXT* pMetadata)
+{
+   for (uint32_t i = 0; i < swapchainCount; i++) {
+      VK_FROM_HANDLE(wsi_swapchain, swapchain, pSwapchains[i]);
+      if (swapchain->set_hdr_metadata)
+         swapchain->set_hdr_metadata(swapchain, pMetadata);
+   }
 }

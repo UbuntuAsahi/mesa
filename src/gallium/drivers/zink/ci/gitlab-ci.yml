@@ -6,6 +6,9 @@ zink-lvp:
     - .test-gl
     - .deqp-test
     - .zink-lvp-test
+  tags:
+    # FIXME: kvm is a hack, should not be needed
+    - $FDO_RUNNER_JOB_PRIORITY_TAG_X86_64_KVM
   variables:
     DEQP_SUITE: zink-lvp
     DEQP_FRACTION: 8
@@ -57,8 +60,9 @@ zink-anv-adl:
     HWCI_START_WESTON: 1
     # We use gbm because its a copy of tgl job
     PIGLIT_PLATFORM: gbm
+    FDO_CI_CONCURRENT: 6 # higher is too much, and leads to OOM
   timeout: 30m
-  parallel: 2
+  parallel: 4
 
 # Manual full run when you want to double-check the full status.
 zink-anv-adl-full:
@@ -67,8 +71,23 @@ zink-anv-adl-full:
     - .zink-anv-manual-rules
   variables:
     DEQP_SUITE: zink-anv-adl-full
-    HWCI_START_WESTON: 1
   timeout: 2h
+  parallel: 5
+
+zink-anv-adl-traces:
+  extends:
+    - .zink-anv-adl-trace-test
+  variables:
+    PIGLIT_TRACES_FILE: traces-zink.yml
+
+zink-anv-adl-traces-restricted:
+  extends:
+    - .zink-anv-adl-trace-test
+    - .zink-anv-rules-restricted
+  variables:
+    PIGLIT_TRACES_FILE: traces-zink-restricted.yml
+    PIGLIT_REPLAY_EXTRA_ARGS: --db-path ${CI_PROJECT_DIR}/replayer-db/ --minio_bucket=${S3_TRACIE_PRIVATE_BUCKET} --jwt-file=${S3_JWT_FILE}
+  allow_failure: true
 
 zink-anv-tgl:
   extends:
@@ -82,6 +101,7 @@ zink-anv-tgl:
     # MESA: error: ZINK: vkQueueSubmit failed (VK_ERROR_DEVICE_LOST)
     # Xorg: ../src/gallium/drivers/zink/zink_batch.c:599: zink_end_batch: Assertion `!ctx->batch_states' failed.
     PIGLIT_PLATFORM: gbm
+    FDO_CI_CONCURRENT: 6 # higher is too much, and leads to OOM
   parallel: 4
 
 # Manual full run when you want to double-check the full status.
@@ -91,7 +111,6 @@ zink-anv-tgl-full:
     - .zink-anv-manual-rules
   variables:
     DEQP_SUITE: zink-anv-tgl-full
-    HWCI_START_WESTON: 1
   timeout: 1h 45m
   parallel: 3
 
@@ -103,7 +122,7 @@ zink-anv-tgl-traces:
 
 zink-anv-tgl-traces-restricted:
   extends:
-    - zink-anv-tgl-traces
+    - .zink-anv-tgl-trace-test
     - .zink-anv-rules-restricted
   variables:
     PIGLIT_TRACES_FILE: traces-zink-restricted.yml
@@ -138,7 +157,6 @@ zink-tu-a618-traces:
     - a618-traces
     - .zink-turnip-collabora-rules
     - .zink-trace-test
-  parallel: null
   variables:
     PIGLIT_REPLAY_DEVICE_NAME: "zink-a618"
 
@@ -219,7 +237,7 @@ zink-radv-vangogh-valve:
     B2C_TIMEOUT_OVERALL_MINUTES: 30
     FDO_CI_CONCURRENT: 6
     ZINK_DEBUG: vvl
-  # Override the list of tags to drop `priority:low`
+  # Override the list of tags to drop `ci-tron:priority:low`
   tags:
     - farm:$RUNNER_FARM_LOCATION
     - amdgpu:codename:VANGOGH

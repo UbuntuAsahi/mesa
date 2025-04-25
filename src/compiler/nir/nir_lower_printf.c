@@ -68,20 +68,19 @@ lower_printf_intrin(nir_builder *b, nir_intrinsic_instr *prntf, void *_options)
       return true;
    }
 
-   nir_def *fmt_str_id = prntf->src[0].ssa;
+   uint32_t fmt_str_id = nir_intrinsic_fmt_idx(prntf);
    if (options->hash_format_strings) {
       /* Rather than store the index of the format string, instead store the
        * hash of the format string itself. This is invariant across shaders
        * which may be more convenient.
        */
-      unsigned idx = nir_src_as_uint(prntf->src[0]) - 1;
-      assert(idx < b->shader->printf_info_count && "must be in-bounds");
+      assert(fmt_str_id - 1 < b->shader->printf_info_count && "must be in-bounds");
 
-      uint32_t hash = u_printf_hash(&b->shader->printf_info[idx]);
-      fmt_str_id = nir_imm_int(b, hash);
+      uint32_t hash = u_printf_hash(&b->shader->printf_info[fmt_str_id - 1]);
+      fmt_str_id = hash;
    }
 
-   nir_deref_instr *args = nir_src_as_deref(prntf->src[1]);
+   nir_deref_instr *args = nir_src_as_deref(prntf->src[0]);
    assert(args->deref_type == nir_deref_type_var);
 
    /* Atomic add a buffer size counter to determine where to write.  If
@@ -94,7 +93,6 @@ lower_printf_intrin(nir_builder *b, nir_intrinsic_instr *prntf, void *_options)
    /* Align the struct size to 4 */
    assert(glsl_type_is_struct_or_ifc(args->type));
    int args_size = align(glsl_get_cl_size(args->type), 4);
-   assert(fmt_str_id->bit_size == 32);
    int fmt_str_id_size = 4;
 
    /* Increment the counter at the beginning of the buffer */
@@ -130,7 +128,7 @@ lower_printf_intrin(nir_builder *b, nir_intrinsic_instr *prntf, void *_options)
                                            nir_var_mem_global,
                                            glsl_uint_type(), 0);
    fmt_str_id_deref->cast.align_mul = 4;
-   nir_store_deref(b, fmt_str_id_deref, fmt_str_id, ~0);
+   nir_store_deref(b, fmt_str_id_deref, nir_imm_int(b, fmt_str_id), ~0);
 
    /* Write the format args */
    for (unsigned i = 0; i < glsl_get_length(args->type); ++i) {
@@ -217,24 +215,53 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
    while ((pos = util_printf_next_spec_pos(fmt, pos)) != -1) {
       unsigned arg_size;
       switch (fmt[pos]) {
-      case 'c': arg_size = 1; break;
-      case 'd': arg_size = 4; break;
-      case 'e': arg_size = 4; break;
-      case 'E': arg_size = 4; break;
-      case 'f': arg_size = 4; break;
-      case 'F': arg_size = 4; break;
-      case 'G': arg_size = 4; break;
-      case 'a': arg_size = 4; break;
-      case 'A': arg_size = 4; break;
-      case 'i': arg_size = 4; break;
-      case 'u': arg_size = 4; break;
-      case 'x': arg_size = 4; break;
-      case 'X': arg_size = 4; break;
-      case 'p': arg_size = 8; break;
-      default:  unreachable("invalid");
+      case 'c':
+         arg_size = 1;
+         break;
+      case 'd':
+         arg_size = 4;
+         break;
+      case 'e':
+         arg_size = 4;
+         break;
+      case 'E':
+         arg_size = 4;
+         break;
+      case 'f':
+         arg_size = 4;
+         break;
+      case 'F':
+         arg_size = 4;
+         break;
+      case 'G':
+         arg_size = 4;
+         break;
+      case 'a':
+         arg_size = 4;
+         break;
+      case 'A':
+         arg_size = 4;
+         break;
+      case 'i':
+         arg_size = 4;
+         break;
+      case 'u':
+         arg_size = 4;
+         break;
+      case 'x':
+         arg_size = 4;
+         break;
+      case 'X':
+         arg_size = 4;
+         break;
+      case 'p':
+         arg_size = 8;
+         break;
+      default:
+         unreachable("invalid");
       }
 
-      ASSERTED nir_def *def = va_arg(ap, nir_def*);
+      ASSERTED nir_def *def = va_arg(ap, nir_def *);
       assert(def->bit_size / 8 == arg_size);
 
       info.num_args++;
@@ -259,7 +286,7 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
       total_size += info.arg_sizes[a];
 
    nir_push_if(b, nir_ilt(b, nir_iadd_imm(b, buffer_offset, total_size),
-                             nir_load_printf_buffer_size(b)));
+                          nir_load_printf_buffer_size(b)));
    {
       nir_def *identifier = nir_imm_int(b, u_printf_hash(&info));
       nir_def *store_addr =
@@ -270,7 +297,7 @@ nir_printf_fmt(nir_builder *b, unsigned ptr_bit_size, const char *fmt, ...)
       va_start(ap, fmt);
       unsigned store_offset = sizeof(uint32_t);
       for (unsigned a = 0; a < info.num_args; a++) {
-         nir_def *def = va_arg(ap, nir_def*);
+         nir_def *def = va_arg(ap, nir_def *);
 
          nir_store_global(b, nir_iadd_imm(b, store_addr, store_offset),
                           4, def, 0x1);

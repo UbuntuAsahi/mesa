@@ -254,7 +254,7 @@ radv_use_dcc_for_image_early(struct radv_device *device, struct radv_image *imag
       return false;
    }
 
-   if (image->shareable && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+   if (image->vk.external_handle_types && image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
       return false;
 
    /*
@@ -387,6 +387,10 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
        (compression && compression->flags == VK_IMAGE_COMPRESSION_DISABLED_EXT))
       return false;
 
+   /* HTILE compression is only useful for depth/stencil attachments. */
+   if (!(image->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return false;
+
    if (image->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)
       return false;
 
@@ -408,7 +412,7 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
        !(gfx_level == GFX10_3 && device->vk.enabled_features.attachmentFragmentShadingRate))
       return false;
 
-   return (image->vk.mip_levels == 1 || use_htile_for_mips) && !image->shareable;
+   return (image->vk.mip_levels == 1 || use_htile_for_mips) && !image->vk.external_handle_types;
 }
 
 static bool
@@ -602,7 +606,7 @@ radv_image_get_plane_format(const struct radv_physical_device *pdev, const struc
    if (radv_is_format_emulated(pdev, image->vk.format)) {
       if (plane == 0)
          return image->vk.format;
-      if (vk_format_description(image->vk.format)->layout == UTIL_FORMAT_LAYOUT_ASTC)
+      if (radv_format_description(image->vk.format)->layout == UTIL_FORMAT_LAYOUT_ASTC)
          return vk_texcompress_astc_emulation_format(image->vk.format);
       else
          return vk_texcompress_etc2_emulation_format(image->vk.format);
@@ -620,7 +624,7 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
    uint64_t flags;
    unsigned array_mode = radv_choose_tiling(device, pCreateInfo, image_format);
    VkFormat format = radv_image_get_plane_format(pdev, image, plane_id);
-   const struct util_format_description *desc = vk_format_description(format);
+   const struct util_format_description *desc = radv_format_description(format);
    const VkImageAlignmentControlCreateInfoMESA *alignment =
          vk_find_struct_const(pCreateInfo->pNext, IMAGE_ALIGNMENT_CONTROL_CREATE_INFO_MESA);
    bool is_depth, is_stencil;
@@ -1046,7 +1050,7 @@ radv_get_ac_surf_info(struct radv_device *device, const struct radv_image *image
    info.levels = image->vk.mip_levels;
    info.num_channels = vk_format_get_nr_components(image->vk.format);
 
-   if (!vk_format_is_depth_or_stencil(image->vk.format) && !image->shareable &&
+   if (!vk_format_is_depth_or_stencil(image->vk.format) && !image->vk.external_handle_types &&
        !(image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT | VK_IMAGE_CREATE_ALIAS_BIT |
                                    VK_IMAGE_CREATE_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT)) &&
        image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
@@ -1207,7 +1211,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
       if (pdev->info.gfx_level >= GFX12 &&
           (!radv_surface_has_scanout(device, &create_info) || pdev->info.gfx12_supports_display_dcc)) {
-         const enum pipe_format format = vk_format_to_pipe_format(image->vk.format);
+         const enum pipe_format format = radv_format_to_pipe_format(image->vk.format);
 
          /* Set DCC tilings for both color and depth/stencil. */
          image->planes[plane].surface.u.gfx9.color.dcc_number_type = ac_get_cb_number_type(format);
@@ -1318,7 +1322,7 @@ radv_image_print_info(struct radv_device *device, struct radv_image *image)
    for (unsigned i = 0; i < image->plane_count; ++i) {
       const struct radv_image_plane *plane = &image->planes[i];
       const struct radeon_surf *surf = &plane->surface;
-      const struct util_format_description *desc = vk_format_description(plane->format);
+      const struct util_format_description *desc = radv_format_description(plane->format);
       uint64_t offset = ac_surface_get_plane_offset(pdev->info.gfx_level, &plane->surface, 0, 0);
 
       fprintf(stderr, "  Plane[%u]: vkformat=%s, offset=%" PRIu64 "\n", i, desc->name, offset);
@@ -1327,12 +1331,13 @@ radv_image_print_info(struct radv_device *device, struct radv_image *image)
    }
 }
 
-static uint64_t
+static VkResult
 radv_select_modifier(const struct radv_device *dev, VkFormat format,
-                     const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list)
+                     const struct VkImageDrmFormatModifierListCreateInfoEXT *mod_list, uint64_t *modifier)
 {
    const struct radv_physical_device *pdev = radv_device_physical(dev);
    unsigned mod_count;
+   uint64_t *mods;
 
    assert(mod_list->drmFormatModifierCount);
 
@@ -1345,11 +1350,9 @@ radv_select_modifier(const struct radv_device *dev, VkFormat format,
 
    ac_get_supported_modifiers(&pdev->info, &modifier_options, radv_format_to_pipe_format(format), &mod_count, NULL);
 
-   uint64_t *mods = calloc(mod_count, sizeof(*mods));
-
-   /* If allocations fail, fall back to a dumber solution. */
+   mods = calloc(mod_count, sizeof(*mods));
    if (!mods)
-      return mod_list->pDrmFormatModifiers[0];
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    ac_get_supported_modifiers(&pdev->info, &modifier_options, radv_format_to_pipe_format(format), &mod_count, mods);
 
@@ -1357,7 +1360,8 @@ radv_select_modifier(const struct radv_device *dev, VkFormat format,
       for (uint32_t j = 0; j < mod_list->drmFormatModifierCount; ++j) {
          if (mods[i] == mod_list->pDrmFormatModifiers[j]) {
             free(mods);
-            return mod_list->pDrmFormatModifiers[j];
+            *modifier = mod_list->pDrmFormatModifiers[j];
+            return VK_SUCCESS;
          }
       }
    }
@@ -1382,6 +1386,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
    const struct VkVideoProfileListInfoKHR *profile_list =
       vk_find_struct_const(pCreateInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
+   VkResult result;
 
    unsigned plane_count = radv_get_internal_plane_count(pdev, format);
 
@@ -1409,15 +1414,15 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       image->queue_family_mask &= ~(1u << RADV_QUEUE_SPARSE);
    }
 
-   const VkExternalMemoryImageCreateInfo *external_info =
-      vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
-
-   image->shareable = external_info;
-
-   if (mod_list)
-      modifier = radv_select_modifier(device, format, mod_list);
-   else if (explicit_mod)
+   if (mod_list) {
+      result = radv_select_modifier(device, format, mod_list, &modifier);
+      if (result != VK_SUCCESS) {
+         radv_destroy_image(device, alloc, image);
+         return vk_error(device, result);
+      }
+   } else if (explicit_mod) {
       modifier = explicit_mod->drmFormatModifier;
+   }
 
    for (unsigned plane = 0; plane < plane_count; ++plane) {
       image->planes[plane].surface.flags = radv_get_surface_flags(device, image, plane, pCreateInfo, format);
@@ -1434,7 +1439,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
       return VK_SUCCESS;
    }
 
-   VkResult result = radv_image_create_layout(device, *create_info, explicit_mod, profile_list, image);
+   result = radv_image_create_layout(device, *create_info, explicit_mod, profile_list, image);
    if (result != VK_SUCCESS) {
       radv_destroy_image(device, alloc, image);
       return result;
@@ -1505,8 +1510,8 @@ radv_get_aspect_format(struct radv_image *image, VkImageAspectFlags mask)
 }
 
 bool
-radv_layout_is_htile_compressed(const struct radv_device *device, const struct radv_image *image, VkImageLayout layout,
-                                unsigned queue_mask)
+radv_layout_is_htile_compressed(const struct radv_device *device, const struct radv_image *image, unsigned level,
+                                VkImageLayout layout, unsigned queue_mask)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -1522,10 +1527,10 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL:
    case VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL:
-      return radv_image_has_htile(image);
+      return radv_htile_enabled(image, level);
    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-      return radv_image_is_tc_compat_htile(image) ||
-             (radv_image_has_htile(image) && queue_mask == (1u << RADV_QUEUE_GENERAL));
+      return radv_tc_compat_htile_enabled(image, level) ||
+             (radv_htile_enabled(image, level) && queue_mask == (1u << RADV_QUEUE_GENERAL));
    case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
    case VK_IMAGE_LAYOUT_GENERAL:
       /* It should be safe to enable TC-compat HTILE with
@@ -1535,7 +1540,7 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
        * depth pass because this allows compression and this reduces
        * the number of decompressions from/to GENERAL.
        */
-      if (radv_image_is_tc_compat_htile(image) && queue_mask & (1u << RADV_QUEUE_GENERAL) &&
+      if (radv_tc_compat_htile_enabled(image, level) && queue_mask & (1u << RADV_QUEUE_GENERAL) &&
           !instance->drirc.disable_tc_compat_htile_in_general) {
          return true;
       } else {
@@ -1548,8 +1553,8 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
       return false;
    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
    case VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL:
-      if (radv_image_is_tc_compat_htile(image) ||
-          (radv_image_has_htile(image) &&
+      if (radv_tc_compat_htile_enabled(image, level) ||
+          (radv_htile_enabled(image, level) &&
            !(image->vk.usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)))) {
          /* Keep HTILE compressed if the image is only going to
           * be used as a depth/stencil read-only attachment.
@@ -1560,7 +1565,7 @@ radv_layout_is_htile_compressed(const struct radv_device *device, const struct r
       }
       break;
    default:
-      return radv_image_is_tc_compat_htile(image);
+      return radv_tc_compat_htile_enabled(image, level);
    }
 }
 
@@ -1581,7 +1586,7 @@ radv_layout_can_fast_clear(const struct radv_device *device, const struct radv_i
     * images can only be fast-cleared if comp-to-single is supported because we don't yet support
     * FCE on the compute queue.
     */
-   return queue_mask == (1u << RADV_QUEUE_GENERAL) || radv_image_use_comp_to_single(device, image);
+   return queue_mask == (1u << RADV_QUEUE_GENERAL) || image->support_comp_to_single;
 }
 
 bool

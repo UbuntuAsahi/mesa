@@ -82,9 +82,8 @@ static inline enum agx_layout
 agx_translate_layout(enum ail_tiling tiling)
 {
    switch (tiling) {
-   case AIL_TILING_TWIDDLED:
-   case AIL_TILING_TWIDDLED_COMPRESSED:
-      return AGX_LAYOUT_TWIDDLED;
+   case AIL_TILING_GPU:
+      return AGX_LAYOUT_GPU;
    case AIL_TILING_LINEAR:
       return AGX_LAYOUT_LINEAR;
    }
@@ -169,18 +168,17 @@ agx_pack_line_width(float line_width)
  * the texture descriptor itself.
  */
 static void
-agx_set_null_texture(struct agx_texture_packed *tex, uint64_t valid_address)
+agx_set_null_texture(struct agx_texture_packed *tex)
 {
    agx_pack(tex, TEXTURE, cfg) {
-      cfg.layout = AGX_LAYOUT_TILED;
+      cfg.layout = AGX_LAYOUT_TWIDDLED;
       cfg.channels = AGX_CHANNELS_R8;
       cfg.type = AGX_TEXTURE_TYPE_UNORM /* don't care */;
       cfg.swizzle_r = AGX_CHANNEL_0;
       cfg.swizzle_g = AGX_CHANNEL_0;
       cfg.swizzle_b = AGX_CHANNEL_0;
       cfg.swizzle_a = AGX_CHANNEL_0;
-      cfg.address = valid_address;
-      cfg.mode = AGX_IMAGE_MODE_NULL;
+      cfg.address = AGX_ZERO_PAGE_ADDRESS;
    }
 }
 
@@ -191,7 +189,7 @@ agx_set_null_pbe(struct agx_pbe_packed *pbe, uint64_t sink)
       cfg.width = 1;
       cfg.height = 1;
       cfg.levels = 1;
-      cfg.layout = AGX_LAYOUT_TILED;
+      cfg.layout = AGX_LAYOUT_TWIDDLED;
       cfg.channels = AGX_CHANNELS_R8;
       cfg.type = AGX_TEXTURE_TYPE_UNORM /* don't care */;
       cfg.swizzle_r = AGX_CHANNEL_R;

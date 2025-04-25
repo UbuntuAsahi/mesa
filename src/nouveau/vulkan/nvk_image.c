@@ -21,7 +21,7 @@
 
 #include "clb097.h"
 #include "clb197.h"
-#include "clc097.h"
+#include "clc197.h"
 #include "clc597.h"
 
 static VkFormatFeatureFlags2
@@ -291,7 +291,12 @@ nvk_image_max_dimension(const struct nv_device_info *info,
    switch (image_type) {
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
-      return info->cls_eng3d >= PASCAL_A ? 0x8000 : 0x4000;
+      /* The render and texture units can support up to 16K all the way back
+       * to Kepler but the copy engine can't.  We can work around this by
+       * doing offset shenanigans in the copy code but that not currently
+       * implemented.
+       */
+      return info->cls_eng3d >= PASCAL_B ? 0x8000 : 0x4000;
    case VK_IMAGE_TYPE_3D:
       return 0x4000;
    default:
@@ -757,11 +762,11 @@ nvk_image_init(struct nvk_device *dev,
       image->vk.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
    nil_image_usage_flags usage = 0;
-   if (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR)
+   if (image->vk.tiling == VK_IMAGE_TILING_LINEAR)
       usage |= NIL_IMAGE_USAGE_LINEAR_BIT;
-   if (pCreateInfo->flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT)
+   if (image->vk.create_flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
-   if (pCreateInfo->flags & VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT)
+   if (image->vk.create_flags & VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
 
    /* In order to be able to clear 3D depth/stencil images, we need to bind
@@ -769,12 +774,12 @@ nvk_image_init(struct nvk_device *dev,
     */
    if ((image->vk.aspects & (VK_IMAGE_ASPECT_DEPTH_BIT |
                              VK_IMAGE_ASPECT_STENCIL_BIT)) &&
-       pCreateInfo->imageType == VK_IMAGE_TYPE_3D)
+       image->vk.image_type == VK_IMAGE_TYPE_3D)
       usage |= NIL_IMAGE_USAGE_2D_VIEW_BIT;
 
-   image->plane_count = vk_format_get_plane_count(pCreateInfo->format);
+   image->plane_count = vk_format_get_plane_count(image->vk.format);
    image->disjoint = image->plane_count > 1 &&
-                     (pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT);
+                     (image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT);
 
    if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
       /* Sparse multiplane is not supported */
@@ -835,7 +840,7 @@ nvk_image_init(struct nvk_device *dev,
                                  IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT);
 
          enum pipe_format p_format =
-            nvk_format_to_pipe_format(pCreateInfo->format);
+            nvk_format_to_pipe_format(image->vk.format);
          image->vk.drm_format_mod =
             nil_select_best_drm_format_mod(&pdev->info, nil_format(p_format),
                                            mod_list_info->drmFormatModifierCount,
@@ -848,23 +853,25 @@ nvk_image_init(struct nvk_device *dev,
          assert(image->plane_count == 1);
 
          struct nil_image_init_info tiled_shadow_nil_info = {
-            .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+            .dim = vk_image_type_to_nil_dim(image->vk.image_type),
             .format = nil_format(nvk_format_to_pipe_format(image->vk.format)),
             .modifier = DRM_FORMAT_MOD_INVALID,
             .extent_px = {
-               .width = pCreateInfo->extent.width,
-               .height = pCreateInfo->extent.height,
-               .depth = pCreateInfo->extent.depth,
-               .array_len = pCreateInfo->arrayLayers,
+               .width = image->vk.extent.width,
+               .height = image->vk.extent.height,
+               .depth = image->vk.extent.depth,
+               .array_len = image->vk.array_layers,
             },
-            .levels = pCreateInfo->mipLevels,
-            .samples = pCreateInfo->samples,
+            .levels = image->vk.mip_levels,
+            .samples = image->vk.samples,
             .usage = usage & ~NIL_IMAGE_USAGE_LINEAR_BIT,
-            .explicit_row_stride_B = 0,
-            .max_alignment_B = 0,
          };
-         image->linear_tiled_shadow.nil =
-            nil_image_new(&pdev->info, &tiled_shadow_nil_info);
+         bool ok = nil_image_init(&pdev->info,
+                                  &image->linear_tiled_shadow.nil,
+                                  &tiled_shadow_nil_info);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
       }
    }
 
@@ -874,28 +881,28 @@ nvk_image_init(struct nvk_device *dev,
     * use the smallest block size for all planes.
     */
    const struct vk_format_ycbcr_info *ycbcr_info =
-      vk_format_get_ycbcr_info(pCreateInfo->format);
+      vk_format_get_ycbcr_info(image->vk.format);
    struct nil_image_init_info nil_info[NVK_MAX_IMAGE_PLANES];
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       VkFormat format = ycbcr_info ?
-         ycbcr_info->planes[plane].format : pCreateInfo->format;
+         ycbcr_info->planes[plane].format : image->vk.format;
       const uint8_t width_scale = ycbcr_info ?
          ycbcr_info->planes[plane].denominator_scales[0] : 1;
       const uint8_t height_scale = ycbcr_info ?
          ycbcr_info->planes[plane].denominator_scales[1] : 1;
 
       nil_info[plane] = (struct nil_image_init_info) {
-         .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+         .dim = vk_image_type_to_nil_dim(image->vk.image_type),
          .format = nil_format(nvk_format_to_pipe_format(format)),
          .modifier = image->vk.drm_format_mod,
          .extent_px = {
-            .width = pCreateInfo->extent.width / width_scale,
-            .height = pCreateInfo->extent.height / height_scale,
-            .depth = pCreateInfo->extent.depth,
-            .array_len = pCreateInfo->arrayLayers,
+            .width = image->vk.extent.width / width_scale,
+            .height = image->vk.extent.height / height_scale,
+            .depth = image->vk.extent.depth,
+            .array_len = image->vk.array_layers,
          },
-         .levels = pCreateInfo->mipLevels,
-         .samples = pCreateInfo->samples,
+         .levels = image->vk.mip_levels,
+         .samples = image->vk.samples,
          .usage = usage,
          .explicit_row_stride_B = explicit_row_stride_B,
          .max_alignment_B = max_alignment_B,
@@ -905,36 +912,47 @@ nvk_image_init(struct nvk_device *dev,
    if (usage & NIL_IMAGE_USAGE_VIDEO_BIT) {
       assert(!image->disjoint);
       for (uint8_t plane = 0; plane < image->plane_count; plane++) {
-         image->planes[plane].nil =
-            nil_image_new_planar(&pdev->info, nil_info, plane, image->plane_count);
+         bool ok = nil_image_init_planar(&pdev->info,
+                                         &image->planes[plane].nil,
+                                         nil_info, plane,
+                                         image->plane_count);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
       }
    } else {
       for (uint8_t plane = 0; plane < image->plane_count; plane++) {
-         image->planes[plane].nil =
-            nil_image_new(&pdev->info, &nil_info[plane]);
+         bool ok = nil_image_init(&pdev->info,
+                                  &image->planes[plane].nil,
+                                  &nil_info[plane]);
+         if (!ok)
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "Invalid image creation parameters");
       }
    }
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
       struct nil_image_init_info stencil_nil_info = {
-         .dim = vk_image_type_to_nil_dim(pCreateInfo->imageType),
+         .dim = vk_image_type_to_nil_dim(image->vk.image_type),
          .format = nil_format(PIPE_FORMAT_R32_UINT),
          .modifier = DRM_FORMAT_MOD_INVALID,
          .extent_px = {
-            .width = pCreateInfo->extent.width,
-            .height = pCreateInfo->extent.height,
-            .depth = pCreateInfo->extent.depth,
-            .array_len = pCreateInfo->arrayLayers,
+            .width = image->vk.extent.width,
+            .height = image->vk.extent.height,
+            .depth = image->vk.extent.depth,
+            .array_len = image->vk.array_layers,
          },
-         .levels = pCreateInfo->mipLevels,
-         .samples = pCreateInfo->samples,
+         .levels = image->vk.mip_levels,
+         .samples = image->vk.samples,
          .usage = usage,
-         .explicit_row_stride_B = 0,
-         .max_alignment_B = 0,
       };
 
-      image->stencil_copy_temp.nil =
-         nil_image_new(&pdev->info, &stencil_nil_info);
+      bool ok = nil_image_init(&pdev->info,
+                               &image->stencil_copy_temp.nil,
+                               &stencil_nil_info);
+      if (!ok)
+         return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                          "Invalid image creation parameters");
    }
 
    return VK_SUCCESS;

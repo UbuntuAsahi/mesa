@@ -8,8 +8,10 @@
 #include "compiler/libcl/libcl.h"
 #include "compiler/shader_enums.h"
 
-#ifndef __OPENCL_VERSION__
 #include "util/bitscan.h"
+#include "util/u_math.h"
+
+#ifndef __OPENCL_VERSION__
 #define libagx_popcount(x)   util_bitcount64(x)
 #define libagx_sub_sat(x, y) ((x >= y) ? (x - y) : 0)
 #else
@@ -32,12 +34,29 @@ struct agx_geometry_state {
 static_assert(sizeof(struct agx_geometry_state) == 4 * 4);
 
 #ifdef __OPENCL_VERSION__
-static inline global void *
-agx_heap_alloc_nonatomic(global struct agx_geometry_state *heap, size_t size)
+static inline uint
+agx_heap_alloc_nonatomic_offs(global struct agx_geometry_state *heap,
+                              uint size_B)
 {
-   global void *out = heap->heap + heap->heap_bottom;
-   heap->heap_bottom += size;
-   return out;
+   uint offs = heap->heap_bottom;
+   heap->heap_bottom += align(size_B, 16);
+
+   // Use printf+abort because assert is stripped from release builds.
+   if (heap->heap_bottom >= heap->heap_size) {
+      printf(
+         "FATAL: GPU heap overflow, allocating size %u, at offset %u, heap size %u!",
+         size_B, offs, heap->heap_size);
+
+      abort();
+   }
+
+   return offs;
+}
+
+static inline global void *
+agx_heap_alloc_nonatomic(global struct agx_geometry_state *heap, uint size_B)
+{
+   return heap->heap + agx_heap_alloc_nonatomic_offs(heap, size_B);
 }
 #endif
 

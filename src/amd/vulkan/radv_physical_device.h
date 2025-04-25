@@ -46,6 +46,7 @@ struct radv_physical_device_cache_key {
    uint32_t disable_aniso_single_level : 1;
    uint32_t disable_shrink_image_store : 1;
    uint32_t disable_sinking_load_input_fs : 1;
+   uint32_t disable_trunc_coord : 1;
    uint32_t emulate_rt : 1;
    uint32_t ge_wave32 : 1;
    uint32_t invariant_geom : 1;
@@ -61,6 +62,8 @@ struct radv_physical_device_cache_key {
    uint32_t use_llvm : 1;
    uint32_t use_ngg : 1;
    uint32_t use_ngg_culling : 1;
+
+   uint32_t reserved : 10;
 };
 
 enum radv_video_enc_hw_ver {
@@ -263,5 +266,7 @@ VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drm
                                     struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
+
+bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 
 #endif /* RADV_PHYSICAL_DEVICE_H */

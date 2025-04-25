@@ -32,7 +32,7 @@ gather_outputs(nir_builder *b, nir_function_impl *impl, ac_nir_prerast_out *out)
    }
 }
 
-void
+bool
 ac_nir_lower_legacy_vs(nir_shader *nir,
                        enum amd_gfx_level gfx_level,
                        uint32_t clip_cull_mask,
@@ -70,9 +70,6 @@ ac_nir_lower_legacy_vs(nir_shader *nir,
    /* This should be after streamout and before exports. */
    ac_nir_clamp_vertex_color_outputs(&b, &out);
 
-   /* This should be after streamout and before exports. */
-   ac_nir_clamp_vertex_color_outputs(&b, &out);
-
    uint64_t export_outputs = nir->info.outputs_written | VARYING_BIT_POS;
    if (kill_pointsize)
       export_outputs &= ~VARYING_BIT_PSIZ;
@@ -89,5 +86,5 @@ ac_nir_lower_legacy_vs(nir_shader *nir,
                                &out);
    }
 
-   nir_metadata_preserve(impl, nir_metadata_none);
+   return nir_progress(true, impl, nir_metadata_none);
 }

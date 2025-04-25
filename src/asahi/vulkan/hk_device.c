@@ -20,6 +20,7 @@
 #include "asahi/lib/agx_bo.h"
 #include "asahi/lib/agx_device.h"
 #include "asahi/libagx/geometry.h"
+#include "compiler/nir/nir_builder.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "util/simple_mtx.h"
@@ -285,7 +286,7 @@ static VkResult
 hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 {
    struct hk_device *dev = container_of(device, struct hk_device, vk);
-   *timestamp = agx_gpu_time_to_ns(&dev->dev, agx_get_gpu_timestamp(&dev->dev));
+   *timestamp = agx_get_gpu_timestamp(&dev->dev);
    return VK_SUCCESS;
 }
 
@@ -301,7 +302,7 @@ hk_upload_null_descriptors(struct hk_device *dev)
    struct agx_pbe_packed null_pbe;
    uint32_t offset_tex, offset_pbe;
 
-   agx_set_null_texture(&null_tex, dev->rodata.null_sink);
+   agx_set_null_texture(&null_tex);
    agx_set_null_pbe(&null_pbe, dev->rodata.null_sink);
 
    hk_descriptor_table_add(dev, &dev->images, &null_tex, sizeof(null_tex),
@@ -466,6 +467,23 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
 
+   /* Precompile an empty fragment shader that can be used to handle API-level
+    * null fragment shaders. We do this at device-time to make binds cheap.
+    * Regardless, compiling this shader should be fast.
+    */
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT,
+                                                  &agx_nir_options, "empty FS");
+   struct vk_shader_compile_info info = {
+      .nir = b.shader,
+      .robustness = &vk_robustness_disabled,
+      .stage = MESA_SHADER_FRAGMENT,
+   };
+   hk_compile_shader(dev, &info, NULL, pAllocator, &dev->null_fs);
+   if (!dev->null_fs) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_meta;
+   }
+
    *pDevice = hk_device_to_handle(dev);
 
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
@@ -479,6 +497,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_meta:
+   hk_device_finish_meta(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->mem_cache, NULL);
 fail_queue:
@@ -533,6 +553,10 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_scratch_fini(&dev->scratch.fs);
    agx_scratch_fini(&dev->scratch.cs);
    simple_mtx_destroy(&dev->scratch.lock);
+
+   if (dev->null_fs) {
+      hk_api_shader_destroy(&dev->vk, &dev->null_fs->vk, pAllocator);
+   }
 
    hk_destroy_sampler_heap(dev, &dev->samplers);
    hk_descriptor_table_finish(dev, &dev->images);

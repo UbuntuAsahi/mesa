@@ -118,7 +118,7 @@ struct panvk_cs_subqueue_context {
 struct panvk_cache_flush_info {
    enum mali_cs_flush_mode l2;
    enum mali_cs_flush_mode lsc;
-   bool others;
+   enum mali_cs_other_flush_mode others;
 };
 
 struct panvk_cs_deps {
@@ -208,26 +208,6 @@ cs_scratch_reg64(struct cs_builder *b, unsigned reg)
 {
    assert(reg % 2 == 0);
    return cs_scratch_reg_tuple(b, reg, 2);
-}
-
-static inline struct cs_index
-cs_sr_reg_tuple(struct cs_builder *b, unsigned start, unsigned count)
-{
-   assert(start + count - 1 < PANVK_CS_REG_SCRATCH_START);
-   return cs_reg_tuple(b, start, count);
-}
-
-static inline struct cs_index
-cs_sr_reg32(struct cs_builder *b, unsigned reg)
-{
-   return cs_sr_reg_tuple(b, reg, 1);
-}
-
-static inline struct cs_index
-cs_sr_reg64(struct cs_builder *b, unsigned reg)
-{
-   assert(reg % 2 == 0);
-   return cs_sr_reg_tuple(b, reg, 2);
 }
 
 static inline struct cs_index
@@ -382,8 +362,6 @@ struct panvk_cmd_buffer {
    struct panvk_pool tls_pool;
    struct list_head push_sets;
 
-   uint32_t flush_id;
-
    struct {
       struct u_trace uts[PANVK_SUBQUEUE_COUNT];
    } utrace;
@@ -456,15 +434,15 @@ panvk_per_arch(calculate_task_axis_and_increment)(
 {
    /* Pick the task_axis and task_increment to maximize thread
     * utilization. */
-   unsigned threads_per_wg =
-      shader->local_size.x * shader->local_size.y * shader->local_size.z;
+   unsigned threads_per_wg = shader->cs.local_size.x * shader->cs.local_size.y *
+                             shader->cs.local_size.z;
    unsigned max_thread_cnt = panfrost_compute_max_thread_count(
       &phys_dev->kmod.props, shader->info.work_reg_count);
    unsigned threads_per_task = threads_per_wg;
    unsigned local_size[3] = {
-      shader->local_size.x,
-      shader->local_size.y,
-      shader->local_size.z,
+      shader->cs.local_size.x,
+      shader->cs.local_size.y,
+      shader->cs.local_size.z,
    };
 
    for (unsigned i = 0; i < 3; i++) {

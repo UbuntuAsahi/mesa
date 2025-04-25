@@ -599,7 +599,8 @@ blorp_emit_vertex_elements(struct blorp_batch *batch,
          /* Blorp shaders have no requirements that we need to disable geometry
           * distribution.
           */
-         vf.GeometryDistributionEnable = true;
+         vf.GeometryDistributionEnable =
+            (batch->flags & BLORP_BATCH_DISABLE_VF_DISTRIBUTION) ? false : true;
 #endif
       }
    }
@@ -688,6 +689,8 @@ blorp_emit_vs_config(struct blorp_batch *batch,
 
    blorp_emit(batch, GENX(3DSTATE_VS), vs) {
       if (vs_prog_data) {
+         assert(vs_prog_data->base.base.total_scratch == 0);
+
          vs.Enable = true;
 
          vs.KernelStartPointer = params->vs_prog_kernel;
@@ -884,6 +887,8 @@ blorp_emit_ps_config(struct blorp_batch *batch,
 #endif
 
       if (prog_data) {
+         assert(prog_data->base.total_scratch == 0);
+
          intel_set_ps_dispatch_state(&ps, devinfo, prog_data,
                                      params->num_samples,
                                      0 /* msaa_flags */);
@@ -2025,7 +2030,12 @@ blorp_xy_block_copy_blt(struct blorp_batch *batch,
       blt.ColorDepth = xy_color_depth(fmtl);
 
       blt.DestinationPitch = (dst_surf->row_pitch_B / dst_pitch_unit) - 1;
+#if GFX_VERx10 >= 200
+      blt.DestinationMOCSindex = MOCS_GET_INDEX(params->dst.addr.mocs);
+      blt.DestinationEncryptEn = MOCS_GET_ENCRYPT_EN(params->dst.addr.mocs);
+#else
       blt.DestinationMOCS = params->dst.addr.mocs;
+#endif
       blt.DestinationTiling = xy_bcb_tiling(dst_surf);
       blt.DestinationX1 = dst_x0;
       blt.DestinationY1 = dst_y0;
@@ -2070,7 +2080,12 @@ blorp_xy_block_copy_blt(struct blorp_batch *batch,
       blt.SourceX1 = src_x0;
       blt.SourceY1 = src_y0;
       blt.SourcePitch = (src_surf->row_pitch_B / src_pitch_unit) - 1;
+#if GFX_VERx10 >= 200
+      blt.SourceMOCSindex = MOCS_GET_INDEX(params->src.addr.mocs);
+      blt.SourceEncryptEn = MOCS_GET_ENCRYPT_EN(params->src.addr.mocs);
+#else
       blt.SourceMOCS = params->src.addr.mocs;
+#endif
       blt.SourceTiling = xy_bcb_tiling(src_surf);
       blt.SourceBaseAddress = params->src.addr;
       blt.SourceXOffset = params->src.tile_x_sa;
@@ -2152,6 +2167,12 @@ blorp_xy_fast_color_blit(struct blorp_batch *batch,
 
       blt.DestinationPitch = (dst_surf->row_pitch_B / dst_pitch_unit) - 1;
       blt.DestinationTiling = xy_bcb_tiling(dst_surf);
+#if GFX_VERx10 >= 200
+      blt.DestinationMOCSindex = MOCS_GET_INDEX(params->dst.addr.mocs);
+      blt.DestinationEncryptEn = MOCS_GET_ENCRYPT_EN(params->dst.addr.mocs);
+#else
+      blt.DestinationMOCS = params->dst.addr.mocs;
+#endif
       blt.DestinationX1 = params->x0;
       blt.DestinationY1 = params->y0;
       blt.DestinationX2 = params->x1;
@@ -2192,8 +2213,6 @@ blorp_xy_fast_color_blit(struct blorp_batch *batch,
          blt.DestinationCompressionFormat =
             isl_get_render_compression_format(dst_surf->format);
       }
-
-      blt.DestinationMOCS = params->dst.addr.mocs;
 #endif
    }
 #endif

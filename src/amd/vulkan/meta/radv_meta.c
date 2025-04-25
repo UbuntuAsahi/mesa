@@ -148,11 +148,6 @@ radv_meta_save(struct radv_meta_saved_state *state, struct radv_cmd_buffer *cmd_
       radv_cmd_buffer_reset_rendering(cmd_buffer);
    }
 
-   if (state->flags & RADV_META_SUSPEND_PREDICATING) {
-      state->predicating = cmd_buffer->state.predicating;
-      cmd_buffer->state.predicating = false;
-   }
-
    radv_suspend_queries(state, cmd_buffer);
 }
 
@@ -222,9 +217,6 @@ radv_meta_restore(const struct radv_meta_saved_state *state, struct radv_cmd_buf
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FRAMEBUFFER;
    }
 
-   if (state->flags & RADV_META_SUSPEND_PREDICATING)
-      cmd_buffer->state.predicating = state->predicating;
-
    radv_resume_queries(state, cmd_buffer);
 }
 
@@ -240,30 +232,6 @@ radv_meta_get_view_type(const struct radv_image *image)
       return VK_IMAGE_VIEW_TYPE_3D;
    default:
       unreachable("bad VkImageViewType");
-   }
-}
-
-/**
- * When creating a destination VkImageView, this function provides the needed
- * VkImageViewCreateInfo::subresourceRange::baseArrayLayer.
- */
-uint32_t
-radv_meta_get_iview_layer(const struct radv_image *dst_image, const VkImageSubresourceLayers *dst_subresource,
-                          const VkOffset3D *dst_offset)
-{
-   switch (dst_image->vk.image_type) {
-   case VK_IMAGE_TYPE_1D:
-   case VK_IMAGE_TYPE_2D:
-      return dst_subresource->baseArrayLayer;
-   case VK_IMAGE_TYPE_3D:
-      /* HACK: Vulkan does not allow attaching a 3D image to a framebuffer,
-       * but meta does it anyway. When doing so, we translate the
-       * destination's z offset into an array offset.
-       */
-      return dst_offset->z;
-   default:
-      assert(!"bad VkImageType");
-      return 0;
    }
 }
 

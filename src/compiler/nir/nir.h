@@ -2309,6 +2309,8 @@ typedef enum nir_texop {
    nir_texop_samples_identical,
    /** Regular texture look-up, eligible for pre-dispatch */
    nir_texop_tex_prefetch,
+   /** Returns the sampler's LOD bias (if sampler LOD bias is lowered) */
+   nir_texop_lod_bias,
    /** Multisample fragment color texture fetch */
    nir_texop_fragment_fetch_amd,
    /** Multisample fragment mask texture fetch */
@@ -2317,8 +2319,6 @@ typedef enum nir_texop {
    nir_texop_descriptor_amd,
    /** Returns a sampler descriptor. */
    nir_texop_sampler_descriptor_amd,
-   /** Returns the sampler's LOD bias */
-   nir_texop_lod_bias_agx,
    /** Returns the image view's min LOD */
    nir_texop_image_min_lod_agx,
    /** Returns a bool indicating that the sampler uses a custom border colour */
@@ -2409,6 +2409,12 @@ typedef struct nir_tex_instr {
    /** True if this tg4 instruction has an implicit LOD or LOD bias, instead of using level 0 */
    unsigned is_gather_implicit_lod : 1;
 
+   /** True if helper invocation loads can be skipped
+    *
+    * This is set by nir_opt_tex_skip_helpers().
+    */
+   unsigned skip_helpers : 1;
+
    /** Gather offsets */
    int8_t tg4_offsets[4][2];
 
@@ -2428,6 +2434,9 @@ typedef struct nir_tex_instr {
     * expression, or texture lookup will result in undefined values.").
     */
    bool sampler_non_uniform;
+
+   /** True if the offset is not dynamically uniform */
+   bool offset_non_uniform;
 
    /** The texture index
     *
@@ -3286,8 +3295,7 @@ typedef enum {
     */
    nir_metadata_live_defs = 0x4,
 
-   /** A dummy metadata value to track when a pass forgot to call
-    * nir_metadata_preserve.
+   /** A dummy metadata value to track when a pass forgot to preserve metadata.
     *
     * A pass should always clear this value even if it doesn't make any
     * progress to indicate that it thought about preserving metadata.
@@ -3348,9 +3356,7 @@ typedef enum {
    /** All metadata
     *
     * This includes all nir_metadata flags except not_properly_reset.  Passes
-    * which do not change the shader in any way should call
-    *
-    *    nir_metadata_preserve(impl, nir_metadata_all);
+    * which do not change the shader in any way should use this.
     */
    nir_metadata_all = ~nir_metadata_not_properly_reset,
 } nir_metadata;
@@ -3896,12 +3902,23 @@ nir_function_impl *nir_cf_node_get_function(nir_cf_node *node);
 
 /** requests that the given pieces of metadata be generated */
 void nir_metadata_require(nir_function_impl *impl, nir_metadata required, ...);
-/** dirties all but the preserved metadata */
-void nir_metadata_preserve(nir_function_impl *impl, nir_metadata preserved);
 /** Preserves all metadata for the given shader */
 void nir_shader_preserve_all_metadata(nir_shader *shader);
 /** dirties all metadata and fills it with obviously wrong information */
 void nir_metadata_invalidate(nir_shader *shader);
+
+/**
+ * Indicate progress on an implementation, preserving only the specified
+ * metadata. The supplied progress is returned to improve ergonomics.
+ */
+bool nir_progress(bool progress, nir_function_impl *impl, nir_metadata preserved);
+
+/** Indicate that there is no progress. All metadata is preserved. */
+static inline bool
+nir_no_progress(nir_function_impl *impl)
+{
+   return nir_progress(false, impl, nir_metadata_none /* ignored */);
+}
 
 /** creates an instruction with default swizzle/writemask/etc. with NULL registers */
 nir_alu_instr *nir_alu_instr_create(nir_shader *shader, nir_op op);
@@ -4225,6 +4242,15 @@ nir_instr_get_debug_info(nir_instr *instr)
 {
    assert(instr->has_debug_info);
    return container_of(instr, nir_instr_debug_info, instr);
+}
+
+static inline void *
+nir_instr_get_gc_pointer(nir_instr *instr)
+{
+   if (unlikely(instr->has_debug_info))
+      return nir_instr_get_debug_info(instr);
+
+   return instr;
 }
 
 typedef bool (*nir_foreach_def_cb)(nir_def *def, void *state);
@@ -4622,6 +4648,10 @@ should_print_nir(UNUSED nir_shader *shader)
    }                                                                                        \
 })
 
+/**
+ * Deprecated. Please do not use in newly written code.
+ * See https://gitlab.freedesktop.org/mesa/mesa/-/issues/10409
+ */
 #define NIR_PASS_V(nir, pass, ...) _PASS(pass, nir, {        \
    if (should_print_nir(nir))                                \
       printf("%s\n", #pass);                                 \
@@ -4814,8 +4844,8 @@ bool nir_lower_var_copies(nir_shader *shader);
 bool nir_opt_memcpy(nir_shader *shader);
 bool nir_lower_memcpy(nir_shader *shader);
 
-void nir_fixup_deref_modes(nir_shader *shader);
-void nir_fixup_deref_types(nir_shader *shader);
+bool nir_fixup_deref_modes(nir_shader *shader);
+bool nir_fixup_deref_types(nir_shader *shader);
 
 bool nir_lower_global_vars_to_local(nir_shader *shader);
 void nir_lower_constant_to_temp(nir_shader *shader);
@@ -5142,9 +5172,11 @@ nir_lower_shader_calls(nir_shader *shader,
                        void *mem_ctx);
 
 int nir_get_io_offset_src_number(const nir_intrinsic_instr *instr);
+int nir_get_io_index_src_number(const nir_intrinsic_instr *instr);
 int nir_get_io_arrayed_index_src_number(const nir_intrinsic_instr *instr);
 
 nir_src *nir_get_io_offset_src(nir_intrinsic_instr *instr);
+nir_src *nir_get_io_index_src(nir_intrinsic_instr *instr);
 nir_src *nir_get_io_arrayed_index_src(nir_intrinsic_instr *instr);
 nir_src *nir_get_shader_call_payload_src(nir_intrinsic_instr *call);
 
@@ -5548,6 +5580,12 @@ typedef struct nir_lower_tex_options {
     */
    bool lower_lod_zero_width;
 
+   /**
+    * If true, emulates sampler descriptor LOD bias by adding the sampler
+    * LOD bias to every texture instruction's LOD.
+    */
+   bool lower_sampler_lod_bias;
+
    /* Turns nir_op_tex and other ops with an implicit derivative, in stages
     * without implicit derivatives (like the vertex shader) to have an explicit
     * LOD with a value of 0.
@@ -5618,14 +5656,20 @@ enum nir_lower_non_uniform_access_type {
    nir_lower_non_uniform_texture_access = (1 << 2),
    nir_lower_non_uniform_image_access = (1 << 3),
    nir_lower_non_uniform_get_ssbo_size = (1 << 4),
-   nir_lower_non_uniform_access_type_count = 5,
+   nir_lower_non_uniform_texture_offset_access = (1 << 5),
+   nir_lower_non_uniform_access_type_count = 6,
 };
 
+typedef bool (*nir_lower_non_uniform_src_access_callback)(const nir_tex_instr *, unsigned, void *);
 /* Given the nir_src used for the resource, return the channels which might be non-uniform. */
 typedef nir_component_mask_t (*nir_lower_non_uniform_access_callback)(const nir_src *, void *);
 
 typedef struct nir_lower_non_uniform_access_options {
    enum nir_lower_non_uniform_access_type types;
+   /* Called on nir_tex_instr to ask whether non-uniform lowering is required
+    * for a particular source
+    */
+   nir_lower_non_uniform_src_access_callback tex_src_callback;
    nir_lower_non_uniform_access_callback callback;
    void *callback_data;
 } nir_lower_non_uniform_access_options;
@@ -5753,6 +5797,16 @@ bool nir_lower_bit_size(nir_shader *shader,
                         void *callback_data);
 bool nir_lower_64bit_phis(nir_shader *shader);
 
+typedef struct nir_split_conversions_options {
+   nir_lower_bit_size_callback callback;
+   void *callback_data;
+   /* True if the implementation supports nir_intrinsic_convert_alu_types */
+   bool has_convert_alu_types;
+} nir_split_conversions_options;
+
+bool nir_split_conversions(nir_shader *shader,
+                           const nir_split_conversions_options *options);
+
 bool nir_split_64bit_vec3_and_vec4(nir_shader *shader);
 
 nir_lower_int64_options nir_lower_int64_op_to_options_mask(nir_op opcode);
@@ -5820,9 +5874,8 @@ bool nir_lower_interpolation(nir_shader *shader,
                              nir_lower_interpolation_options options);
 
 typedef enum {
-   nir_lower_discard_if_to_cf = (1 << 0),
-   nir_lower_demote_if_to_cf = (1 << 1),
-   nir_lower_terminate_if_to_cf = (1 << 2),
+   nir_lower_demote_if_to_cf = (1 << 0),
+   nir_lower_terminate_if_to_cf = (1 << 1),
 } nir_lower_discard_if_options;
 
 bool nir_lower_discard_if(nir_shader *shader, nir_lower_discard_if_options options);
@@ -6058,8 +6111,15 @@ typedef struct nir_opt_offsets_options {
 
 bool nir_opt_offsets(nir_shader *shader, const nir_opt_offsets_options *options);
 
-bool nir_opt_peephole_select(nir_shader *shader, unsigned limit,
-                             bool indirect_load_ok, bool expensive_alu_ok);
+typedef struct nir_opt_peephole_select_options {
+   unsigned limit; /* Set to max to flatten all control flow. */
+   bool indirect_load_ok;
+   bool expensive_alu_ok;
+   bool discard_ok;
+} nir_opt_peephole_select_options;
+
+bool nir_opt_peephole_select(nir_shader *shader,
+                             const nir_opt_peephole_select_options *options);
 
 bool nir_opt_reassociate_bfi(nir_shader *shader);
 
@@ -6069,6 +6129,8 @@ bool nir_opt_remove_phis(nir_shader *shader);
 bool nir_remove_single_src_phis_block(nir_block *block);
 
 bool nir_opt_phi_precision(nir_shader *shader);
+
+bool nir_opt_phi_to_bool(nir_shader *shader);
 
 bool nir_opt_shrink_stores(nir_shader *shader, bool shrink_image_store);
 
@@ -6087,12 +6149,13 @@ bool nir_opt_vectorize(nir_shader *shader, nir_vectorize_cb filter,
                        void *data);
 bool nir_opt_vectorize_io(nir_shader *shader, nir_variable_mode modes);
 
-bool nir_opt_conditional_discard(nir_shader *shader);
 bool nir_opt_move_discards_to_top(nir_shader *shader);
 
 bool nir_opt_ray_queries(nir_shader *shader);
 
 bool nir_opt_ray_query_ranges(nir_shader *shader);
+
+bool nir_opt_tex_skip_helpers(nir_shader *shader, bool no_add_divergence);
 
 void nir_sweep(nir_shader *shader);
 
@@ -6220,7 +6283,7 @@ bool nir_mod_analysis(nir_scalar val, nir_alu_type val_type, unsigned div, unsig
 bool
 nir_remove_tex_shadow(nir_shader *shader, unsigned textures_bitmask);
 
-void
+bool
 nir_trivialize_registers(nir_shader *s);
 
 unsigned

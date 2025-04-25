@@ -516,6 +516,21 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_NV9097_SET_VERTEX_STREAM_SUBSTITUTE_A(p, zero_addr >> 32);
    P_NV9097_SET_VERTEX_STREAM_SUBSTITUTE_B(p, zero_addr);
 
+   if (pdev->info.cls_eng3d >= VOLTA_A) {
+      /* These WATERMARK settings are based on what the blob sets. I'm guessing
+       * these are thresholds for balancing PS vs VS shaders but I'm not sure.
+       * We could do this on older cards if we knew what values to set.
+       */
+      P_IMMD(p, NV9097, SET_PS_WARP_WATERMARKS, {
+         .low = 0x8,
+         .high = pdev->info.max_warps_per_mp * pdev->info.mp_per_tpc,
+      });
+      P_IMMD(p, NV9097, SET_PS_REGISTER_WATERMARKS, {
+         .low = 0x80,
+         .high = 0x1000,
+      });
+   }
+
    P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_VB_ENABLES));
    P_NV9097_SET_MME_SHADOW_SCRATCH(p, NVK_MME_SCRATCH_VB_ENABLES, 0);
    for (uint32_t b = 0; b < 32; b++) {
@@ -826,10 +841,21 @@ nvk_cmd_set_sample_layout(struct nvk_cmd_buffer *cmd,
       P_INLINE_DATA(p, 0x003a003a);
       P_INLINE_DATA(p, 0x00c500c5);
       P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_SAMPLE_MASKS_4PASS_0));
-      P_INLINE_DATA(p, 0x00120081);
-      P_INLINE_DATA(p, 0x00280044);
-      P_INLINE_DATA(p, 0x00280012);
-      P_INLINE_DATA(p, 0x00810044);
+      if (nvk_cmd_buffer_3d_cls(cmd) >= MAXWELL_B) {
+         P_INLINE_DATA(p, 0x00120081);
+         P_INLINE_DATA(p, 0x00280044);
+         P_INLINE_DATA(p, 0x00280012);
+         P_INLINE_DATA(p, 0x00810044);
+      } else {
+         /* The samples map funny on Maxwell A and earlier.  We're not even
+          * guaranteed that pixld.my_index is any of the samples in the mask
+          * so just go with what we see the hardware kicking out.
+          */
+         P_INLINE_DATA(p, 0x00000012);
+         P_INLINE_DATA(p, 0x00280044);
+         P_INLINE_DATA(p, 0x00000000);
+         P_INLINE_DATA(p, 0x00810000);
+      }
       break;
 
    default:
@@ -850,7 +876,7 @@ nvk_GetRenderingAreaGranularityKHR(
 }
 
 static bool
-nvk_rendering_all_linear(const struct nvk_rendering_state *render)
+nvk_rendering_linear(const struct nvk_rendering_state *render)
 {
    /* Depth and stencil are never linear */
    if (render->depth_att.iview || render->stencil_att.iview)
@@ -863,10 +889,18 @@ nvk_rendering_all_linear(const struct nvk_rendering_state *render)
 
       const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
       const uint8_t ip = iview->planes[0].image_plane;
+      const struct nvk_image_plane *plane = &image->planes[ip];
       const struct nil_image_level *level =
-         &image->planes[ip].nil.levels[iview->vk.base_mip_level];
+         &plane->nil.levels[iview->vk.base_mip_level];
 
       if (level->tiling.gob_type != NIL_GOB_TYPE_LINEAR)
+         return false;
+
+      /* We can't render to a linear image unless the address and row stride
+       * are multiples of 128B.  Fall back to tiled shadows in this case.
+       */
+      uint64_t addr = nvk_image_plane_base_address(plane) + level->offset_B;
+      if (addr % 128 != 0 || level->row_stride_B % 128 != 0)
          return false;
    }
 
@@ -915,7 +949,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       };
    }
 
-   render->all_linear = nvk_rendering_all_linear(render);
+   render->linear = nvk_rendering_linear(render);
 
    const VkRenderingAttachmentLocationInfoKHR ral_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
@@ -960,7 +994,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          const uint8_t ip = iview->planes[0].image_plane;
          const struct nvk_image_plane *plane = &image->planes[ip];
 
-         if (!render->all_linear &&
+         if (!render->linear &&
              plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR)
             plane = &image->linear_tiled_shadow;
 
@@ -1029,7 +1063,12 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
             /* NVIDIA doesn't support linear array images */
             assert(iview->vk.base_array_layer == 0 && layer_count == 1);
 
+            /* The render hardware gets grumpy if things aren't 128B-aligned.
+             */
             uint32_t pitch = level->row_stride_B;
+            assert(addr % 128 == 0);
+            assert(pitch % 128 == 0);
+
             const enum pipe_format p_format =
                nvk_format_to_pipe_format(iview->vk.format);
             /* When memory layout is set to LAYOUT_PITCH, the WIDTH field
@@ -1154,7 +1193,9 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       P_IMMD(p, NV9097, SET_ZT_SELECT, 0 /* target_count */);
    }
 
-   if (render->fsr_att.iview) {
+   if (nvk_cmd_buffer_3d_cls(cmd) < TURING_A) {
+      assert(render->fsr_att.iview == NULL);
+   } else if (render->fsr_att.iview != NULL) {
       const struct nvk_image_view *iview = render->fsr_att.iview;
       const struct nvk_image *image = (struct nvk_image *)iview->vk.image;
 
@@ -1250,7 +1291,7 @@ nvk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
       const VkAttachmentLoadOp load_op =
          pRenderingInfo->pColorAttachments[i].loadOp;
-      if (!render->all_linear &&
+      if (!render->linear &&
           plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR &&
           load_op == VK_ATTACHMENT_LOAD_OP_LOAD)
          nvk_linear_render_copy(cmd, iview, render->area, true);
@@ -1326,7 +1367,7 @@ nvk_CmdEndRendering(VkCommandBuffer commandBuffer)
          struct nvk_image *image = (struct nvk_image *)iview->vk.image;
          const uint8_t ip = iview->planes[0].image_plane;
          const struct nvk_image_plane *plane = &image->planes[ip];
-         if (!render->all_linear &&
+         if (!render->linear &&
              plane->nil.levels[0].tiling.gob_type == NIL_GOB_TYPE_LINEAR &&
              render->color_att[i].store_op == VK_ATTACHMENT_STORE_OP_STORE)
             nvk_linear_render_copy(cmd, iview, render->area, false);

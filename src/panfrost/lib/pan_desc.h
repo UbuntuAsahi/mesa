@@ -140,6 +140,7 @@ struct pan_fb_info {
 
    /* Optimal tile buffer size. */
    unsigned tile_buf_budget;
+   unsigned z_tile_buf_budget;
    unsigned tile_size;
    unsigned cbuf_allocation;
 
@@ -196,6 +197,13 @@ unsigned GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
                             const struct pan_tls_info *tls,
                             const struct pan_tiler_context *tiler_ctx,
                             void *out);
+
+#if PAN_ARCH >= 6
+unsigned GENX(pan_select_tiler_hierarchy_mask)(uint32_t width, uint32_t height,
+                                               uint32_t max_levels,
+                                               uint32_t tile_size,
+                                               uint32_t mem_budget);
+#endif
 
 #if PAN_ARCH <= 9
 void GENX(pan_emit_fragment_job_payload)(const struct pan_fb_info *fb,

@@ -294,15 +294,7 @@ static void declare_vs_blit_inputs(struct si_shader *shader, struct si_shader_ar
    ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL);                /* depth */
 
    if (info->vs.blit_sgprs_amd ==
-       SI_VS_BLIT_SGPRS_POS_COLOR + has_attribute_ring_address) {
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color0 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color1 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color2 */
-      ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* color3 */
-      if (has_attribute_ring_address)
-         ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_INT, NULL); /* attribute ring address */
-   } else if (info->vs.blit_sgprs_amd ==
-              SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
+       SI_VS_BLIT_SGPRS_POS_TEXCOORD + has_attribute_ring_address) {
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.y1 */
       ac_add_arg(&args->ac, AC_ARG_SGPR, 1, AC_ARG_FLOAT, NULL); /* texcoord.x2 */
@@ -777,6 +769,7 @@ static bool si_shader_binary_open(struct si_screen *screen, struct si_shader *sh
 
 #define add_part(shader_or_part)                                                                   \
    if (shader_or_part) {                                                                           \
+      assert(shader_or_part->binary.type == SI_SHADER_BINARY_ELF);                                 \
       part_elfs[num_parts] = (shader_or_part)->binary.code_buffer;                                 \
       part_sizes[num_parts] = (shader_or_part)->binary.code_size;                                  \
       num_parts++;                                                                                 \
@@ -1654,8 +1647,7 @@ static bool si_nir_kill_outputs(nir_shader *nir, const union si_shader_key *key)
        !key->ge.opt.kill_layer &&
        !key->ge.opt.kill_clip_distances &&
        !(nir->info.outputs_written & BITFIELD64_BIT(VARYING_SLOT_LAYER))) {
-      nir_metadata_preserve(impl, nir_metadata_all);
-      return false;
+      return nir_no_progress(impl);
    }
 
    bool progress = false;
@@ -1719,13 +1711,7 @@ static bool si_nir_kill_outputs(nir_shader *nir, const union si_shader_key *key)
       }
    }
 
-   if (progress) {
-      nir_metadata_preserve(impl, nir_metadata_control_flow);
-   } else {
-      nir_metadata_preserve(impl, nir_metadata_all);
-   }
-
-   return progress;
+   return nir_progress(progress, impl, nir_metadata_control_flow);
 }
 
 static unsigned si_map_io_driver_location(unsigned semantic)
@@ -1821,6 +1807,8 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir)
       .kill_layer = key->ge.opt.kill_layer,
       .force_vrs = sel->screen->options.vrs2x2,
       .use_gfx12_xfb_intrinsic = !nir->info.use_aco_amd,
+      .skip_viewport_state_culling = sel->info.writes_viewport_index,
+      .use_point_tri_intersection = sel->screen->info.num_cu / sel->screen->info.num_se >= 12,
    };
 
    if (nir->info.stage == MESA_SHADER_VERTEX ||
@@ -2043,8 +2031,7 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
       nir_def *back_color = NULL;
       if (interp_mode == INTERP_MODE_FLAT) {
          colors[i] = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
-                                   .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                   .io_semantics.num_slots = 1);
+                                   .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color = nir_load_input(b, 4, 32, nir_imm_int(b, 0),
@@ -2072,14 +2059,12 @@ static bool si_nir_lower_ps_color_input(nir_shader *nir, const union si_shader_k
 
          colors[i] =
             nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                        .io_semantics.location = VARYING_SLOT_COL0 + i,
-                                        .io_semantics.num_slots = 1);
+                                        .io_semantics.location = VARYING_SLOT_COL0 + i);
 
          if (key->ps.part.prolog.color_two_side) {
             back_color =
                nir_load_interpolated_input(b, 4, 32, barycentric, nir_imm_int(b, 0),
-                                           .io_semantics.location = VARYING_SLOT_BFC0 + i,
-                                           .io_semantics.num_slots = 1);
+                                           .io_semantics.location = VARYING_SLOT_BFC0 + i);
          }
       }
 
@@ -2122,8 +2107,7 @@ static bool si_nir_emit_polygon_stipple(nir_shader *nir)
    nir_def *pass = nir_i2b(b, bit);
    nir_discard_if(b, nir_inot(b, pass));
 
-   nir_metadata_preserve(impl, nir_metadata_control_flow);
-   return true;
+   return nir_progress(true, impl, nir_metadata_control_flow);
 }
 
 bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *shader)
@@ -2132,16 +2116,13 @@ bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *sha
       shader->info.shared_size > 0 && sscreen->options.clear_lds;
 }
 
-static bool clamp_shadow_comparison_value(nir_builder *b, nir_instr *instr, void *state)
+static bool clamp_shadow_comparison_value(nir_builder *b, nir_tex_instr *tex,
+                                          void *state)
 {
-   if (instr->type != nir_instr_type_tex)
-      return false;
-
-   nir_tex_instr *tex = nir_instr_as_tex(instr);
    if (!tex->is_shadow)
       return false;
 
-   b->cursor = nir_before_instr(instr);
+   b->cursor = nir_before_instr(&tex->instr);
 
    int samp_index = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
    int comp_index = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
@@ -2176,9 +2157,8 @@ static bool si_nir_clamp_shadow_comparison_value(nir_shader *nir)
     * Z24 anymore. Do it manually here for GFX8-9; GFX10 has
     * an explicitly clamped 32-bit float format.
     */
-   return nir_shader_instructions_pass(nir, clamp_shadow_comparison_value,
-                                       nir_metadata_control_flow,
-                                       NULL);
+   return nir_shader_tex_pass(nir, clamp_shadow_comparison_value,
+                              nir_metadata_control_flow, NULL);
 }
 
 static void
@@ -2519,13 +2499,28 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
    }
 
    NIR_PASS_V(nir, nir_divergence_analysis); /* required by ac_nir_flag_smem_for_loads */
+   /* This is required by ac_nir_scalarize_overfetching_loads_callback. */
    NIR_PASS(progress, nir, ac_nir_flag_smem_for_loads, sel->screen->info.gfx_level,
-            !sel->info.base.use_aco_amd, true);
+            !sel->info.base.use_aco_amd, false);
+   /* Scalarize overfetching loads, so that we don't load more components than necessary.
+    * Adjacent loads will be re-vectorized with a conservative overfetching limit.
+    */
    NIR_PASS(progress, nir, nir_lower_io_to_scalar,
             nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_mem_global,
             ac_nir_scalarize_overfetching_loads_callback, &sel->screen->info.gfx_level);
+   /* Scalarize shared memory ops to get ds_load_2addr/ds_store_2addr more often.
+    * If we don't do that, we might get pairs of ds_load_2addr + ds_load for vec3 loads, etc.
+    */
+   NIR_PASS(progress, nir, nir_lower_io_to_scalar, nir_var_mem_shared, NULL, NULL);
    NIR_PASS(progress, nir, si_nir_lower_resource, shader, &ctx->args);
 
+   /* This must be done before load/store vectorization to lower 16-bit SMEM loads to 32 bits,
+    * so that they can be vectorized as 32-bit loads. 16-bit loads are never vectorized.
+    */
+   NIR_PASS(progress, nir, ac_nir_lower_mem_access_bit_sizes,
+            sel->screen->info.gfx_level, !nir->info.use_aco_amd);
+
+   /* Load/store vectorization requires that offset computations are optimized. */
    if (progress) {
       si_nir_opts(sel->screen, nir, false);
       progress = false;
@@ -2542,6 +2537,8 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
                 */
                .has_shared2_amd = sel->screen->info.gfx_level >= GFX7,
             });
+
+   /* This must be done again if 8-bit or 16-bit buffer stores were vectorized. */
    NIR_PASS(progress, nir, ac_nir_lower_mem_access_bit_sizes,
             sel->screen->info.gfx_level, !nir->info.use_aco_amd);
 
@@ -2621,6 +2618,11 @@ static void get_input_nir(struct si_shader *shader, struct si_nir_shader_ctx *ct
    ctx->nir = sel->nir ? sel->nir : (sel->nir_binary ? si_deserialize_shader(sel) : NULL);
    assert(ctx->nir);
 
+   if (sel->stage <= MESA_SHADER_GEOMETRY)
+      ctx->nir->info.use_aco_amd = shader->key.ge.use_aco;
+
+   assert(ctx->nir->info.use_aco_amd == si_shader_uses_aco(shader));
+
    if (unlikely(should_print_nir(ctx->nir))) {
       /* Modify the shader's name so that each variant gets its own name. */
       ctx->nir->info.name = ralloc_asprintf(ctx->nir, "%s-%08x", ctx->nir->info.name,
@@ -2644,6 +2646,7 @@ static void get_prev_stage_input_nir(struct si_shader *shader, struct si_linked_
       linked->producer_shader.key.ge.as_es = 1;
       linked->producer_shader.key.ge.as_ngg = key->ge.as_ngg;
    }
+   linked->producer_shader.key.ge.use_aco = key->ge.use_aco;
 
    linked->producer_shader.next_shader = shader;
    linked->producer_shader.key.ge.mono = key->ge.mono;
@@ -2735,7 +2738,7 @@ static void
 si_get_shader_variant_info(struct si_shader *shader, nir_shader *nir)
 {
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-   assert(shader->selector->info.base.use_aco_amd == nir->info.use_aco_amd);
+   assert(nir->info.use_aco_amd == si_shader_uses_aco(shader));
    const BITSET_WORD *sysvals = nir->info.system_values_read;
 
    /* ACO needs spi_ps_input_ena before si_init_shader_args. */
@@ -2911,7 +2914,11 @@ static void get_nir_shaders(struct si_shader *shader, struct si_linked_shaders *
    for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
       if (linked->shader[i].nir) {
          struct si_shader_info info;
+
+         /* Save and restore use_aco_amd because si_nir_scan_shader changes it. */
+         bool use_aco_amd = linked->shader[i].nir->info.use_aco_amd;
          si_nir_scan_shader(shader->selector->screen, linked->shader[i].nir, &info, true);
+         linked->shader[i].nir->info.use_aco_amd = use_aco_amd;
 
          shader->info.uses_vmem_load_other |= info.uses_vmem_load_other;
          shader->info.uses_vmem_sampler_or_bvh |= info.uses_vmem_sampler_or_bvh;
@@ -3101,6 +3108,7 @@ bool si_compile_shader(struct si_screen *sscreen, struct ac_llvm_compiler *compi
                                                   FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP64))
       float_mode &= ~V_00B028_FP_16_64_DENORMS;
 
+   assert(nir->info.use_aco_amd == si_shader_uses_aco(shader));
    ret =
 #if AMD_LLVM_AVAILABLE
       !nir->info.use_aco_amd ? si_llvm_compile_shader(sscreen, compiler, shader, &linked, debug) :
@@ -3297,8 +3305,11 @@ static bool si_shader_select_tcs_parts(struct si_screen *sscreen, struct ac_llvm
 {
    if (sscreen->info.gfx_level >= GFX9) {
       assert(shader->wave_size == 32 || shader->wave_size == 64);
-      unsigned index = shader->wave_size / 32 - 1;
-      shader->previous_stage = shader->key.ge.part.tcs.ls->main_shader_part_ls[index];
+      unsigned wave_size_index = shader->wave_size == 64;
+      shader->previous_stage =
+         shader->key.ge.part.tcs.ls->main_parts.named.ls[wave_size_index][shader->key.ge.use_aco];
+      assert(shader->previous_stage->key.ge.use_aco == si_shader_uses_aco(shader));
+      assert((shader->previous_stage->binary.type == SI_SHADER_BINARY_RAW) == si_shader_uses_aco(shader));
    }
 
    return true;
@@ -3313,11 +3324,14 @@ static bool si_shader_select_gs_parts(struct si_screen *sscreen, struct ac_llvm_
    if (sscreen->info.gfx_level >= GFX9) {
       if (shader->key.ge.as_ngg) {
          assert(shader->wave_size == 32 || shader->wave_size == 64);
-         unsigned index = shader->wave_size / 32 - 1;
-         shader->previous_stage = shader->key.ge.part.gs.es->main_shader_part_ngg_es[index];
+         unsigned wave_size_index = shader->wave_size == 64;
+         shader->previous_stage =
+            shader->key.ge.part.gs.es->main_parts.named.ngg_es[wave_size_index][shader->key.ge.use_aco];
       } else {
-         shader->previous_stage = shader->key.ge.part.gs.es->main_shader_part_es;
+         shader->previous_stage = shader->key.ge.part.gs.es->main_parts.named.es[shader->key.ge.use_aco];
       }
+      assert(shader->previous_stage->key.ge.use_aco == si_shader_uses_aco(shader));
+      assert((shader->previous_stage->binary.type == SI_SHADER_BINARY_RAW) == si_shader_uses_aco(shader));
    }
 
    return true;
@@ -3338,7 +3352,7 @@ static void si_get_ps_prolog_key(struct si_shader *shader, union si_shader_part_
    key->ps_prolog.colors_read = shader->info.ps_colors_read;
    key->ps_prolog.num_input_sgprs = shader->info.num_input_sgprs;
    key->ps_prolog.wqm =
-      info->base.fs.needs_quad_helper_invocations &&
+      info->base.fs.needs_coarse_quad_helper_invocations &&
       (key->ps_prolog.colors_read || key->ps_prolog.states.force_persp_sample_interp ||
        key->ps_prolog.states.force_linear_sample_interp ||
        key->ps_prolog.states.force_persp_center_interp ||

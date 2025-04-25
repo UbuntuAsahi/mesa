@@ -651,8 +651,6 @@ zink_init_compute_caps(struct zink_screen *screen)
 
    caps->address_bits = 64;
 
-   snprintf(caps->ir_target, sizeof(caps->ir_target), "nir");
-
    caps->grid_dimension = 3;
 
    caps->max_grid_size[0] = screen->info.props.limits.maxComputeWorkGroupCount[0];
@@ -1113,6 +1111,20 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    caps->post_depth_coverage = screen->info.have_EXT_post_depth_coverage;
 
+   caps->cl_gl_sharing = caps->dmabuf && screen->info.have_KHR_external_semaphore_fd;
+   switch (zink_driverid(screen)) {
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+      caps->linear_image_pitch_alignment = 1;
+      break;
+   /* AMD requires 256 */
+   case VK_DRIVER_ID_AMD_PROPRIETARY:
+   case VK_DRIVER_ID_MESA_RADV:
+   default:
+      caps->linear_image_pitch_alignment = 256;
+      break;
+   }
+   caps->linear_image_base_address_alignment = 1;
+
    caps->string_marker = screen->instance_info->have_EXT_debug_utils;
 
    caps->min_line_width =
@@ -1399,30 +1411,35 @@ zink_set_damage_region(struct pipe_screen *pscreen, struct pipe_resource *pres, 
 {
    struct zink_resource *res = zink_resource(pres);
 
-   for (unsigned i = 0; i < nrects; i++) {
-      int y = pres->height0 - rects[i].y - rects[i].height;
-      /* convert back to coord-based rects to use coordinate calcs */
-      struct u_rect currect = {
-         .x0 = res->damage.offset.x,
-         .y0 = res->damage.offset.y,
-         .x1 = res->damage.offset.x + res->damage.extent.width,
-         .y1 = res->damage.offset.y + res->damage.extent.height,
-      };
-      struct u_rect newrect = {
-         .x0 = rects[i].x,
-         .y0 = y,
-         .x1 = rects[i].x + rects[i].width,
-         .y1 = y + rects[i].height,
-      };
-      struct u_rect u;
-      u_rect_union(&u, &currect, &newrect);
-      res->damage.extent.width = u.y1 - u.y0;
-      res->damage.extent.height = u.x1 - u.x0;
-      res->damage.offset.x = u.x0;
-      res->damage.offset.y = u.y0;
+   if (nrects == 0) {
+      res->use_damage = false;
+      return;
    }
 
-   res->use_damage = nrects > 0;
+   struct pipe_box damage = rects[0];
+   for (unsigned i = 1; i < nrects; i++)
+      u_box_union_2d(&damage, &damage, &rects[i]);
+
+   /* The damage we get from EGL uses a lower-left origin but Vulkan uses
+    * upper-left so we need to flip it.
+    */
+   damage.y = pres->height0 - (damage.y + damage.height);
+
+   /* Intersect with the area of the resource */
+   struct pipe_box res_area;
+   u_box_origin_2d(pres->width0, pres->height0, &res_area);
+   u_box_intersect_2d(&damage, &damage, &res_area);
+
+   res->damage = (VkRect2D) {
+      .offset.x = damage.x,
+      .offset.y = damage.y,
+      .extent.width = damage.width,
+      .extent.height = damage.height,
+   };
+   res->use_damage = damage.x != 0 ||
+                     damage.y != 0 ||
+                     damage.width != res->base.b.width0 ||
+                     damage.height != res->base.b.height0;
 }
 
 static void
@@ -1662,7 +1679,7 @@ choose_pdev(struct zink_screen *screen, int64_t dev_major, int64_t dev_minor, ui
    VKSCR(GetPhysicalDeviceProperties)(screen->pdev, &screen->info.props);
 
    /* allow software rendering only if forced by the user */
-   if (!cpu && screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+   if (((!cpu || screen->driver_name_is_inferred) && screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)) {
       screen->pdev = VK_NULL_HANDLE;
       return;
    }
@@ -1745,7 +1762,7 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
    if (!zink_is_swapchain(res))
       return;
 
-   ctx = zink_tc_context_unwrap(pctx, screen->threaded);
+   ctx = zink_tc_context_unwrap(pctx);
 
    if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
       /* swapbuffers to an undefined surface: acquire and present garbage */
@@ -3363,6 +3380,8 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       /* determine if vis vram is roughly equal to total vram */
       if (biggest_vis_vram > biggest_vram * 0.9)
          screen->resizable_bar = true;
+      if (biggest_vis_vram >= 8ULL * 1024ULL * 1024ULL * 1024ULL)
+         screen->always_cached_upload = true;
    }
 
    setup_renderdoc(screen);

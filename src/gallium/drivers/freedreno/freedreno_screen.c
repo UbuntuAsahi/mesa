@@ -319,8 +319,6 @@ fd_init_compute_caps(struct fd_screen *screen)
 
    caps->address_bits = screen->gen >= 5 ? 64 : 32;
 
-   snprintf(caps->ir_target, sizeof(caps->ir_target), "ir3");
-
    caps->grid_dimension = 3;
 
    caps->max_grid_size[0] =
@@ -649,6 +647,8 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->max_texture_anisotropy = 16.0f;
    caps->max_texture_lod_bias = 15.0f;
+
+   caps->shader_clock = is_a6xx(screen);
 }
 
 static const void *
@@ -922,6 +922,9 @@ fd_screen_create(int fd,
 
    if (fd_device_version(dev) >= FD_VERSION_ROBUSTNESS)
       screen->has_robustness = true;
+
+   if (fd_pipe_get_param(screen->pipe, FD_UCHE_TRAP_BASE, &val))
+      screen->uche_trap_base = screen->gen >= 6 ? 0x1fffffffff000ull : 0ull;
 
    screen->has_syncobj = fd_has_syncobj(screen->dev);
 

@@ -160,7 +160,6 @@ visit_alu(nir_alu_instr *instr, struct divergence_state *state)
    return false;
 }
 
-
 /* On some HW uniform loads where there is a pending store/atomic from another
  * wave can "tear" so that different invocations see the pre-store value and
  * the post-store value even though they are loading from the same location.
@@ -282,6 +281,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_ring_attr_offset_amd:
    case nir_intrinsic_load_provoking_vtx_amd:
    case nir_intrinsic_load_sample_positions_pan:
+   case nir_intrinsic_load_shader_output_pan:
    case nir_intrinsic_load_workgroup_num_input_vertices_amd:
    case nir_intrinsic_load_workgroup_num_input_primitives_amd:
    case nir_intrinsic_load_pipeline_stat_query_enabled_amd:
@@ -617,6 +617,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_image_load:
    case nir_intrinsic_image_deref_load:
    case nir_intrinsic_bindless_image_load:
+   case nir_intrinsic_bindless_image_load_raw_nv:
    case nir_intrinsic_image_sparse_load:
    case nir_intrinsic_image_deref_sparse_load:
    case nir_intrinsic_bindless_image_sparse_load:
@@ -958,11 +959,21 @@ visit_tex(nir_tex_instr *instr, struct divergence_state *state)
          is_divergent |= src_divergent(instr->src[i].src, state) &&
                          instr->texture_non_uniform;
          break;
+      case nir_tex_src_offset:
+         instr->offset_non_uniform = src_divergent(instr->src[i].src, state);
+         is_divergent |= instr->offset_non_uniform;
+         break;
       default:
          is_divergent |= src_divergent(instr->src[i].src, state);
          break;
       }
    }
+
+   /* If the texture instruction skips helpers, that may add divergence even
+    * if none of the sources of the texture op diverge.
+    */
+   if (instr->skip_helpers)
+      is_divergent = true;
 
    instr->def.divergent = is_divergent;
    return is_divergent;
@@ -1452,7 +1463,7 @@ nir_divergence_analysis_impl(nir_function_impl *impl, nir_divergence_options opt
    /* Unless this pass is called with shader->options->divergence_analysis_options,
     * it invalidates nir_metadata_divergence.
     */
-   nir_metadata_preserve(impl, ~nir_metadata_divergence);
+   nir_progress(true, impl, ~nir_metadata_divergence);
 }
 
 void
@@ -1484,7 +1495,7 @@ nir_vertex_divergence_analysis(nir_shader *shader)
       nir_metadata_require(impl, nir_metadata_block_index);
       state.impl = impl;
       visit_cf_list(&impl->body, &state);
-      nir_metadata_preserve(impl, nir_metadata_all & ~nir_metadata_divergence);
+      nir_progress(true, impl, nir_metadata_all & ~nir_metadata_divergence);
    }
 }
 

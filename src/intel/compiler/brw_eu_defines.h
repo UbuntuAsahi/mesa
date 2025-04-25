@@ -115,14 +115,14 @@ enum ENUM_PACKED brw_horizontal_stride {
    BRW_HORIZONTAL_STRIDE_4 = 3,
 };
 
-enum ENUM_PACKED gfx10_align1_3src_src_horizontal_stride {
+enum ENUM_PACKED brw_align1_3src_src_horizontal_stride {
    BRW_ALIGN1_3SRC_SRC_HORIZONTAL_STRIDE_0 = 0,
    BRW_ALIGN1_3SRC_SRC_HORIZONTAL_STRIDE_1 = 1,
    BRW_ALIGN1_3SRC_SRC_HORIZONTAL_STRIDE_2 = 2,
    BRW_ALIGN1_3SRC_SRC_HORIZONTAL_STRIDE_4 = 3,
 };
 
-enum ENUM_PACKED gfx10_align1_3src_dst_horizontal_stride {
+enum ENUM_PACKED brw_align1_3src_dst_horizontal_stride {
    BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_1 = 0,
    BRW_ALIGN1_3SRC_DST_HORIZONTAL_STRIDE_2 = 1,
 };
@@ -193,6 +193,7 @@ enum opcode {
    BRW_OPCODE_CALL,
    BRW_OPCODE_RET,
    BRW_OPCODE_GOTO,
+   BRW_OPCODE_JOIN,
    BRW_OPCODE_WAIT,
    BRW_OPCODE_SEND,
    BRW_OPCODE_SENDC,
@@ -553,6 +554,16 @@ enum opcode {
    SHADER_OPCODE_MEMORY_LOAD_LOGICAL,
    SHADER_OPCODE_MEMORY_STORE_LOGICAL,
    SHADER_OPCODE_MEMORY_ATOMIC_LOGICAL,
+
+   /* Ends a block moving to the next one.  See brw_cfg for details. */
+   SHADER_OPCODE_FLOW,
+
+   /**
+    * Load a VGRF to generate an SSA value.
+    *
+    * Acts as a scheduling barrier.
+    */
+   SHADER_OPCODE_LOAD_REG,
 };
 
 enum fb_write_logical_srcs {
@@ -594,6 +605,8 @@ enum tex_logical_srcs {
    TEX_LOGICAL_SRC_SAMPLER_HANDLE,
    /** Texel offset for gathers */
    TEX_LOGICAL_SRC_TG4_OFFSET,
+   /** Texture offset */
+   TEX_LOGICAL_SRC_PACKED_OFFSET,
    /** REQUIRED: Number of coordinate components (as UD immediate) */
    TEX_LOGICAL_SRC_COORD_COMPONENTS,
    /** REQUIRED: Number of derivative components (as UD immediate) */
@@ -794,12 +807,12 @@ enum ENUM_PACKED brw_reg_file {
    UNIFORM, /* prog_data->params[reg] */
 };
 
-/* CNL adds Align1 support for 3-src instructions. Bit 35 of the instruction
+/* Align1 support for 3-src instructions. Bit 35 of the instruction
  * word is "Execution Datatype" which controls whether the instruction operates
  * on float or integer types. The register arguments have fields that offer
  * more fine control their respective types.
  */
-enum ENUM_PACKED gfx10_align1_3src_exec_type {
+enum ENUM_PACKED brw_align1_3src_exec_type {
    BRW_ALIGN1_3SRC_EXEC_TYPE_INT   = 0,
    BRW_ALIGN1_3SRC_EXEC_TYPE_FLOAT = 1,
 };
@@ -839,7 +852,7 @@ enum ENUM_PACKED brw_vertical_stride {
    BRW_VERTICAL_STRIDE_ONE_DIMENSIONAL = 0xF,
 };
 
-enum ENUM_PACKED gfx10_align1_3src_vertical_stride {
+enum ENUM_PACKED brw_align1_3src_vertical_stride {
    BRW_ALIGN1_3SRC_VERTICAL_STRIDE_0 = 0,
    BRW_ALIGN1_3SRC_VERTICAL_STRIDE_1 = 1,
    BRW_ALIGN1_3SRC_VERTICAL_STRIDE_2 = 1,
@@ -1161,37 +1174,29 @@ enum tgl_sync_function {
 };
 
 /**
- * Message target: Shared Function ID for where to SEND a message.
+ * Shared Function ID - which unit a SEND message targets.
  *
- * These are enumerated in the ISA reference under "send - Send Message".
- * In particular, see the following tables:
- * - G45 PRM, Volume 4, Table 14-15 "Message Descriptor Definition"
- * - Sandybridge PRM, Volume 4 Part 2, Table 8-16 "Extended Message Descriptor"
- * - Ivybridge PRM, Volume 1 Part 1, section 3.2.7 "GPE Function IDs"
+ * See the Tigerlake and Alchemist PRMs, Volume 2b: Command Reference:
+ * Enumerations, in the table under "SFID":
  */
-enum brw_message_target {
+enum brw_sfid {
    BRW_SFID_NULL                     = 0,
    BRW_SFID_SAMPLER                  = 2,
    BRW_SFID_MESSAGE_GATEWAY          = 3,
+   BRW_SFID_HDC2                     = 4,  /* Legacy Data Port 2 */
+   BRW_SFID_RENDER_CACHE             = 5,
    BRW_SFID_URB                      = 6,
-   BRW_SFID_THREAD_SPAWNER           = 7,
-   BRW_SFID_VME                      = 8,
+   BRW_SFID_THREAD_SPAWNER           = 7,  /* Gfx12.0 and earlier only */
+   BRW_SFID_BINDLESS_THREAD_DISPATCH = 7,
+   BRW_SFID_RAY_TRACE_ACCELERATOR    = 8,
+   BRW_SFID_HDC_READ_ONLY            = 9,  /* Read Only/Constant Data Cache */
+   BRW_SFID_HDC0                     = 10, /* Legacy Data Port 0 */
+   BRW_SFID_PIXEL_INTERPOLATOR       = 11,
+   BRW_SFID_HDC1                     = 12, /* Legacy Data Port 1 */
 
-   GFX6_SFID_DATAPORT_SAMPLER_CACHE  = 4,
-   GFX6_SFID_DATAPORT_RENDER_CACHE   = 5,
-   GFX6_SFID_DATAPORT_CONSTANT_CACHE = 9,
-
-   GFX7_SFID_DATAPORT_DATA_CACHE     = 10,
-   GFX7_SFID_PIXEL_INTERPOLATOR      = 11,
-   HSW_SFID_DATAPORT_DATA_CACHE_1    = 12,
-   HSW_SFID_CRE                      = 13,
-
-   GFX12_SFID_TGM                      = 13, /* Typed Global Memory */
-   GFX12_SFID_SLM                      = 14, /* Shared Local Memory */
-   GFX12_SFID_UGM                      = 15, /* Untyped Global Memory */
-
-   GEN_RT_SFID_BINDLESS_THREAD_DISPATCH = 7,
-   GEN_RT_SFID_RAY_TRACE_ACCELERATOR = 8,
+   BRW_SFID_TGM                      = 13, /* LSC: Typed Global Memory */
+   BRW_SFID_SLM                      = 14, /* LSC: Shared Local Memory */
+   BRW_SFID_UGM                      = 15, /* LSC: Untyped Global Memory */
 };
 
 #define GFX7_MESSAGE_TARGET_DP_DATA_CACHE     10
@@ -1579,7 +1584,9 @@ enum lsc_opcode {
    LSC_OP_ATOMIC_AND      = 24,
    LSC_OP_ATOMIC_OR       = 25,
    LSC_OP_ATOMIC_XOR      = 26,
-   LSC_OP_FENCE           = 31
+   LSC_OP_FENCE           = 31,
+   LSC_OP_LOAD_CMASK_MSRT     = 49,
+   LSC_OP_STORE_CMASK_MSRT    = 50
 };
 
 /*
@@ -1718,6 +1725,9 @@ enum PACKED xe2_lsc_cache_store {
    XE2_LSC_CACHE_STORE_L1UC_L3UC = 2,
    /* Override to L1 uncached and L3 cached */
    XE2_LSC_CACHE_STORE_L1UC_L3WB = 4,
+   /* From BSpec: 71167 for L1WT_L3UC and L1WT_L3WB:
+    * "L1 will be uncached rather than write-through."
+    */
    /* Override to L1 write-through and L3 uncached */
    XE2_LSC_CACHE_STORE_L1WT_L3UC = 6,
    /* Override to L1 write-through and L3 cached */

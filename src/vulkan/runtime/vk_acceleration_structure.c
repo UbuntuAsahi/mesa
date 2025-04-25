@@ -63,21 +63,6 @@ static const uint32_t ploc_spv[] = {
 #include "bvh/ploc_internal.spv.h"
 };
 
-VkDeviceAddress
-vk_acceleration_structure_get_va(const struct vk_acceleration_structure *accel_struct)
-{
-   VkBufferDeviceAddressInfo info = {
-      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-      .buffer = accel_struct->buffer,
-   };
-
-   VkDeviceAddress base_addr = accel_struct->base.device->dispatch_table.GetBufferDeviceAddress(
-      vk_device_to_handle(accel_struct->base.device), &info);
-
-   return base_addr + accel_struct->offset;
-}
-
-
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_CreateAccelerationStructureKHR(VkDevice _device,
                                          const VkAccelerationStructureCreateInfoKHR *pCreateInfo,
@@ -85,6 +70,7 @@ vk_common_CreateAccelerationStructureKHR(VkDevice _device,
                                          VkAccelerationStructureKHR *pAccelerationStructure)
 {
    VK_FROM_HANDLE(vk_device, device, _device);
+   VK_FROM_HANDLE(vk_buffer, buffer, pCreateInfo->buffer);
 
    struct vk_acceleration_structure *accel_struct = vk_object_alloc(
       device, pAllocator, sizeof(struct vk_acceleration_structure),
@@ -93,7 +79,7 @@ vk_common_CreateAccelerationStructureKHR(VkDevice _device,
    if (!accel_struct)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   accel_struct->buffer = pCreateInfo->buffer;
+   accel_struct->buffer = buffer;
    accel_struct->offset = pCreateInfo->offset;
    accel_struct->size = pCreateInfo->size;
 
@@ -1025,10 +1011,24 @@ vk_cmd_build_acceleration_structures(VkCommandBuffer commandBuffer,
    struct bvh_state *bvh_states = calloc(infoCount, sizeof(struct bvh_state));
 
    if (args->emit_markers) {
-      device->as_build_ops->begin_debug_marker(commandBuffer,
-                                               VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP,
-                                               "vkCmdBuildAccelerationStructuresKHR(%u)",
-                                               infoCount);
+      uint32_t num_of_blas = 0;
+      uint32_t num_of_tlas = 0;
+      for (uint32_t i = 0; i < infoCount; ++i) {
+         switch (pInfos[i].type) {
+         case VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR:
+            num_of_tlas++;
+            break;
+         case VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR:
+            num_of_blas++;
+            break;
+         default:
+            break;
+         }
+      }
+      ops->begin_debug_marker(commandBuffer,
+                              VK_ACCELERATION_STRUCTURE_BUILD_STEP_TOP,
+                              "vkCmdBuildAccelerationStructuresKHR() TLAS(%u) BLAS(%u)",
+                              num_of_tlas, num_of_blas);
    }
 
    for (uint32_t i = 0; i < infoCount; ++i) {
@@ -1168,11 +1168,19 @@ vk_cmd_build_acceleration_structures(VkCommandBuffer commandBuffer,
       vk_barrier_compute_w_to_indirect_compute_r(commandBuffer);
    }
 
-   if (args->emit_markers) {
+   /* Calculate number of leaves and internal nodes to encode */
+   uint32_t num_leaves = 0;
+   uint32_t num_internal_node = 0;
+   for ( uint32_t i = 0; i < infoCount; i++) {
+      num_leaves += bvh_states[i].leaf_node_count;
+      num_internal_node += bvh_states[i].internal_node_count;
+   }
+
+   if (args->emit_markers)
       device->as_build_ops->begin_debug_marker(commandBuffer,
                                                VK_ACCELERATION_STRUCTURE_BUILD_STEP_ENCODE,
-                                               "encode");
-   }
+                                               "encode_leaves=%u encode_ir_node=%u",
+                                               num_leaves, num_internal_node);
 
    for (unsigned pass = 0; pass < ARRAY_SIZE(ops->encode_as); pass++) {
       if (!ops->encode_as[pass] && !ops->update_as[pass])
@@ -1362,4 +1370,3 @@ vk_common_CopyAccelerationStructureToMemoryKHR(VkDevice _device,
    unreachable("Unimplemented");
    return vk_error(device, VK_ERROR_FEATURE_NOT_PRESENT);
 }
-
