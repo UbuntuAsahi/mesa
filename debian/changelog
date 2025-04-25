@@ -1,4 +1,4 @@
-mesa-asahi (25.1.0~git20250425.01ac84e-1~exp1) UNRELEASED; urgency=medium
+mesa-asahi (25.1.0~git20250425.01ac84e-1~exp1) experimental-bananas; urgency=medium
 
   * New upstream release
   * d/patches/gfxstream-*: remove (upstreamed)
@@ -6,7 +6,7 @@ mesa-asahi (25.1.0~git20250425.01ac84e-1~exp1) UNRELEASED; urgency=medium
   * d/mesa-vulkan-drivers.lintian-overrides: add libvulkan-gfxstream
     to package-name-doesnt-match-sonames
 
- -- NoisyCoil <noisycoil@tutanota.com>  Fri, 25 Apr 2025 18:25:57 +0200
+ -- NoisyCoil <noisycoil@tutanota.com>  Sat, 26 Apr 2025 01:39:15 +0200
 
 mesa-asahi (25.1.0~git20250221.67b507f-5) unstable-bananas; urgency=medium
 
