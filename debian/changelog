@@ -1,3 +1,9 @@
+mesa-asahi (25.1.0~git20250425.01ac84e-1~exp1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Fri, 25 Apr 2025 18:25:57 +0200
+
 mesa-asahi (25.1.0~git20250221.67b507f-5) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/25.0.3-1
