@@ -1,3 +1,9 @@
+mesa-asahi (25.1.0~git20250425.01ac84e-2) UNRELEASED; urgency=medium
+
+  * d/patches: add drisw-Avoid-crashing-when-swrast_loader-NULL.patch
+
+ -- NoisyCoil <noisycoil@tutanota.com>  Mon, 19 May 2025 09:55:20 +0200
+
 mesa-asahi (25.1.0~git20250425.01ac84e-1) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/25.0.5-1
