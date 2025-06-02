@@ -5,7 +5,7 @@ Maintainer: Debian Bananas Team <team+bananas@tracker.debian.org>
 Standards-Version: 4.1.4
 Build-Depends:
  debhelper-compat (= 13),
- directx-headers-dev (>= 1.614.1~) [linux-amd64 linux-arm64],
+ directx-headers-dev (>= 1.613.0) [linux-amd64 linux-arm64],
  flatbuffers-compiler [linux-arm64],
  glslang-tools [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  meson (>= 1.4.0),
@@ -20,7 +20,7 @@ Build-Depends:
  libxext-dev,
  libva-dev (>= 1.6.0) [linux-any] <!pkg.mesa.nolibva>,
  libvdpau-dev (>= 1.5) [linux-any],
- libvulkan-dev (>= 1.3.296.0~) [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
+ libvulkan-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  x11proto-dev,
  linux-libc-dev (>= 2.6.31) [linux-any],
  libx11-xcb-dev,
@@ -63,7 +63,7 @@ Build-Depends:
  llvm-spirv-19 [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x x32],
  libllvmspirvlib-19-dev [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  librust-paste-dev [amd64 arm64 armhf i386 ppc64 riscv64 x32],
- librust-syn-dev (>= 2.0.68) [amd64 arm64 armhf i386 ppc64 riscv64 x32],
+ librust-syn-dev (>= 2.0.48) [amd64 arm64 armhf i386 ppc64 riscv64 x32],
 Rules-Requires-Root: no
 Vcs-Git: https://salsa.debian.org/bananas-team/wip/mesa-asahi.git
 Vcs-Browser: https://salsa.debian.org/bananas-team/wip/mesa-asahi
@@ -241,7 +241,7 @@ Architecture: any
 Pre-Depends: ${misc:Pre-Depends}
 Depends:
  libgbm1 (= ${binary:Version}) [!hurd-any],
- libvulkan1 (>= 1.3.296.0~) [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
+ libvulkan1 [amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32],
  ${shlibs:Depends},
  ${misc:Depends}
 Multi-Arch: same
@@ -359,7 +359,7 @@ Section: libs
 Architecture: amd64 arm64 armel armhf i386 loong64 mips64el powerpc ppc64 ppc64el riscv64 s390x sparc64 x32
 Pre-Depends: ${misc:Pre-Depends}
 Depends:
- libvulkan1 (>= 1.3.296.0~),
+ libvulkan1,
  ${shlibs:Depends},
  ${misc:Depends}
 Provides: vulkan-icd
