@@ -1,11 +1,11 @@
-mesa-asahi (25.1.0~git20250425.01ac84e-3) UNRELEASED; urgency=medium
+mesa-asahi (25.1.0~git20250425.01ac84e-3) unstable-bananas; urgency=medium
 
   * Import packaging changes from debian/25.1.0-1
     - Sync dep versions
     - d/source: remove local-options
     - debian/patches: add etnaviv-add-support-for-texelfetch.patch
 
- -- NoisyCoil <noisycoil@tutanota.com>  Mon, 02 Jun 2025 10:11:06 +0200
+ -- NoisyCoil <noisycoil@tutanota.com>  Mon, 02 Jun 2025 10:34:17 +0200
 
 mesa-asahi (25.1.0~git20250425.01ac84e-2) unstable-bananas; urgency=medium
 
