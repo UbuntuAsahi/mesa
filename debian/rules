@@ -16,6 +16,9 @@ DEB_HOST_ARCH_CPU  ?= $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
 LLVM_VERSION = 19
 export PATH:=/usr/lib/llvm-$(LLVM_VERSION)/bin/:$(PATH)
 
+# use specific rustc path
+export RUSTC:=/usr/bin/rustc-1.82
+
 export DEB_BUILD_MAINT_OPTIONS=optimize=-lto
 
 DEB_CFLAGS_MAINT_APPEND := -Wall
