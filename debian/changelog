@@ -1,3 +1,9 @@
+mesa (25.1.0~pre20250425.01ac84e-3~ua0.25.04) plucky; urgency=medium
+
+  * Backport to Ubuntu 25.04
+
+ -- Tobias Heider <tobias.heider@canonical.com>  Sat, 05 Jul 2025 01:28:18 +0200
+
 mesa (25.1.0~pre20250425.01ac84e-3~ua0.24.04) noble; urgency=medium
 
   * Backport to Ubuntu 24.04
