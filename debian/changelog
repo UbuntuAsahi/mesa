@@ -1,3 +1,9 @@
+mesa (25.1.0~pre20250425.01ac84e-3~ua1.24.04) noble; urgency=medium
+
+  * Drop i386 from RUSTICL and NVD archs
+
+ -- Tobias Heider <me@tobhe.de>  Tue, 08 Jul 2025 02:13:49 +0200
+
 mesa (25.1.0~pre20250425.01ac84e-3~ua0.24.04) noble; urgency=medium
 
   * Backport to Ubuntu 24.04
